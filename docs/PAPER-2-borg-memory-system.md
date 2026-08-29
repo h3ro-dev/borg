@@ -37,7 +37,7 @@ into the CLI's docstring, is what makes an aggressive automation posture safe.
 | Harness | Read path | Write path |
 |---|---|---|
 | Claude Code | MCP server (scoped v2) + a fast prompt-time recall hook that injects relevant facts | SessionEnd capture hook: transcript tail → extraction → drop-filters → store |
-| Codex | Same MCP server registered per account profile (8 of 16 homes at census) | Lifecycle hook exists; deployment across conductor lanes was still 0-of-10 at census — recorded as an honest gap, not hidden |
+| Codex | Same MCP server registered per account profile (8 of 16 homes at census) | Lifecycle hook exists; deployment across conductor lanes was 0-of-10 at the morning census — and 7 seats were live with per-seat tokens by that same afternoon. Gaps this system records tend to get closed the day they're written down |
 | Grok | Same MCP server + a SessionStart inject file (Grok reads a file at start; the hook writes it) plus Grok's native memory config | The *same* SessionEnd capture binary Claude uses — one code path, two harnesses |
 
 Cross-harness notes also travel a deliberately dumb channel: a one-way file mirror and a
