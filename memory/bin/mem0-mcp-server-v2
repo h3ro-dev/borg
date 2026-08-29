@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+"""mem0 MCP server v2 — Studio0 shared memory with per-person scoped access.
+
+Same store and same tools as v1 (`mem0-mcp-server`). What is new is that every
+request is attributed to a *principal*, and every read is filtered to the scopes
+that principal is allowed to see.
+
+  data/mcp-tokens.json   token sha256 -> {name, allowed_scopes, write_scope}
+  data/mcp-token         v1's single token; auto-imported as the "james"
+                         principal with all scopes, so nothing breaks on cutover
+
+Scope model (see SCOPE-AUDIT.md and ACCESS.md):
+
+  personal:james   James only. THE DEFAULT. A row with no `scope` key is
+                   treated as personal:james, because MatchAny cannot match a
+                   missing field — default-closed is structural, not a policy
+                   the code has to remember.
+  team:project     internal product / engineering work
+  client:<slug>    per-client work, slugs from clients/registry.toml
+  person:<name>    a named teammate's own working context
+  ops              machines, fleet, tooling
+
+`allowed_scopes` accepts exact scopes, `client:*`, and `*` (everything, and
+that is the only value that also reveals unscoped rows).
+
+Run:
+  mem0-mcp-server-v2                 # stdio (local Studio0 client = james)
+  mem0-mcp-server-v2 --http 8766     # HTTP, bearer token required
+"""
+
+import os
+
+os.environ["MEM0_TELEMETRY"] = "false"
+
+import hashlib
+import importlib.machinery
+import json
+import re
+import secrets
+import sys
+import threading
+import time
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+BASE = BIN.parent
+CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BIN / "mem0ctl")).load_module()
+LIB = importlib.machinery.SourceFileLoader("mem0_scope_lib", str(BIN / "mem0_scope_lib.py")).load_module()
+LIFECYCLE = importlib.machinery.SourceFileLoader("mem0_lifecycle", str(BIN / "mem0-codex-hook")).load_module()
+
+from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+
+HTTP_MODE = "--http" in sys.argv
+TOKENS_F = BASE / "data/mcp-tokens.json"
+LEGACY_TOKEN_F = BASE / "data/mcp-token"
+USER = "james"
+HOOK_OFF = BASE / "HOOK_OFF"
+FLEET_STATE = BASE / "data/hook-runs/fleet-server"
+FLEET_LOG = BASE / "data/fleet-server.log"
+
+FULL = "*"
+
+
+# ------------------------------------------------------------- principals --
+
+
+class Principal:
+    def __init__(self, d: dict):
+        self.name = d["name"]
+        self.allowed = list(d.get("allowed_scopes") or [])
+        self.write_scope = d.get("write_scope") or LIB.SCOPE_PERSONAL
+        self.note = d.get("note", "")
+
+    @property
+    def full_access(self) -> bool:
+        return FULL in self.allowed
+
+    def concrete_scopes(self, clients: dict) -> list[str]:
+        """Expand globs into the exact scope strings a Qdrant MatchAny can use."""
+        out = set()
+        for s in self.allowed:
+            if s == FULL:
+                continue
+            if s == LIB.SCOPE_CLIENT_PREFIX + "*":
+                out.update(LIB.SCOPE_CLIENT_PREFIX + slug for slug in clients)
+            elif s.endswith(":*"):
+                # any other prefix glob: leave as-is, it matches nothing concrete
+                continue
+            else:
+                out.add(s)
+        return sorted(out)
+
+    def may_write(self, scope: str, clients: dict) -> bool:
+        return self.full_access or scope in self.concrete_scopes(clients)
+
+
+class TokenStore:
+    """sha256(token) -> Principal. Plaintext tokens are never stored or logged."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._lock = threading.Lock()
+        self.reload()
+
+    @staticmethod
+    def h(token: str) -> str:
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def reload(self):
+        with self._lock:
+            if not self.path.exists():
+                self._bootstrap()
+            doc = json.loads(self.path.read_text())
+            self.doc = doc
+            self.by_hash = {p["token_sha256"]: Principal(p) for p in doc.get("principals", [])}
+            self.by_name = {p["name"]: Principal(p) for p in doc.get("principals", [])}
+
+    def _bootstrap(self):
+        """First run: adopt v1's single token as the all-scopes `james` principal.
+
+        This is what makes cutover a no-op for every client that already holds
+        the existing token.
+        """
+        principals = []
+        if LEGACY_TOKEN_F.exists():
+            legacy = LEGACY_TOKEN_F.read_text().strip()
+            if legacy:
+                principals.append(
+                    {
+                        "name": "james",
+                        "token_sha256": self.h(legacy),
+                        "allowed_scopes": [FULL],
+                        "write_scope": LIB.SCOPE_PERSONAL,
+                        "created_mdt": CTL.now_mdt(),
+                        "note": "imported from data/mcp-token (v1 single-token) — unchanged, still valid",
+                    }
+                )
+        self.path.write_text(json.dumps({"version": 1, "principals": principals}, indent=2))
+        self.path.chmod(0o600)
+
+    def lookup(self, token: str) -> Principal | None:
+        want = self.h(token)
+        for h, p in self.by_hash.items():  # constant-time compare each candidate
+            if secrets.compare_digest(h, want):
+                return p
+        return None
+
+
+STORE = TokenStore(TOKENS_F)
+CLIENTS = LIB.load_clients()
+
+# stdio runs on Studio0 itself, under James's own account. There is no token to
+# present and no second party on the pipe, so it keeps v1 behaviour: full access.
+LOCAL_PRINCIPAL = Principal(
+    {"name": "james", "allowed_scopes": [FULL], "write_scope": LIB.SCOPE_PERSONAL, "note": "stdio/local"}
+)
+
+_auth = None
+if HTTP_MODE:
+    from fastmcp.server.auth import AccessToken, TokenVerifier
+
+    class ScopedBearerVerifier(TokenVerifier):
+        """Resolves a bearer token to a named principal and its scopes."""
+
+        async def verify_token(self, token: str):
+            p = STORE.lookup(token)
+            if p is None:
+                return None
+            return AccessToken(
+                token=token,
+                client_id=p.name,
+                scopes=list(p.allowed),
+                claims={"principal": p.name},
+            )
+
+    _auth = ScopedBearerVerifier()
+
+mcp = FastMCP("mem0", auth=_auth)
+_instances: dict[str, object] = {}
+_lock = threading.Lock()
+
+
+def M(model_key: str = "llama"):
+    with _lock:
+        if model_key not in _instances:
+            _instances[model_key] = CTL.get_memory(model_key)
+        return _instances[model_key]
+
+
+def who() -> Principal:
+    if not HTTP_MODE:
+        return LOCAL_PRINCIPAL
+    from fastmcp.server.dependencies import get_access_token
+
+    tok = get_access_token()
+    if tok is None:
+        raise ToolError("unauthenticated")
+    p = STORE.by_name.get(tok.client_id)
+    if p is None:
+        raise ToolError("unknown principal")
+    return p
+
+
+def fleet_log(status: str, **fields):
+    """Append metadata only. Never pass evidence or memory text."""
+    allowed = {"principal", "machine", "harness", "digest", "stored", "skipped", "rejected", "reason", "elapsed_ms"}
+    row = {"at": CTL.now_mdt(), "event": "lifecycle-capture", "status": status}
+    for key, value in fields.items():
+        if key in allowed and value is not None:
+            row[key] = value
+    try:
+        FLEET_LOG.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(FLEET_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+
+
+def lifecycle_records(records_json: str):
+    if len(records_json.encode("utf-8", errors="replace")) > 30000:
+        raise ToolError("evidence exceeds 30000 bytes")
+    try:
+        raw = json.loads(records_json)
+    except Exception as exc:
+        raise ToolError("invalid evidence JSON") from exc
+    if not isinstance(raw, list):
+        raise ToolError("evidence must be a list")
+    records = []
+    chars = 0
+    rejected = 0
+    seen = set()
+    for row in raw[:46]:
+        if not isinstance(row, dict):
+            rejected += 1
+            continue
+        ref = str(row.get("ref") or "")
+        kind = str(row.get("kind") or "")
+        text = str(row.get("text") or "")[:5000]
+        if not re.fullmatch(r"[UT]\d{1,3}", ref) or ref in seen or kind not in {"user", "tool"}:
+            rejected += 1
+            continue
+        if not text.strip() or LIFECYCLE.sensitive_reason(text):
+            rejected += 1
+            continue
+        if chars + len(text) > 26000:
+            rejected += 1
+            continue
+        seen.add(ref)
+        records.append({"ref": ref, "kind": kind, "text": text})
+        chars += len(text)
+    return records, rejected
+
+
+def lifecycle_receipt(principal: str, machine: str, harness: str, digest: str) -> Path:
+    key = hashlib.sha256(f"{principal}\0{machine}\0{harness}\0{digest}".encode()).hexdigest()
+    return FLEET_STATE / f"{key}.json"
+
+
+def read_filters(p: Principal, agent: str = "") -> dict:
+    """Filters for any read. For a scoped principal the `scope` MatchAny is what
+    enforces access: a row whose payload has no `scope` key cannot match it, so
+    unclassified rows stay James-only without needing a second rule."""
+    f = {"user_id": USER}
+    if agent:
+        f["agent_id"] = agent
+    if not p.full_access:
+        allowed = p.concrete_scopes(CLIENTS)
+        if not allowed:
+            raise ToolError(f"principal {p.name!r} has no readable scopes")
+        f["scope"] = allowed
+    # Canaries are lifecycle sentinels, never recall evidence.  Keep the
+    # server-side predicate even for full-access principals.
+    f["NOT"] = [{"is_canary": True}]
+    return f
+
+
+def scope_guard(p: Principal, rows: list) -> list:
+    """Fail-closed post-fetch check applied to EVERY recall surface.
+
+    Runs AFTER the vector-store filter: if a filter regression ever lets an
+    out-of-scope row through, it is dropped here instead of being returned.
+    Rows with no metadata.scope are personal:james and can never pass this
+    guard for a scoped principal (default-closed, structural).
+    """
+    rows = [
+        row for row in rows
+        if isinstance(row, dict)
+        and not (
+            row.get("is_canary") is True
+            or (row.get("metadata") or {}).get("is_canary") is True
+        )
+    ]
+    if p.full_access:
+        return rows
+    allowed = set(p.concrete_scopes(CLIENTS))
+    kept = []
+    for r in rows:
+        meta = (r.get("metadata") or {}) if isinstance(r, dict) else {}
+        if meta.get("scope") not in allowed:
+            continue  # out-of-scope OR unscoped -> dropped, never returned
+        kept.append(r)
+    return kept
+
+
+def _rows(res):
+    return res.get("results", res) if isinstance(res, dict) else res
+
+
+def _fmt(rows):
+    return json.dumps(
+        [
+            {
+                "memory": r.get("memory"),
+                "score": round(r["score"], 3) if isinstance(r.get("score"), (int, float)) else None,
+                "id": r.get("id"),
+                "agent": r.get("agent_id"),
+                "scope": (r.get("metadata") or {}).get("scope"),
+                "metadata": r.get("metadata"),
+            }
+            for r in rows
+        ],
+        default=str,
+        ensure_ascii=False,
+    )
+
+
+# ------------------------------------------------------------------ tools --
+
+
+@mcp.tool
+def memory_search(query: str, limit: int = 5, agent: str = "") -> str:
+    """Search Studio0 shared memory by meaning (works with zero keyword overlap).
+    Returns facts with relevance scores, ids, and metadata; corpus-seeded rows
+    carry a source file path in metadata for full detail. Use this FIRST when
+    you need an operational fact, a prior decision, a preference, or a pointer
+    into the memory corpus. Results are limited to the scopes your token allows."""
+    p = who()
+    return _fmt(scope_guard(p, _rows(M().search(query, top_k=limit, filters=read_filters(p, agent)))))
+
+
+@mcp.tool
+def memory_add(text: str, agent: str = "", run_id: str = "", raw: bool = False, scope: str = "") -> str:
+    """Store a durable fact in Studio0 shared memory. One plain sentence per
+    fact works best. NEVER store credentials, tokens, cookies, client personal
+    data (emails/phones/addresses), or dollar amounts. Set raw=true to store
+    verbatim (skips LLM distillation). Pass your agent name in `agent`.
+    `scope` defaults to your own write scope; you may only name a scope your
+    token already allows."""
+    p = who()
+    target = scope or p.write_scope
+    if not p.may_write(target, CLIENTS):
+        raise ToolError(f"principal {p.name!r} may not write scope {target!r}")
+
+    def do(model_key):
+        return M(model_key).add(
+            [{"role": "user", "content": text}],
+            user_id=USER,
+            agent_id=agent or None,
+            run_id=run_id or None,
+            metadata={
+                "added_mdt": CTL.now_mdt(),
+                "source": "mcp",
+                "scope": target,
+                "written_by": p.name,
+            },
+            infer=not raw,
+        )
+
+    try:
+        res, used = do("qwen"), "qwen"
+    except Exception:
+        res, used = do("llama"), "llama"
+    events = _rows(res)
+    if not events:
+        return json.dumps(
+            {
+                "model": CTL.MODELS[used],
+                "events": [],
+                "scope": target,
+                "note": "no memory change — extractor found nothing new; retry with raw=true to store verbatim",
+            }
+        )
+    return json.dumps({"model": CTL.MODELS[used], "scope": target, "events": events}, default=str, ensure_ascii=False)
+
+
+@mcp.tool
+def memory_lifecycle_capture(
+    records_json: str,
+    session: str,
+    cwd: str,
+    machine: str,
+    harness: str,
+    digest: str,
+    completed: bool = True,
+    dry_run: bool = False,
+) -> str:
+    """Capture durable, supported facts from redacted lifecycle evidence.
+
+    This tool is for the fleet hook only. It rechecks evidence before the
+    existing Studio0 extractor and store run. It never accepts assistant text.
+    """
+    p = who()
+    machine = re.sub(r"[^A-Za-z0-9._-]+", "_", machine)[:80] or "unknown"
+    harness = re.sub(r"[^A-Za-z0-9._-]+", "_", harness)[:40] or "unknown"
+    session = re.sub(r"[^A-Za-z0-9._-]+", "_", session)[:180] or "unknown"
+    if harness not in {"codex", "claude", "grok"}:
+        raise ToolError("unsupported harness")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ToolError("invalid evidence digest")
+    if HOOK_OFF.exists():
+        return json.dumps({"status": "KILL_SWITCH"})
+    records, pre_rejected = lifecycle_records(records_json)
+    computed = hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+    if computed != digest:
+        fleet_log("REJECT", principal=p.name, machine=machine, harness=harness, digest=digest[:16], reason="digest-mismatch", rejected=pre_rejected)
+        raise ToolError("evidence digest mismatch after safety filter")
+    if not completed:
+        return json.dumps({"status": "SKIP_INTERRUPTED", "rejected": pre_rejected})
+    if dry_run:
+        return json.dumps({"status": "PASS_DRY_RUN", "records": len(records), "rejected": pre_rejected})
+    receipt = lifecycle_receipt(p.name, machine, harness, digest)
+    if receipt.exists():
+        return json.dumps({"status": "SKIP_DUP"})
+    if not records:
+        LIFECYCLE.atomic_json(receipt, {"status": "empty", "digest": digest, "principal": p.name, "machine": machine, "harness": harness, "at": CTL.now_mdt()})
+        return json.dumps({"status": "PASS_EMPTY", "stored": 0, "rejected": pre_rejected})
+
+    target_scope = p.write_scope
+    if not p.may_write(target_scope, CLIENTS):
+        raise ToolError("principal write scope is not allowed")
+    t0 = time.monotonic()
+    try:
+        candidates = LIFECYCLE.default_extractor(records)
+        memory = M()
+        agent_id = f"{harness}-hook:{machine}"
+        run_id = f"fleet:{p.name}:{session}:{digest[:24]}"
+        existing = LIFECYCLE.existing_run_rows(memory, run_id)
+        existing_texts = [LIFECYCLE.row_text(row) for row in existing]
+        stored = 0
+        skipped = 0
+        rejected = pre_rejected
+        for candidate in candidates[:8]:
+            valid, _reason = LIFECYCLE.validate_candidate(candidate, records)
+            if not valid:
+                rejected += 1
+                continue
+            fact = str(candidate.get("fact") or candidate.get("memory") or "").strip()
+            if LIFECYCLE.near_duplicate(fact, existing_texts):
+                skipped += 1
+                continue
+            try:
+                similar = scope_guard(p, LIFECYCLE.unwrap_rows(memory.search(
+                    fact, top_k=3,
+                    filters={"user_id": USER, "agent_id": agent_id, "scope": target_scope, "NOT": [{"is_canary": True}]},
+                    threshold=0.93,
+                )))
+            except Exception:
+                similar = []
+            if any(
+                LIFECYCLE.near_duplicate(fact, [LIFECYCLE.row_text(row)])
+                or (isinstance(row.get("score"), (int, float)) and float(row["score"]) >= 0.97)
+                for row in similar
+            ):
+                skipped += 1
+                continue
+            memory.add(
+                [{"role": "user", "content": fact}],
+                user_id=USER,
+                agent_id=agent_id,
+                run_id=run_id,
+                metadata={
+                    "added_mdt": CTL.now_mdt(),
+                    "source": f"{harness}-session-hook",
+                    "scope": target_scope,
+                    "written_by": p.name,
+                    "machine": machine,
+                    "cwd": cwd,
+                    "capture_digest": digest,
+                    "kind": str(candidate.get("kind") or "fact"),
+                    "support_refs": [str(ref) for ref in candidate.get("support") or []],
+                },
+                infer=False,
+            )
+            existing_texts.append(fact)
+            stored += 1
+    except Exception:
+        fleet_log("FAIL_OPEN", principal=p.name, machine=machine, harness=harness, digest=digest[:16], reason="service-unavailable", elapsed_ms=int((time.monotonic() - t0) * 1000))
+        return json.dumps({"status": "FAIL_OPEN"})
+
+    LIFECYCLE.atomic_json(receipt, {
+        "status": "complete", "digest": digest, "principal": p.name,
+        "machine": machine, "harness": harness, "run_id": run_id,
+        "stored": stored, "skipped": skipped, "rejected": rejected,
+        "at": CTL.now_mdt(),
+    })
+    fleet_log("PASS", principal=p.name, machine=machine, harness=harness, digest=digest[:16], stored=stored, skipped=skipped, rejected=rejected, elapsed_ms=int((time.monotonic() - t0) * 1000))
+    return json.dumps({"status": "PASS", "stored": stored, "skipped": skipped, "rejected": rejected})
+
+
+@mcp.tool
+def memory_list(limit: int = 20, agent: str = "") -> str:
+    """List stored memories you are allowed to see (up to `limit`)."""
+    p = who()
+    return _fmt(scope_guard(p, _rows(M().get_all(filters=read_filters(p, agent), top_k=limit))))
+
+
+@mcp.tool
+def memory_delete(memory_id: str) -> str:
+    """Delete one memory by its id. You may only delete a row you can read."""
+    p = who()
+    if not p.full_access:
+        q = LIB.qdrant()
+        pts = q.retrieve(LIB.COLLECTION, ids=[memory_id], with_payload=True)
+        if not pts:
+            raise ToolError("not found")
+        row_scope = (pts[0].payload or {}).get("scope")
+        if row_scope not in p.concrete_scopes(CLIENTS):
+            raise ToolError("not found")  # do not confirm existence out of scope
+    M().delete(memory_id)
+    return json.dumps({"deleted": memory_id})
+
+
+@mcp.tool
+def memory_stats() -> str:
+    """Count the memories visible to you and show the per-scope breakdown."""
+    p = who()
+    from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
+
+    q = LIB.qdrant()
+    must = [FieldCondition(key="user_id", match=MatchValue(value=USER))]
+    if not p.full_access:
+        must.append(FieldCondition(key="scope", match=MatchAny(any=p.concrete_scopes(CLIENTS))))
+    flt = Filter(must=must, must_not=[FieldCondition(key="is_canary", match=MatchValue(value=True))])
+    total = q.count(LIB.COLLECTION, count_filter=flt, exact=True).count
+    by_scope = {}
+    try:
+        for hit in q.facet(LIB.COLLECTION, key="scope", facet_filter=flt, limit=200, exact=True).hits:
+            by_scope[str(hit.value)] = hit.count
+    except Exception:
+        pass
+    unscoped = total - sum(by_scope.values())
+    if unscoped > 0:
+        by_scope["(unscoped — James only)"] = unscoped
+    return json.dumps({"principal": p.name, "visible": total, "by_scope": by_scope})
+
+
+@mcp.tool
+def memory_whoami() -> str:
+    """Report which principal this token maps to and which scopes it can read."""
+    p = who()
+    return json.dumps(
+        {
+            "principal": p.name,
+            "allowed_scopes": p.allowed,
+            "effective_read_scopes": "ALL (including unscoped)" if p.full_access else p.concrete_scopes(CLIENTS),
+            "write_scope": p.write_scope,
+        }
+    )
+
+
+if __name__ == "__main__":
+    if HTTP_MODE:
+        i = sys.argv.index("--http")
+        port = int(sys.argv[i + 1]) if len(sys.argv) > i + 1 and sys.argv[i + 1].isdigit() else 8765
+        mcp.run(transport="http", host="127.0.0.1", port=port)
+    else:
+        # Parent-death watchdog (leak fix 2026-08-28): stdio children must die
+        # with their client. 679 orphans were measured holding 13.7 GB after
+        # clients (codex conductors, hermes roles) exited without closing the
+        # pipe. Exit only when our PPID *changes* to 1 — a process launchd
+        # started with PPID 1 from birth is a service and never trips this.
+        import threading, time as _time
+
+        _birth_ppid = os.getppid()
+        if _birth_ppid != 1:
+            def _watch_parent():
+                while True:
+                    if os.getppid() == 1:
+                        os._exit(0)
+                    _time.sleep(15)
+
+            threading.Thread(target=_watch_parent, daemon=True).start()
+        mcp.run()

@@ -1,0 +1,910 @@
+#!/usr/bin/env python3
+"""Nightly dream — the memory system's update-and-revise cycle (03:30 MDT).
+
+Phases (each logged to data/dream.log, each skippable):
+  1. seed      — refresh the corpus index (new/changed memory files, codex registry)
+  2. threads   — incremental chat-thread ingestion (bounces off lock if backlog run is live)
+  3. email     — incremental mailbox ingestion (same lock behavior)
+  4. consolidate — merge near-duplicates (>=0.90 cosine)
+  5. revise    — the dream proper: review related-but-not-duplicate clusters
+                 (0.75-0.90) for contradictions/supersession; newest wins;
+                 merge or retire with every action logged
+  6. digest    — write data/DREAM-LATEST.md morning report
+
+Optional: --with-luna adds one batched gpt-5.6-luna curation lane (codex exec).
+Kill switch: touch ~/Library/Memory/mem0/DREAM_OFF
+"""
+
+import os
+
+os.environ["MEM0_TELEMETRY"] = "false"
+
+import argparse
+import importlib.machinery
+import json
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+BIN = BASE / "bin"
+DATA = BASE / "data"
+CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BIN / "mem0ctl")).load_module()
+SAFETY = importlib.machinery.SourceFileLoader(
+    "mem0_dream_safety", str(BIN / "mem0_dream_safety.py")
+).load_module()
+
+LOG_F = Path(os.environ.get("MEM0_DREAM_LOG", str(DATA / "dream.log")))
+STATE_F = DATA / "dream-state.json"
+REPORT_F = DATA / "DREAM-LATEST.md"
+
+
+def log(msg):
+    with open(LOG_F, "a") as f:
+        f.write(f"{CTL.now_mdt()} {msg}\n")
+    print(msg, flush=True)
+
+
+def _qdrant_json(method, path, body=None, timeout_s=20):
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(
+        os.environ.get("MEM0_QDRANT_URL", "http://127.0.0.1:6333").rstrip("/") + path,
+        data=data,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method=method,
+    )
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def qdrant_client():
+    """Production remains 127.0.0.1:6333; URL override is isolated-test only."""
+    from qdrant_client import QdrantClient
+
+    url = os.environ.get("MEM0_QDRANT_URL")
+    return QdrantClient(url=url) if url else QdrantClient(host="127.0.0.1", port=6333, timeout=120)
+
+
+def qdrant_snapshot_preflight():
+    """Create the required collection snapshot before any destructive stage."""
+    try:
+        payload = _qdrant_json("POST", "/collections/studio0/snapshots", timeout_s=180)  # 508MB snapshot measured ~23s; 20s default timed out 2026-08-28
+        result = payload.get("result") if isinstance(payload, dict) else None
+        name = result.get("name") if isinstance(result, dict) else None
+        if not name:
+            raise RuntimeError("snapshot response carried no result.name")
+        log(f"QDRANT-SNAPSHOT-PASS collection=studio0 snapshot={name}")
+        return str(name)
+    except Exception as exc:
+        log(f"QDRANT-SNAPSHOT-FAILED collection=studio0 destructive=NOT_RUN error={type(exc).__name__}: {str(exc)[:200]}")
+        return None
+
+
+def check_canaries():
+    """Verify every seeded canary's immutable lifecycle state at Dream end."""
+    q = qdrant_client()
+    points = []
+    for point in CTL.scroll_all(q, "studio0", with_payload=True, with_vectors=False):
+        payload = point.payload or {}
+        if payload.get("is_canary") is True:
+            points.append({"id": str(point.id), "payload": payload})
+    scopes = sorted({str(point["payload"].get("scope")) for point in points if point["payload"].get("scope")})
+    expected = {row["id"] for row in SAFETY.canary_rows(scopes)} if len(scopes) >= 2 else set()
+    present = {point["id"] for point in points}
+    violations = SAFETY.check_canary_payloads(points)
+    if not expected:
+        violations.append("no complete two-scope canary seed present")
+    else:
+        violations.extend(f"{pid}:missing" for pid in sorted(expected - present))
+    if violations:
+        log(f"CANARY-FAIL count={len(violations)} detail={' | '.join(violations[:12])}")
+        return False, len(points), len(violations)
+    log(f"CANARY-PASS points={len(points)} scopes={len(scopes)}")
+    return True, len(points), 0
+
+
+def run_step(name, cmd, timeout_s):
+    t0 = time.time()
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        tail = (r.stdout or r.stderr or "").strip().splitlines()[-1:] or [""]
+        log(f"STEP {name}: rc={r.returncode} {time.time()-t0:.0f}s :: {tail[0][:160]}")
+    except subprocess.TimeoutExpired:
+        log(f"STEP {name}: TIMEOUT after {timeout_s}s (left running work for tomorrow)")
+    except Exception as e:
+        log(f"STEP {name}: ERROR {e}")
+
+
+def store_counts():
+    q = qdrant_client()
+    by_agent, organic, total, live = {}, 0, 0, 0
+    statuses = {CTL.TOMBSTONE_STATUS: 0, CTL.DECAY_STATUS: 0}
+    for p in CTL.scroll_all(q, "studio0", with_payload=True, with_vectors=False):
+        total += 1
+        pay = p.payload or {}
+        a = pay.get("agent_id") or "(none)"
+        by_agent[a] = by_agent.get(a, 0) + 1
+        if pay.get("run_id") != "corpus-seed":
+            organic += 1
+        status = pay.get("status")
+        if status in statuses:
+            statuses[status] += 1
+        else:
+            live += 1
+    return total, by_agent, organic, statuses, live
+
+
+def novelty_skip_count():
+    path = DATA / "novelty-skipped.jsonl"
+    if not path.exists():
+        return 0
+    with open(path, errors="ignore") as handle:
+        return sum(1 for line in handle if line.strip())
+
+
+def staleness_ratio():
+    audits = sorted(DATA.glob("staleness-audit-*.jsonl"))
+    if not audits:
+        return "UNKNOWN"
+    counts = {"stale": 0, "current": 0, "unverifiable": 0}
+    with open(audits[-1], errors="ignore") as handle:
+        for line in handle:
+            try:
+                verdict = json.loads(line).get("verdict")
+            except Exception:
+                continue
+            if verdict in counts:
+                counts[verdict] += 1
+    judged = sum(counts.values())
+    return f"{counts['stale'] / judged:.1%} ({counts['stale']}/{judged}; {audits[-1].name})" if judged else "UNKNOWN"
+
+
+REVISE_LO, REVISE_HI = 0.75, 0.90  # related-but-not-duplicate band (unchanged)
+
+# The old character listing cap remains a secondary circuit breaker only.  The
+# shared controller tokenizes the FULL serialized prompt first, then splits or
+# quarantines without truncating any row text.
+REVISE_SECONDARY_MAX_LISTING_CHARS = SAFETY.SECONDARY_MAX_SERIALIZED_CHARS
+
+
+def _serialize_revise_prompt(rows):
+    """Return the complete REVISE prompt; this exact string is token-admitted."""
+    listing = "\n".join(
+        f"{k}. ({r['date']}) [{r['id']}] {r['text']}"
+        for k, r in enumerate(rows, 1)
+    )
+    return (
+        "These memory notes are related. Decide if they contradict or supersede each other.\n"
+        "Rules: the newest date wins; an explicit correction wins over the original; distinct facts stay.\n"
+        'Reply ONLY with JSON: {"action":"keep"} OR {"action":"merge","text":"<one merged current fact>","retire_ids":["<id>",...]} '
+        'OR {"action":"retire","retire_ids":["<id>",...]}.\n'
+        + listing
+    )
+
+
+def _serialize_grok_batch_prompt(shards):
+    """Return the complete schema-constrained Grok batch request.
+
+    Every unit is an already admitted REVISE shard.  Numbering is stable for
+    the life of this REVISE run, so a verdict can never be applied to another
+    shard merely because batches were split or re-packed.
+    """
+    listing = []
+    for shard in shards:
+        rows = "\n".join(
+            f"  {k}. ({row['date']}) [{row['id']}] {row['text']}"
+            for k, row in enumerate(shard["rows"], 1)
+        )
+        listing.append(f"SHARD {shard['shard']} (scope={shard['scope']}):\n{rows}")
+    return (
+        "Judge each numbered memory shard independently. Decide whether notes within that shard "
+        "contradict or supersede each other. The newest date wins; an explicit correction wins "
+        "over the original; distinct facts stay. Never compare, merge, or retire across shards.\n"
+        "Reply ONLY with JSON matching the supplied schema. Return exactly one verdict for every "
+        "shard. Each verdict's shard number must be copied exactly. A merge needs text and one or "
+        "more retire_ids. A retire needs one or more retire_ids; do not retire every row.\n\n"
+        + "\n\n".join(listing)
+    )
+
+
+# FINDING A2: payload key that carries the namespace a row belongs to.
+SCOPE_KEY = "scope"
+
+
+def _row_scopes(q, ids):
+    """Map each loaded row id -> its scope namespace; None = legacy unscoped."""
+    want = set(ids)
+    found = {}
+    for p in CTL.scroll_all(q, "studio0", with_payload=True, with_vectors=False):
+        if p.id in want and p.id not in found:
+            found[p.id] = (p.payload or {}).get(SCOPE_KEY)
+            if len(found) == len(want):
+                break
+    return [found.get(i) for i in ids]
+
+
+
+# ------------------------------------------------------------- Legacy Ox judge --
+# Kept for explicit operator use and historical diagnosis. REVISE no longer
+# calls it: its latency profile is incompatible with a first-batch Grok circuit
+# breaker, so affected REVISE shards fall directly to the local qwen judge.
+OX_MODELS = ["opencode/x-preview-f-free", "openrouter/stealth/ox-alpha"]
+OX_MODEL = OX_MODELS[0]          # kept: existing references still resolve
+OX_DIR = BASE / "data" / "ox-judge"
+OX_TIMEOUT = 300          # generous: ~124s measured, and a slow answer is not a failure
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+GROK_BIN = str(Path.home() / ".grok/bin/grok")
+GROK_MODEL = "grok-4.6"
+GROK_JUDGE_TIMEOUT = 700  # 420 timed out 2 nights running in the 03:30-05:00 window; day runs measure 64-135s
+GROK_BATCH_TARGET_SHARDS = 10
+GROK_BATCH_MAX_CALLS = 5
+_BATCH_VERDICT_SCHEMA = json.dumps({
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "shard": {"type": "integer"},
+                    "action": {"type": "string", "enum": ["keep", "merge", "retire"]},
+                    "text": {"type": "string"},
+                    "retire_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["shard", "action"],
+            },
+        },
+    },
+    "required": ["verdicts"],
+})
+CURATION_DIR = BASE / "data" / "curation"
+
+
+def grok_judge(prompt):
+    """Ask Grok for one schema-constrained batch of REVISE shard verdicts.
+
+    This remains explicitly opt-in until a live schema proof can create a CLI
+    session. It is still invoked at most five times per night and always with
+    multiple shards. A failed process returns None;
+    a process that returns malformed JSON is represented by an empty mapping
+    so only its affected shards fall through to the local qwen judge.
+    """
+    if os.environ.get("DREAM_JUDGE_GROK", "1") != "1":
+        return None
+    try:
+        env = dict(os.environ, MEM0_CAPTURE_SKIP="1")
+        # --verbatim is load-bearing: without it the CLI offloads any large
+        # -p prompt to a file the schema-constrained single turn never reads,
+        # and the model returns a 1-verdict stub (measured 2026-08-28: 10
+        # shards inline = 64s with all 10 verdicts; offloaded = stub or
+        # 420s timeout). The override strips the CLI's agentic skill
+        # machinery, which otherwise competes with the judging task.
+        r = subprocess.run(
+            [GROK_BIN, "-p", prompt, "--verbatim", "--model", GROK_MODEL,
+             "--json-schema", _BATCH_VERDICT_SCHEMA,
+             "--system-prompt-override",
+             "You are a memory-curation judge. Follow the task instructions "
+             "in the user prompt exactly. Do not use tools. Reply only with "
+             "JSON matching the supplied schema.",
+             "--no-subagents", "--disable-web-search"],
+            capture_output=True, text=True, timeout=GROK_JUDGE_TIMEOUT, env=env, cwd=BASE)
+        if r.returncode != 0:
+            log(f"GROK-BATCH-ERROR rc={r.returncode}: {(r.stderr or '')[:120]}")
+            return None
+        out = _ANSI.sub("", r.stdout or "")
+        mjson = re.search(r"\{.*\}", out, re.S)
+        if not mjson:
+            log("GROK-BATCH-MALFORMED no-json-object")
+            return {}
+        try:
+            parsed = json.loads(mjson.group(0))
+        except json.JSONDecodeError:
+            log("GROK-BATCH-MALFORMED invalid-json")
+            return {}
+        if not isinstance(parsed, dict):
+            log("GROK-BATCH-MALFORMED non-object")
+            return {}
+        # --json-schema output arrives as a CLI envelope whose "text" field
+        # holds the schema-constrained JSON string (measured 2026-08-28).
+        # Accept both shapes so an output-format change never silently
+        # downgrades every shard to the fallback judge.
+        if "verdicts" not in parsed and isinstance(parsed.get("text"), str):
+            try:
+                inner = json.loads(parsed["text"])
+                if isinstance(inner, dict) and "verdicts" in inner:
+                    return inner
+            except json.JSONDecodeError:
+                log("GROK-BATCH-MALFORMED envelope-text-not-json")
+                return {}
+        return parsed
+    except subprocess.TimeoutExpired:
+        log(f"GROK-BATCH-TIMEOUT timeout={GROK_JUDGE_TIMEOUT}s")
+        return None
+    except Exception as e:  # noqa: BLE001 — a dead judge is a fallback, never a crash
+        log(f"GROK-BATCH-ERROR {type(e).__name__}: {str(e)[:100]}")
+        return None
+
+
+def _admit_grok_batches(shards, *, log=log):
+    """Pack admitted REVISE shards into <=10-shard, 48k-token Grok batches.
+
+    The shared controller owns the final boundary: it recursively bisects a
+    target-sized group when its fully serialized batch prompt exceeds Grok's
+    envelope. A resulting singleton is deliberately not sent to Grok because
+    it would reintroduce the per-shard lifecycle cost; it falls back to qwen.
+    """
+    batches = []
+    for start in range(0, len(shards), GROK_BATCH_TARGET_SHARDS):
+        batches.extend(SAFETY.admit_serialized_prompt(
+            phase="REVISE-GROK-BATCH",
+            model=GROK_MODEL,
+            rows=shards[start:start + GROK_BATCH_TARGET_SHARDS],
+            render_prompt=_serialize_grok_batch_prompt,
+            log=log,
+            secondary_max_chars=REVISE_SECONDARY_MAX_LISTING_CHARS,
+        ))
+    return batches
+
+
+def _map_grok_batch_verdicts(response, shards):
+    """Return valid verdicts keyed by shard and a per-shard malformed reason."""
+    expected = {shard["shard"] for shard in shards}
+    mapped, bad = {}, {}
+    if not isinstance(response, dict) or not isinstance(response.get("verdicts"), list):
+        return mapped, {number: "malformed" for number in expected}
+    for item in response["verdicts"]:
+        if not isinstance(item, dict):
+            continue
+        number = item.get("shard")
+        if not isinstance(number, int) or isinstance(number, bool):
+            # A quoted-but-recognizable shard is malformed for that specific
+            # unit, rather than an unexplained omission of the unit.
+            if isinstance(number, str) and number.isdigit() and int(number) in expected:
+                bad[int(number)] = "malformed"
+            continue
+        if number not in expected:
+            continue
+        if number in mapped or number in bad:
+            mapped.pop(number, None)
+            bad[number] = "malformed"
+            continue
+        action = item.get("action")
+        text = item.get("text")
+        retire_ids = item.get("retire_ids")
+        if action not in {"keep", "merge", "retire"} or (text is not None and not isinstance(text, str)) or (
+            retire_ids is not None and (not isinstance(retire_ids, list) or not all(isinstance(row_id, str) for row_id in retire_ids))
+        ):
+            bad[number] = "malformed"
+            continue
+        verdict = {"action": action}
+        if text is not None:
+            verdict["text"] = text
+        if retire_ids is not None:
+            verdict["retire_ids"] = retire_ids
+        mapped[number] = verdict
+    for number in expected - set(mapped) - set(bad):
+        bad[number] = "missing"
+    return mapped, bad
+
+
+def qwen_judge(client, prompt):
+    """Run the existing local JSON judge path for one affected shard only."""
+    try:
+        response = client.chat(
+            model=CTL.MODELS["qwen"],
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0, "num_predict": 400},
+            format="json",
+        )
+        content = response["message"]["content"]
+        matched = re.search(r"\{.*\}", content, re.S)
+        verdict = json.loads(matched.group(0)) if matched else None
+        return verdict if isinstance(verdict, dict) else None
+    except Exception as exc:  # noqa: BLE001 — preserves the pre-batch skip behavior
+        log(f"QWEN-JUDGE-ERROR {type(exc).__name__}: {str(exc)[:100]}")
+        return None
+
+
+def _resolve_grok_batch(batch, client, *, skip_grok=False, skip_reason="grok-down"):
+    """Map batch verdicts, invoking qwen only for missing or malformed shards."""
+    response = None if skip_grok else grok_judge(batch.prompt)
+    grok_call_failed = not skip_grok and response is None
+    mapped, bad = _map_grok_batch_verdicts(response, batch.rows)
+    decisions = []
+    for shard in batch.rows:
+        number = shard["shard"]
+        verdict = mapped.get(number)
+        via = "grok-batch"
+        if verdict is None:
+            # A failed call (timeout/error -> None) is "grok-failed", not
+            # "malformed": no response existed to be malformed.
+            if skip_grok:
+                reason = skip_reason
+            elif grok_call_failed:
+                reason = "grok-failed"
+            else:
+                reason = bad.get(number, "missing")
+            log(f"JUDGE-FALLBACK shard={number} reason={reason} judge=qwen")
+            verdict = qwen_judge(client, shard["judge_prompt"])
+            via = "qwen"
+        decisions.append({"shard": number, "verdict": verdict, "via": via})
+    return decisions, grok_call_failed
+
+
+def _judge_shard_batches(batches, client):
+    """Run no more than five Grok batches, then resolve qwen fallbacks.
+
+    Once the first unreachable Grok batch reports failure, the rest of the
+    night never starts another expensive CLI session. Each affected shard still
+    has its own fast qwen fallback and normal verdict application downstream.
+    """
+    grok_down = os.environ.get("DREAM_JUDGE_GROK", "1") != "1"
+    if grok_down and batches:
+        log("GROK-BATCH-DISABLED -> qwen fallback")
+    grok_calls = 0
+    grok_cap_logged = False
+    decisions = []
+    for batch in batches:
+        if len(batch.rows) < 2:
+            resolved, _ = _resolve_grok_batch(batch, client, skip_grok=True, skip_reason="unbatchable")
+        elif grok_down:
+            resolved, _ = _resolve_grok_batch(batch, client, skip_grok=True)
+        elif grok_calls >= GROK_BATCH_MAX_CALLS:
+            if not grok_cap_logged:
+                log(f"GROK-BATCH-CAP calls={grok_calls} max={GROK_BATCH_MAX_CALLS} remaining -> qwen")
+                grok_cap_logged = True
+            resolved, _ = _resolve_grok_batch(batch, client, skip_grok=True, skip_reason="batch-cap")
+        else:
+            grok_calls += 1
+            resolved, grok_call_failed = _resolve_grok_batch(batch, client)
+            if grok_call_failed:
+                grok_down = True
+                log(f"GROK-DOWN batch={grok_calls} remaining -> qwen")
+        decisions.extend(resolved)
+    return decisions
+
+
+def _journal_decision(scope, sub, admission, via, verdict, applied, new_id=None):
+    """Append one full-evidence curation record per judged shard — the
+    training corpus for a future specialist memory-curation model (owner
+    order 2026-08-28). Full row text is deliberate: the future model must
+    see exactly what the judge saw. Append-only, never read by the dream."""
+    try:
+        CURATION_DIR.mkdir(parents=True, exist_ok=True)
+        row = {
+            "at": CTL.now_mdt(), "phase": "REVISE", "scope": scope,
+            "rows": [{"id": r["id"], "text": r["text"], "date": r.get("date")} for r in sub],
+            "tokens": getattr(admission.measurement, "tokens", None),
+            "envelope": getattr(admission, "envelope", None),
+            "judge": via, "verdict": verdict,
+            "applied": applied, "new_id": new_id,
+        }
+        with open(CURATION_DIR / f"decisions-{CTL.now_mdt()[:10]}.jsonl", "a") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001 — journaling must never fail the dream
+        log(f"  CURATION-JOURNAL-FAIL ({type(e).__name__}: {str(e)[:80]})")
+
+
+def _load_openrouter_key():
+    """launchd does NOT read ~/.zshenv, so a scheduled run would reach the
+    OpenRouter door with no key and fall through as if the door were shut —
+    the failure would look identical to a throttle. Read it from the shell
+    env file when the process env lacks it. The value is never logged."""
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return
+    f = Path.home() / ".zshenv"
+    try:
+        for line in f.read_text().splitlines():
+            if line.startswith("export OPENROUTER_API_KEY="):
+                os.environ["OPENROUTER_API_KEY"] = line.split("=", 1)[1].strip().strip('"\'')
+                return
+    except Exception:
+        pass
+
+
+def ox_judge(prompt):
+    """Ask Ox for a JSON verdict. Returns the parsed dict, or None if it could
+    not answer — never a partial or guessed verdict."""
+    _load_openrouter_key()
+    OX_DIR.mkdir(parents=True, exist_ok=True)
+    guard = OX_DIR / "opencode.json"
+    if not guard.exists():
+        src = Path.home() / "ox-fleet" / "guard-opencode.json"
+        if src.exists():
+            guard.write_text(src.read_text())
+        else:
+            return None                      # no guard, no run: never unguarded
+    for model in OX_MODELS:
+        try:
+            r = subprocess.run(
+                ["opencode", "run", "--pure", "--dir", str(OX_DIR), "-m", model, prompt],
+                capture_output=True, text=True, timeout=OX_TIMEOUT)
+        except Exception:
+            continue                         # this door is shut; try the next
+        out = _ANSI.sub("", r.stdout or "")
+        if "network_error" in out or "finish_reason" in out:
+            continue                         # throttled, not answered — next door
+        m = re.search(r"\{.*\}", out, re.S)
+        if not m:
+            continue
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            continue
+    return None                              # every door tried, none answered
+
+
+def revise(max_clusters, m, *, dry_run=False):
+    """Judge related-but-not-duplicate organic clusters for contradiction/supersession.
+
+    Counts skips. On 2026-08-23 every cluster was skipped because the judge
+    model returned HTTP 500 ("unknown renderer qwen3.8"), and the run still
+    wrote a clean DREAM-END with merged=0 retired=0 — which reads as "nothing
+    needed consolidating" when it meant "nothing COULD be". A failure that ends
+    with a success marker is the one that survives: the crash found the same
+    morning was fixed within hours because it was loud, while this had been
+    silently zeroing consolidation.
+    """
+    _skipped, _judged, _by_judge = [0], [0], {}
+    q = qdrant_client()
+    # Paginated stream (CTL.scroll_all) instead of one scroll(limit=100000):
+    # the offset is chained to exhaustion, and pages are converted to float32 as
+    # they arrive rather than holding ~48k qdrant Records (~1.2 GB) at once.
+    ids, texts, dates, V, scanned = CTL.load_organic(q, "james", date_keys=("thread_date", "added_mdt"))
+    if len(ids) < 2:
+        log(f"REVISE: not enough organic rows (scanned {scanned})")
+        return 0, 0
+    scopes = _row_scopes(q, ids)  # FINDING A2: per-row namespace lookup
+    unscoped = [i for i, s in enumerate(scopes) if s is None]
+    if unscoped:
+        log(f"REVISE guard: refusing {len(unscoped)} legacy row(s) with no '{SCOPE_KEY}' in payload")
+        for i in unscoped:
+            log(f"  REFUSE-UNSCOPED [{ids[i]}] {texts[i][:160]}")
+    # Seed-anchored clusters, not union-find. Single-linkage over this band
+    # chains A~B~C into one blob and produced the 1,073,002-token prompt that
+    # crashed the run on 2026-08-20; every member now has to clear REVISE_LO
+    # against the cluster seed, and no cluster may exceed CTL.CLUSTER_MAX.
+    # FINDING A2: clustering runs once per scope on disjoint vector slices, so
+    # no pair, seed anchor, or cluster can ever span two scope namespaces.
+    agg_stats = {"chain_links_refused": 0, "capped_clusters": 0, "capped_deferred": 0, "seed_check_failures": 0}
+    capped_all = {}
+    groups = []
+    for scope, rows_in_scope in sorted(
+        ((s, [i for i, x in enumerate(scopes) if x == s]) for s in set(scopes) if s is not None),
+        key=lambda kv: str(kv[0]),
+    ):
+        if len(rows_in_scope) < 2:
+            continue
+        # numpy fancy-index, NOT a list comprehension. pair_index() and
+        # cluster_star_anchored() both do `V.shape[0]` and matrix products on this, so
+        # a Python list raises "'list' object has no attribute 'shape'" and
+        # kills the whole run. That is the crash the DREAM-ABORT guard caught on
+        # 2026-08-23 — introduced by the per-scope slicing itself (FINDING A2),
+        # which is why the run had been green before scopes were added.
+        # V[rows_in_scope] returns a contiguous float32 array of the same rows.
+        sub_V = V[rows_in_scope]
+        I, J, W = CTL.pair_index(sub_V, REVISE_LO, REVISE_HI)
+        members, capped, stats = CTL.cluster_star_anchored(
+            sub_V, I, J, W, REVISE_LO,
+            anchor_order=CTL.newest_anchor_order(
+                [dates[i] for i in rows_in_scope], [ids[i] for i in rows_in_scope]
+            ),
+        )
+        del I, J, W
+        for k in agg_stats:
+            agg_stats[k] += int(stats.get(k, 0))
+        capped_all.update({rows_in_scope[seed]: n for seed, n in capped.items()})
+        for mem in members.values():
+            if len(mem) > 1:
+                groups.append(
+                    [{"id": ids[rows_in_scope[x]], "text": texts[rows_in_scope[x]],
+                      "date": dates[rows_in_scope[x]], "scope": scope} for x in mem]
+                )
+    del V
+    groups.sort(key=len, reverse=True)
+    cands = groups[:max_clusters]
+    log(f"REVISE: scanned {scanned} points, {len(ids)} organic rows, {len(unscoped)} unscoped refused, {len(groups)} clusters, judging {len(cands)} (cap {max_clusters})")
+    log(
+        f"REVISE guard: {agg_stats['chain_links_refused']} transitive links refused, "
+        f"{agg_stats['capped_clusters']} star shards hit the {CTL.MAX_ROWS}-row cap "
+        f"({agg_stats['capped_deferred']} rows form later shards), {agg_stats['seed_check_failures']} anchor-threshold failures"
+    )
+    for seed_idx, deferred in sorted(capped_all.items(), key=lambda kv: -kv[1])[:20]:
+        log(
+            f"  WARN runaway family: anchor [{ids[seed_idx]}] filled the {CTL.MAX_ROWS}-row cap, "
+            f"{deferred} direct neighbours will form later star shard(s) — {texts[seed_idx][:160]}"
+        )
+
+    # Phase A: preserve the existing per-shard admission and safety guards.
+    # It deliberately performs no model calls, so every admitted shard can be
+    # packed before Grok's expensive CLI/session lifecycle begins.
+    shards = []
+    for c in cands:
+        # FINDING A2 defense-in-depth: never judge or rewrite a group whose
+        # members do not share exactly one non-null scope.
+        grp_scopes = {r.get("scope") for r in c}
+        if None in grp_scopes or len(grp_scopes) != 1:
+            log(f"REVISE: REFUSING mixed/unscoped cluster {[r['id'] for r in c]} scopes={sorted(str(s) for s in grp_scopes)}")
+            continue
+        g_scope = next(iter(grp_scopes))
+        # Belt-and-braces row cap.  A breach is a loud refusal, never a slice.
+        if len(c) > CTL.MAX_ROWS:
+            log(f"REVISE: REFUSING impossible shard of {len(c)} rows (MAX_ROWS={CTL.MAX_ROWS})")
+            continue
+        # The single controller serializes every full request, measures it with
+        # the qwen tokenizer (or loudly marked estimate), and recursively
+        # splits it before either the Grok batch or local qwen can receive it.
+        admissions = SAFETY.admit_serialized_prompt(
+            phase="REVISE",
+            models=[GROK_MODEL, CTL.MODELS["qwen"]],
+            rows=c,
+            render_prompt=_serialize_revise_prompt,
+            log=log,
+            secondary_max_chars=REVISE_SECONDARY_MAX_LISTING_CHARS,
+        )
+        if not admissions:
+            log(f"REVISE: cluster of {len(c)} quarantined by TOKEN-ADMISSION — no model call")
+            _skipped[0] += 1
+            continue
+        for admission in admissions:
+            sub = list(admission.rows)
+            shards.append({
+                "shard": len(shards) + 1,
+                "scope": g_scope,
+                "rows": sub,
+                "judge_prompt": admission.prompt,
+                "admission": admission,
+            })
+
+    # Phase B: bounded logical batches target ten shards each (four calls for
+    # the normal 40-cluster run). The shared controller may split a heavy batch
+    # further, but no scheduled run is allowed to exceed five Grok processes.
+    batches = _admit_grok_batches(shards)
+    packed = {shard["shard"] for batch in batches for shard in batch.rows}
+    unpacked = [shard for shard in shards if shard["shard"] not in packed]
+    if unpacked:
+        # A one-shard batch that cannot fit even after Phase A is never sent to
+        # Grok: its per-call lifecycle cost is the exact behavior this wave
+        # removes. It will take the ordinary qwen path below.
+        log(f"GROK-BATCH-UNADMITTED shards={','.join(str(shard['shard']) for shard in unpacked)} -> qwen")
+        batches.extend(
+            SAFETY.PromptAdmission((shard,), "", shard["admission"].measurement, shard["admission"].envelope)
+            for shard in unpacked
+        )
+    log(f"GROK-BATCH-PLAN shards={len(shards)} batches={len(batches)} target={GROK_BATCH_TARGET_SHARDS} max_calls={GROK_BATCH_MAX_CALLS}")
+    if dry_run:
+        for batch in batches:
+            log(f"REVISE-DRY-RUN would batch-judge shards={len(batch.rows)} tokens={batch.measurement.tokens} envelope={batch.envelope}")
+        return 0, 0
+
+    client = None
+    if shards:
+        CTL._patch_ollama_think()
+        import ollama
+        client = ollama.Client(host=CTL.OLLAMA_URL)
+    merged_n = retired_n = 0
+    by_shard = {shard["shard"]: shard for shard in shards}
+    for decision in _judge_shard_batches(batches, client):
+        shard = by_shard[decision["shard"]]
+        sub, g_scope, admission = shard["rows"], shard["scope"], shard["admission"]
+        verdict, via = decision["verdict"], decision["via"]
+        if not isinstance(verdict, dict) or "action" not in verdict:
+            # A malformed verdict is not consent to change memory.
+            log(f"REVISE: cluster of {len(sub)} skipped — {via} returned no usable action")
+            _skipped[0] += 1
+            continue
+        _judged[0] += 1
+        _by_judge[via] = _by_judge.get(via, 0) + 1
+        action = verdict.get("action", "keep")
+        valid_ids = {r["id"] for r in sub}
+        retire = [i for i in verdict.get("retire_ids", []) if i in valid_ids]
+        if action == "merge" and verdict.get("text") and retire:
+            res = m.add([{"role": "user", "content": verdict["text"]}], user_id="james",
+                        agent_id="dream-revise",
+                        metadata={"added_mdt": CTL.now_mdt(), "source": "dream-revise", "merged_from": retire,
+                                  "scope": g_scope}, infer=False)
+            evs = res.get("results", res) if isinstance(res, dict) else res
+            new_id = evs[0].get("id") if isinstance(evs, list) and evs and isinstance(evs[0], dict) else None
+            retired_n += _retire_rows(q, m, sub, retire, kind="merge",
+                                      reason=f"superseded by dream-revise merge {new_id or '(id unknown)'}",
+                                      superseded_by=new_id, expected_scope=g_scope)
+            log(f"  MERGED [{new_id}] -> {verdict['text'][:140]}")
+            merged_n += 1
+            _journal_decision(g_scope, sub, admission, via, verdict, "merge", new_id)
+        elif action == "retire" and retire and len(retire) < len(sub):
+            retired_n += _retire_rows(q, m, sub, retire, kind="retire",
+                                      reason="dream-revise judged the row stale or contradicted",
+                                      expected_scope=g_scope)
+            _journal_decision(g_scope, sub, admission, via, verdict, "retire")
+        else:
+            _journal_decision(g_scope, sub, admission, via, verdict, "keep")
+    if _skipped[0] and not _judged[0]:
+        # Every cluster failed. Not a quiet no-op: the judge is unreachable and
+        # consolidation did nothing at all. Raising routes it through the
+        # DREAM-ABORT path — marker, traceback, non-zero exit — instead of a
+        # clean end that looks like success.
+        raise RuntimeError(
+            f"REVISE-BLOCKED: all {_skipped[0]} cluster(s) skipped, 0 judged — "
+            f"judge model unavailable, so consolidation did NOTHING. "
+            f"Check CTL.MODELS['qwen'] against curl 127.0.0.1:11434/api/tags")
+    if _by_judge:
+        log("REVISE judges: " + ", ".join(f"{k}={v}" for k, v in sorted(_by_judge.items())))
+    if _skipped[0]:
+        log(f"REVISE-DEGRADED: {_skipped[0]} cluster(s) skipped, {_judged[0]} judged "
+            f"— partial consolidation only")
+    return merged_n, retired_n
+
+
+def _retire_rows(q, m, cluster, retire_ids, *, kind, reason, superseded_by=None, expected_scope=None):
+    """Write each row to the undo ledger IN FULL, then tombstone it.
+
+    The old loop logged `r['text'][:120]` and hard-deleted; qdrant has no
+    undelete, so anything past 120 characters was gone. Order matters: the
+    ledger line is written first and CTL.append_retired raises on failure, so a
+    row that could not be recorded is never deleted.
+
+    FINDING A2: a row whose recorded scope differs from expected_scope (or that
+    carries no scope at all) is skipped and logged — dream never tombstones
+    across namespaces.
+
+    Returns the number of rows actually tombstoned.
+    """
+    by_id = {r["id"]: r for r in cluster}
+    tag = "RETIRE(merge)" if kind == "merge" else "RETIRE"
+    tombstoned = 0
+    for rid in retire_ids:
+        row = by_id.get(rid, {})
+        r_scope = row.get("scope")
+        if expected_scope is not None and r_scope != expected_scope:
+            log(f"  SKIP-TOMBSTONE [{rid}] scope mismatch ({r_scope!r} != {expected_scope!r}) — row kept")
+            continue
+        try:
+            changed = CTL.tombstone_point(
+                q,
+                rid,
+                retired_by="dream-revise",
+                reason=reason,
+                superseded_by=superseded_by,
+                fallback_text=row.get("text", ""),
+            )
+        except Exception as e:
+            log(f"  SKIP-TOMBSTONE [{rid}] undo-ledger/payload write failed ({type(e).__name__}: {str(e)[:120]}) — row kept")
+            continue
+        if not changed:
+            continue
+        log(f"  {tag} [{rid}] {row.get('text', '')}")  # full text, not [:120]
+        tombstoned += 1
+    return tombstoned
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--skip-seed", action="store_true")
+    ap.add_argument("--skip-threads", action="store_true")
+    ap.add_argument("--skip-email", action="store_true")
+    ap.add_argument("--skip-consolidate", action="store_true")
+    ap.add_argument("--max-clusters", type=int, default=40)
+    ap.add_argument("--with-luna", action="store_true")
+    ap.add_argument("--dry-run", action="store_true", help="read and token-admit only; never mutate the Qdrant store")
+    args = ap.parse_args()
+
+    if (BASE / "DREAM_OFF").exists():
+        return
+    log("DREAM-START")
+    total0, by_agent0, organic0, statuses0, live0 = store_counts()
+    novelty0 = novelty_skip_count()
+
+    # Threads and email only add rows.  The preflight follows those additive
+    # lanes and gates every later lifecycle mutation (including seed refresh).
+    if args.dry_run:
+        log("DREAM-DRY-RUN additive=NOT_RUN snapshot=NOT_CREATED destructive=NOT_RUN")
+    else:
+        if not args.skip_threads:
+            run_step("threads", [str(BIN / "mem0-ingest-threads"), "--limit", "400"], 3 * 3600)
+        if not args.skip_email:
+            run_step("email", [str(BIN / "mem0-ingest-email"), "--limit", "200"], 2 * 3600)
+
+    snapshot_name = "DRY_RUN_NOT_CREATED" if args.dry_run else qdrant_snapshot_preflight()
+    destructive_ok = bool(snapshot_name) and not args.dry_run
+    merged = retired = 0
+    if destructive_ok:
+        # Qdrant is still flushing the ~508MB snapshot it just wrote;
+        # hitting it immediately produced client timeouts (2026-08-28).
+        time.sleep(15)
+        run_step("strip-errors", [str(BIN / "mem0-strip-error-state")], 120)
+        if not args.skip_seed:
+            run_step("seed", ["/opt/homebrew/bin/mem0ctl", "seed"], 900)
+        if not args.skip_consolidate:
+            run_step("consolidate", ["/opt/homebrew/bin/mem0ctl", "consolidate"], 1800)
+        m = CTL.get_memory("llama")
+        merged, retired = revise(args.max_clusters, m)
+        run_step("decay", [str(BIN / "mem0-decay")], 900)
+    elif args.dry_run:
+        merged, retired = revise(args.max_clusters, None, dry_run=True)
+    else:
+        log("DREAM-DESTRUCTIVE-NOT-RUN reason=QDRANT-SNAPSHOT-FAILED")
+
+    if args.with_luna and destructive_ok:
+        brief = (
+            "Nightly memory curation on Studio0. Read ~/Library/Memory/mem0/data/DREAM-LATEST.md and run "
+            "/opt/homebrew/bin/mem0ctl list --limit 60 to review recent memories. Fix ONLY clear problems: "
+            "reword vague facts (retire old via mem0ctl delete ID, re-add via mem0ctl add \"...\" --raw), "
+            "retire obvious junk. Never touch corpus-seed rows or store secrets/contact data. "
+            "Finish with one line: CURATED: N changes."
+        )
+        run_step("luna", ["codex", "exec", "--skip-git-repo-check", "-m", "gpt-5.6-luna",
+                          "--sandbox", "danger-full-access", brief], 1800)
+
+    total1, by_agent1, organic1, statuses1, live1 = store_counts()
+    novelty_skipped = novelty_skip_count() - novelty0
+    delta = {a: by_agent1.get(a, 0) - by_agent0.get(a, 0) for a in set(by_agent0) | set(by_agent1)}
+    delta = {a: d for a, d in delta.items() if d}
+    canary_ok, canary_points, canary_violations = check_canaries()
+    if not args.dry_run:
+        REPORT_F.write_text(
+            f"# Dream report — {CTL.now_mdt()}\n\n"
+            f"- Store: {total0} -> {total1} memories ({organic1} organic, {total1-organic1} corpus index)\n"
+            f"- Live rows: {live1}\n"
+            f"- Tombstoned rows: {statuses1[CTL.TOMBSTONE_STATUS]}\n"
+            f"- Decayed rows: {statuses1[CTL.DECAY_STATUS]}\n"
+            f"- Novelty skipped tonight: {novelty_skipped}\n"
+            f"- Staleness ratio: {staleness_ratio()}\n"
+            f"- New tonight by agent: {json.dumps(delta)}\n"
+            f"- Revision: {merged} clusters merged, {retired} stale rows retired\n"
+            f"- Snapshot: {snapshot_name}\n"
+            f"- Canaries: {'PASS' if canary_ok else 'FAIL'} ({canary_points} points, {canary_violations} violations)\n"
+            f"- Logs: dream.log, ingest.log, email-ingest.log, captures.log, consolidate.log\n"
+        )
+        st = {"last_run": CTL.now_mdt(), "total": total1, "snapshot": snapshot_name, "canaries": canary_ok}
+        STATE_F.write_text(json.dumps(st))
+    else:
+        log("DREAM-DRY-RUN report/state=NOT_WRITTEN")
+    log(
+        f"DREAM-END total={total1} (+{total1-total0}) live={live1} "
+        f"tombstoned={statuses1[CTL.TOMBSTONE_STATUS]} decayed={statuses1[CTL.DECAY_STATUS]} "
+        f"novelty_skipped={novelty_skipped} merged={merged} retired={retired} "
+        f"snapshot={snapshot_name} destructive={'PASS' if destructive_ok else 'NOT_RUN'} "
+        f"canaries={'PASS' if canary_ok else 'FAIL'} canary_points={canary_points}"
+    )
+    # A normal nightly run without a snapshot is intentionally not green: its
+    # destructive lanes were aborted and an operator must see that fact.
+    return 0 if canary_ok and (args.dry_run or destructive_ok) else 1
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except BaseException as e:  # noqa: BLE001 — a run must NEVER end marker-less
+        reason = f"{type(e).__name__}: {str(e)[:400]}"
+        line = f"DREAM-ABORT {reason}"
+        # Record WHERE, not just WHAT. The marker alone proved the guard fires
+        # (2026-08-23, first production abort: "AttributeError: 'list' object
+        # has no attribute 'shape'") but gave nowhere to look — `.shape` does
+        # not appear in this file at all, so the failure is inside a callee and
+        # the marker could not say which. An abort that cannot be diagnosed
+        # only converts a silent death into a loud one.
+        import traceback
+        tb = traceback.format_exc()
+        logged = False
+        try:
+            log(line)
+            for tl in tb.strip().splitlines()[-12:]:
+                log(f"DREAM-ABORT-TRACE {tl}")
+            logged = True
+        except Exception:
+            pass
+        # stderr ONLY as the fallback. This job points StandardOutPath and
+        # StandardErrorPath at the SAME file, so printing unconditionally wrote
+        # every abort twice — which reads like two failures instead of one.
+        if not logged:
+            print(line, file=sys.stderr)
+            print(tb, file=sys.stderr)
+        sys.exit(1)

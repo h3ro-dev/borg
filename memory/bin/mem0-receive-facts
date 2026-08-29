@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Receive filtered facts from a remote miner (MacBook) on stdin and store them.
+
+Input: one JSON object per line: {"text": "...", "run_id": "thr-x", "kind":
+"macbook-thread", "source": "macbook:/path", "date": "YYYY-MM-DD"}
+Stores raw (no re-extraction; the miner already distilled). The secrets/PII
+DROP filter is re-applied here — defense in depth against a compromised or
+buggy sender. Prints one summary line for the sender's log.
+"""
+
+import os
+
+os.environ["MEM0_TELEMETRY"] = "false"
+
+import importlib.machinery
+import json
+import sys
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BASE / "bin/mem0ctl")).load_module()
+HOOK = importlib.machinery.SourceFileLoader("mem0hook_mod", str(BASE / "bin/mem0-capture-hook")).load_module()
+
+MAX_LINE = 4000
+ALLOWED_KINDS = {"macbook-thread", "macbook-email", "studio-thread", "luna-thread"}
+
+
+def main():
+    m = CTL.get_memory("llama")  # raw adds: embed-only
+    stored = dropped = bad = deduped = 0
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+            text = str(row["text"])[:MAX_LINE].strip()
+            kind = row.get("kind", "macbook-thread")
+        except Exception:
+            bad += 1
+            continue
+        if not text or kind not in ALLOWED_KINDS:
+            bad += 1
+            continue
+        if any(p.search(text) for p in HOOK.DROP_PATTERNS):
+            dropped += 1
+            continue
+        res = m.add(
+            [{"role": "user", "content": text}],
+            user_id="james",
+            agent_id="macbook-ingest",
+            run_id=str(row.get("run_id", "macbook"))[:64],
+            metadata={
+                "kind": kind,
+                "source": str(row.get("source", ""))[:300],
+                "thread_date": str(row.get("date", ""))[:10],
+                "added_mdt": CTL.now_mdt(),
+            },
+            infer=False,
+        )
+        # The remote miner re-mines threads across runs and re-sends the same
+        # distilled facts; this receiver was the largest live duplicate source
+        # (75 of the 106 regrown copies measured 2026-08-28). Same exact-hash
+        # lane gate as the thread/email doors.
+        events = res.get("results", res) if isinstance(res, dict) else res
+        kept_events, n_dupes = CTL.novelty_prune_events(m, events or [], user_id="james", agent_id="macbook-ingest")
+        if n_dupes and not kept_events:
+            deduped += 1
+        else:
+            stored += 1
+    try:
+        from qdrant_client import QdrantClient
+
+        count = QdrantClient(host="127.0.0.1", port=6333).count("studio0").count
+        (BASE / "data/consolidate-state.json").write_text(
+            json.dumps({"count_at_last_run": count, "at": CTL.now_mdt(), "note": "macbook-suppression"})
+        )
+    except Exception:
+        pass
+    print(f"RECEIVED stored={stored} dropped={dropped} bad={bad} deduped={deduped}")
+
+
+if __name__ == "__main__":
+    main()

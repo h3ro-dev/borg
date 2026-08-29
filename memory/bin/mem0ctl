@@ -1,0 +1,1348 @@
+#!/usr/bin/env python3
+"""mem0ctl — Studio0 shared local memory (mem0 OSS 2.x, fully local).
+
+Models: qwen3.8:27b-mlx primary, llama3.1:8b automatic fallback.
+Embeddings: nomic-embed-text (768 dims). Store: embedded Qdrant on disk +
+SQLite history, both under ~/Library/Memory/mem0/data.
+All model calls go to 127.0.0.1:11434. Telemetry is force-disabled.
+
+This is a recall layer. It is never the authority — file corpora and
+ledgers stay the source of truth. No client PII, no credentials.
+
+Usage:
+  mem0ctl add "text"    [--user james] [--agent NAME] [--run ID]
+                        [--model qwen|llama] [--raw]
+  mem0ctl search "query" [--user james] [--agent NAME] [--limit N] [--threshold F]
+  mem0ctl list          [--user james] [--agent NAME] [--limit N]
+  mem0ctl delete MEMORY_ID
+  mem0ctl stats
+"""
+
+import os
+
+os.environ["MEM0_TELEMETRY"] = "false"  # must precede mem0 import; default phones PostHog
+
+import argparse
+from contextlib import contextmanager
+from copy import deepcopy
+import hashlib
+import importlib.machinery
+import json
+import logging
+import sys
+import threading
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.ERROR)
+
+BASE = Path(__file__).resolve().parent.parent  # .../Library/Memory/mem0 — path-independent
+BIN = BASE / "bin"
+DATA = BASE / "data"
+RETIRED_LOG = DATA / "retired-log.jsonl"  # undo ledger: every hard-deleted row, in full
+SCROLL_PAGE = 2000  # qdrant scroll page size; pages are streamed, never accumulated
+# Dream v2: destructive shards are star-anchored and never exceed 64 rows.
+MAX_ROWS = 64
+CLUSTER_MAX = MAX_ROWS  # compatibility name used by existing callers/logs
+OLLAMA_URL = os.environ.get("MEM0_OLLAMA_URL", "http://127.0.0.1:11434")  # point at a tunneled fleet qwen to offload extraction
+MODELS = {"qwen": "qwen3.8:27b-mlx", "llama": "llama3.1:8b"}
+EMBED_MODEL = "nomic-embed-text:latest"
+EMBED_DIMS = 768
+TOMBSTONE_STATUS = "tombstoned"
+DECAY_STATUS = "decayed"
+RETIRED_STATUSES = (TOMBSTONE_STATUS, DECAY_STATUS)
+EXTRACTION_MODEL = "qwen3.8:27b-mlx"
+SAFETY = importlib.machinery.SourceFileLoader(
+    "mem0_dream_safety", str(BIN / "mem0_dream_safety.py")
+).load_module()
+# 2026-08-21 21:0x MDT (director, measured): extraction MUST run on the model
+# that is already RESIDENT. Wave 2A moved it to qwen3.8:27b (GGUF) for schema
+# grammar; with the 48.5GB mlx 27B resident and the graph backfill generating
+# continuously, Ollama could not LOAD any additional model — a trivial
+# llama3.1:8b generate did not return in 420s, and adds went 25s -> 595s+
+# (director canary timed out at 600s), silently starving session captures
+# (~120s hook timeouts). MLX ignores format-grammar, so linked_memory_ids is
+# best-effort on live adds; the supersession GATE below still guards any
+# links that do appear. Grammar-enforced linking returns when extraction gets
+# dedicated inference (fleet tunnel or embed/extract-only instance) — parked
+# follow-up in the program memory.
+
+EXTRACTION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["memory"],
+    "properties": {
+        "memory": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["id", "text", "attributed_to", "linked_memory_ids"],
+                "properties": {
+                    "id": {"type": "string"},
+                    "text": {"type": "string", "minLength": 1},
+                    "attributed_to": {"type": "string", "enum": ["user", "assistant"]},
+                    "linked_memory_ids": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        }
+    },
+}
+
+_LINK_STATE = threading.local()
+_QUERY_STATE = threading.local()
+
+# Models with the Ollama "thinking" capability. mem0's OllamaLLM never passes
+# think=False, so thinking tokens intermittently corrupt the JSON extraction
+# and mem0 drops the memory silently (observed 2026-08-19). Force it off.
+THINKING_MODELS = {"qwen3.8:27b-mlx", "qwen3.8:27b"}  # GGUF tag added 2026-08-21: it was missing, so the 14:29 GGUF extraction swap ran with UNBOUNDED THINKING on every add — a large part of the 25s->595s regression.
+
+
+def _patch_ollama_think():
+    import ollama
+
+    if getattr(ollama.Client.chat, "_mem0ctl_think_patch", False):
+        return
+    orig = ollama.Client.chat
+
+    def chat(self, *args, **kwargs):
+        model = kwargs.get("model") or (args[0] if args else None)
+        messages = kwargs.get("messages") or (args[1] if len(args) > 1 else [])
+        extraction = any(
+            isinstance(message, dict)
+            and message.get("role") == "system"
+            and "Memory Extractor" in str(message.get("content") or "")
+            for message in (messages or [])
+        )
+        if extraction and model in {MODELS["qwen"], EXTRACTION_MODEL}:
+            # D3: mem0 requests linked_memory_ids, but JSON mode cannot require
+            # it. Route only additive extraction to the schema-capable GGUF
+            # model and pass Ollama's native JSON schema grammar.
+            kwargs["model"] = EXTRACTION_MODEL
+            kwargs["format"] = EXTRACTION_SCHEMA
+            kwargs["think"] = False
+        elif model in THINKING_MODELS and "think" not in kwargs:
+            kwargs["think"] = False
+        response = orig(self, *args, **kwargs)
+        if extraction:
+            try:
+                message = response.get("message") if isinstance(response, dict) else response.message
+                content = message.get("content") if isinstance(message, dict) else message.content
+                parsed = json.loads(content)
+                state = getattr(_LINK_STATE, "current", None)
+                if isinstance(state, dict):
+                    state["extracted"] = parsed.get("memory", [])
+                    state["grammar_model"] = kwargs.get("model")
+            except Exception:
+                pass
+        return response
+
+    chat._mem0ctl_think_patch = True
+    ollama.Client.chat = chat
+
+
+def live_filters(filters=None):
+    """Return a filter that excludes reversible retirement states."""
+    result = deepcopy(filters) if filters else {}
+    if not getattr(_QUERY_STATE, "include_retired", False):
+        clauses = [{"status": status} for status in RETIRED_STATUSES]
+        if isinstance(result.get("NOT"), list):
+            result["NOT"].extend(clause for clause in clauses if clause not in result["NOT"])
+        elif isinstance(result.get("$not"), list):
+            result["$not"].extend(clause for clause in clauses if clause not in result["$not"])
+        elif "status" not in result:
+            # Qdrant MatchExcept (the `nin` operator) does not match points
+            # where the payload key is absent. A must_not equality condition
+            # does, which is required for all pre-Phase-2 live rows.
+            result["NOT"] = clauses
+    return result
+
+
+@contextmanager
+def include_retired_queries():
+    previous = getattr(_QUERY_STATE, "include_retired", False)
+    _QUERY_STATE.include_retired = True
+    try:
+        yield
+    finally:
+        _QUERY_STATE.include_retired = previous
+
+
+def _patch_mem0_runtime():
+    """Install live-only query defaults and linked-memory supersession once."""
+    from mem0 import Memory
+    from mem0.vector_stores.qdrant import Qdrant
+
+    if not getattr(Qdrant.search, "_studio0_live_filter", False):
+        original_search = Qdrant.search
+        original_list = Qdrant.list
+
+        def search(self, query, vectors, top_k=5, filters=None):
+            rows = original_search(self, query, vectors, top_k=top_k, filters=live_filters(filters))
+            state = getattr(_LINK_STATE, "current", None)
+            if isinstance(state, dict) and "candidates" not in state:
+                state["candidates"] = [str(row.id) for row in rows]
+            return rows
+
+        def list_rows(self, filters=None, top_k=100):
+            return original_list(self, filters=live_filters(filters), top_k=top_k)
+
+        search._studio0_live_filter = True
+        list_rows._studio0_live_filter = True
+        Qdrant.search = search
+        Qdrant.list = list_rows
+
+    if not getattr(Memory._add_to_vector_store, "_studio0_supersession", False):
+        original_add = Memory._add_to_vector_store
+
+        def add_to_vector_store(self, messages, metadata, filters, infer, prompt=None):
+            if not infer:
+                return original_add(self, messages, metadata, filters, infer, prompt=prompt)
+            previous = getattr(_LINK_STATE, "current", None)
+            state = {}
+            _LINK_STATE.current = state
+            try:
+                rows = original_add(self, messages, metadata, filters, infer, prompt=prompt)
+                _apply_supersession_links(self, rows, state)
+                return rows
+            finally:
+                _LINK_STATE.current = previous
+
+        add_to_vector_store._studio0_supersession = True
+        Memory._add_to_vector_store = add_to_vector_store
+
+
+def _apply_supersession_links(memory, added_rows, state):
+    """Persist grammar-emitted links and tombstone the linked old rows."""
+    if not isinstance(added_rows, list):
+        return
+    candidates = state.get("candidates") or []
+    extracted = state.get("extracted") or []
+    by_text = {}
+    for item in extracted:
+        if isinstance(item, dict) and item.get("text"):
+            by_text.setdefault(item["text"], []).append(item)
+
+    q = memory.vector_store.client
+    collection = memory.vector_store.collection_name
+    for row in added_rows:
+        if not isinstance(row, dict):
+            continue
+        matches = by_text.get(row.get("memory")) or []
+        item = matches.pop(0) if matches else None
+        if not item:
+            continue
+        resolved = []
+        for raw_id in item.get("linked_memory_ids") or []:
+            value = str(raw_id)
+            if value.isdigit() and int(value) < len(candidates):
+                value = candidates[int(value)]
+            if value in candidates and value != str(row.get("id")) and value not in resolved:
+                resolved.append(value)
+        if not resolved:
+            continue
+        new_id = str(row["id"])
+        q.set_payload(
+            collection_name=collection,
+            payload={"linked_memory_ids": resolved},
+            points=[new_id],
+            wait=True,
+        )
+        for old_id in resolved:
+            # GATE (added 2026-08-21 after a measured false supersession —
+            # w3c receipt): linked_memory_ids is a REQUIRED array over top-k
+            # nearest candidates, so the model fills it even for unrelated
+            # rows. Retire only when the pair is actually about the same
+            # thing (cosine >= 0.75) and the old row is not newer than the
+            # new one. On gate failure keep the recorded link, skip the
+            # tombstone, and log the skip for review.
+            ok, why = _supersession_gate(q, collection, new_id, old_id)
+            if not ok:
+                try:
+                    import json as _json
+                    with open(BASE / "data/supersession-skips.jsonl", "a") as fh:
+                        fh.write(_json.dumps({
+                            "ts": now_mdt(), "new_id": new_id, "old_id": old_id,
+                            "reason": why}) + "\n")
+                except Exception:
+                    pass
+                continue
+            tombstone_point(
+                q,
+                old_id,
+                retired_by="linked-memory-extraction",
+                reason=f"superseded by grammar-linked memory {new_id}",
+                superseded_by=new_id,
+                collection=collection,
+            )
+
+
+def _supersession_gate(q, collection, new_id, old_id):
+    """(ok, reason). Conservative: any missing evidence fails the gate."""
+    try:
+        pts = q.retrieve(collection_name=collection, ids=[new_id, old_id],
+                         with_vectors=True, with_payload=True)
+        by_id = {str(p.id): p for p in pts}
+        new_p, old_p = by_id.get(new_id), by_id.get(old_id)
+        if new_p is None or old_p is None:
+            return False, "point-missing"
+        nv, ov = new_p.vector, old_p.vector
+        if not nv or not ov:
+            return False, "vector-missing"
+        dot = sum(a * b for a, b in zip(nv, ov))
+        nn = sum(a * a for a in nv) ** 0.5
+        no = sum(a * a for a in ov) ** 0.5
+        cos = dot / (nn * no) if nn and no else 0.0
+        if cos < 0.75:
+            return False, f"similarity {cos:.3f} < 0.75"
+        def _date(p):
+            pay = p.payload or {}
+            for k in ("added_mdt", "created_at", "updated_at", "thread_date"):
+                v = str(pay.get(k) or "")[:10]
+                if len(v) == 10 and v[4] == "-":
+                    return v
+            return None
+        nd, od = _date(new_p), _date(old_p)
+        if nd is None or od is None:
+            return False, "date-missing"
+        if od > nd:
+            return False, f"old row newer ({od} > {nd})"
+        return True, "ok"
+    except Exception as exc:  # never let the gate crash an add
+        return False, f"gate-error {type(exc).__name__}"
+
+
+def build_config(model_key: str) -> dict:
+    return {
+        "llm": {
+            "provider": "ollama",
+            "config": {
+                "model": MODELS[model_key],
+                "temperature": 0,
+                "max_tokens": 2000,
+                "ollama_base_url": OLLAMA_URL,
+            },
+        },
+        "embedder": {
+            "provider": "ollama",
+            "config": {
+                "model": EMBED_MODEL,
+                "embedding_dims": EMBED_DIMS,
+                "ollama_base_url": OLLAMA_URL,
+            },
+        },
+        "vector_store": {
+            "provider": "qdrant",
+            "config": {
+                # Server mode (mem0-qdrant Docker container, 127.0.0.1 only).
+                # Embedded/path mode is single-process and would deadlock the
+                # MCP server, CLI, and hooks against each other.
+                "collection_name": "studio0",
+                "host": "127.0.0.1",
+                "port": 6333,
+                "embedding_model_dims": EMBED_DIMS,
+            },
+        },
+        "history_db_path": str(DATA / "history.db"),
+    }
+
+
+def get_memory(model_key: str):
+    _patch_ollama_think()
+    _patch_mem0_runtime()
+    from mem0 import Memory
+
+    m = Memory.from_config(build_config(model_key))
+    # history.db is shared by 5+ live MCP/miner connections (measured
+    # 2026-08-28: dream merge died on "database is locked" mid-apply).
+    # The file is WAL now; this makes OUR connection wait out residual
+    # writer contention instead of aborting a dream or a backfill.
+    try:
+        m.db.connection.execute("PRAGMA busy_timeout=60000")
+    except Exception:
+        pass
+    return m
+
+
+def now_mdt() -> str:
+    return datetime.now(ZoneInfo("America/Denver")).strftime("%Y-%m-%d %H:%M MDT")
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def scope_filters(args, *, include_retired=False) -> dict:
+    f = {}
+    if args.user:
+        f["user_id"] = args.user
+    if getattr(args, "agent", None):
+        f["agent_id"] = args.agent
+    return f if include_retired else live_filters(f)
+
+
+def with_fallback(fn, model_key: str):
+    """Run fn(memory) on the chosen model; on failure retry once on llama."""
+    try:
+        return fn(get_memory(model_key)), model_key
+    except Exception as e:
+        if model_key != "llama":
+            print(f"[mem0ctl] {MODELS[model_key]} failed ({e}); falling back to llama3.1:8b", file=sys.stderr)
+            return fn(get_memory("llama")), "llama"
+        raise
+
+
+def print_results(rows):
+    if not rows:
+        print("(no results)")
+        return
+    for r in rows:
+        mid = r.get("id", "?")
+        text = r.get("memory") or r.get("text") or ""
+        score = r.get("score")
+        score_s = f"  score={score:.3f}" if isinstance(score, (int, float)) else ""
+        meta = r.get("metadata") or {}
+        agent = r.get("agent_id") or meta.get("agent") or ""
+        agent_s = f"  [{agent}]" if agent else ""
+        print(f"- {text}{score_s}{agent_s}  ({mid})")
+
+
+def cmd_add(args):
+    t0 = time.time()
+
+    def do(m):
+        return m.add(
+            [{"role": "user", "content": args.text}],
+            user_id=args.user,
+            agent_id=args.agent,
+            run_id=args.run,
+            metadata={"added_mdt": now_mdt(), "source": "mem0ctl"},
+            infer=not args.raw,
+        )
+
+    res, used = with_fallback(do, args.model)
+    dt = time.time() - t0
+    events = res.get("results", res) if isinstance(res, dict) else res
+    print(f"model={MODELS[used]}  {dt:.1f}s")
+    if isinstance(events, list):
+        if not events:
+            print("(no memory change — extractor found nothing new)")
+        for ev in events:
+            print(f"  {ev.get('event', '?'):7s} {ev.get('memory', '')}  ({ev.get('id', '?')})")
+    else:
+        print(json.dumps(events, indent=2, default=str))
+
+
+def cmd_search(args):
+    fast = importlib.machinery.SourceFileLoader(
+        "mem0_recall_fast_cli", str(Path(__file__).resolve().parent / "mem0_recall_fast.py")
+    ).load_module()
+    if args.include_tombstoned:
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        vector = fast.embed(args.text, timeout_s=10.0)
+        if vector is None:
+            raise RuntimeError("query embedding failed")
+        must = [FieldCondition(key="user_id", match=MatchValue(value=args.user))]
+        if args.agent:
+            must.append(FieldCondition(key="agent_id", match=MatchValue(value=args.agent)))
+        points = QdrantClient(host="127.0.0.1", port=6333, timeout=120).query_points(
+            collection_name="studio0",
+            query=vector,
+            query_filter=Filter(
+                must=must,
+                must_not=[FieldCondition(key="is_canary", match=MatchValue(value=True))],
+            ),
+            limit=args.limit,
+            score_threshold=args.threshold,
+            with_payload=True,
+            with_vectors=False,
+        ).points
+        rows = [
+            {
+                "id": str(point.id),
+                "memory": (point.payload or {}).get("data") or "",
+                "score": point.score,
+                "agent_id": (point.payload or {}).get("agent_id"),
+                "metadata": point.payload or {},
+            }
+            for point in points
+        ]
+    else:
+        rows = fast.search(
+            args.text,
+            limit=args.limit,
+            min_score=args.threshold,
+            timeout_s=10.0,
+            user_id=args.user,
+            agent_id=args.agent,
+        )
+    print_results(rows)
+
+
+def cmd_list(args):
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    must = [FieldCondition(key="user_id", match=MatchValue(value=args.user))]
+    if args.agent:
+        must.append(FieldCondition(key="agent_id", match=MatchValue(value=args.agent)))
+    query_filter = Filter(
+        must=must,
+        must_not=[
+            FieldCondition(key="status", match=MatchValue(value=TOMBSTONE_STATUS)),
+            FieldCondition(key="status", match=MatchValue(value=DECAY_STATUS)),
+            FieldCondition(key="is_canary", match=MatchValue(value=True)),
+        ],
+    )
+    points, _ = QdrantClient(host="127.0.0.1", port=6333, timeout=120).scroll(
+        "studio0",
+        scroll_filter=query_filter,
+        limit=args.limit,
+        with_payload=True,
+        with_vectors=False,
+    )
+    rows = [
+        {
+            "id": str(point.id),
+            "memory": (point.payload or {}).get("data") or "",
+            "agent_id": (point.payload or {}).get("agent_id"),
+            "metadata": point.payload or {},
+        }
+        for point in points
+    ]
+    print_results(rows)
+
+
+def cmd_review_decayed(args):
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    q = QdrantClient(host="127.0.0.1", port=6333, timeout=120)
+    filt = Filter(must=[FieldCondition(key="status", match=MatchValue(value=DECAY_STATUS))])
+    rows = []
+    for point in scroll_all(q, with_vectors=False, scroll_filter=filt):
+        payload = point.payload or {}
+        if payload.get("user_id") != args.user:
+            continue
+        rows.append({
+            "id": str(point.id),
+            "memory": payload.get("data") or "",
+            "metadata": payload,
+        })
+        if len(rows) >= args.limit:
+            break
+    print_results(rows)
+
+
+def cmd_delete(args):
+    changed = tombstone_memory_id(
+        args.text,
+        retired_by="mem0ctl",
+        reason="explicit mem0ctl retirement",
+    )
+    print(f"tombstoned {args.text}" if changed else f"already retired or missing: {args.text}")
+
+
+def _qdrant_stats(user: str):
+    """Exact memory count + agent breakdown via Qdrant (no get_all 10k cap)."""
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    q = QdrantClient(host="127.0.0.1", port=6333, timeout=120)
+    count_filter = None
+    schema = getattr(q.get_collection("studio0"), "payload_schema", None) or {}
+    if "user_id" in schema:
+        count_filter = Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=user))])
+    n = q.count("studio0", count_filter=count_filter, exact=True).count
+    agents = {}
+    try:
+        facet = q.facet(
+            "studio0",
+            key="agent_id",
+            facet_filter=count_filter,
+            limit=200,
+            exact=True,
+        )
+        for hit in facet.hits:
+            a = hit.value if hit.value not in (None, "") else "(none)"
+            agents[str(a)] = hit.count
+        missing = n - sum(agents.values())
+        if missing:
+            agents["(none)"] = agents.get("(none)", 0) + missing
+    except Exception:
+        pass
+    return n, agents
+
+
+def cmd_stats(args):
+    n, agents = _qdrant_stats(args.user)
+    print(f"user '{args.user}': {n} memories")
+    print(f"by agent: {agents}")
+    print(f"data dir: {DATA}")
+
+
+SEED_RUN_ID = "corpus-seed"
+CLAUDE_MEM_DIR = Path.home() / ".claude/projects/-Users-YOURUSER/memory"
+CODEX_SUMMARY = Path.home() / ".codex/memories/memory_summary.md"
+
+
+def _frontmatter_field(text: str, field: str) -> str:
+    for line in text.splitlines()[:12]:
+        if line.strip().startswith(field + ":"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def _seed_rows():
+    """Yield (fact_text, metadata) for every corpus item to seed."""
+    for f in sorted(CLAUDE_MEM_DIR.glob("*.md")):
+        if f.name == "MEMORY.md":
+            continue
+        text = f.read_text(errors="ignore")
+        name = _frontmatter_field(text, "name") or f.stem
+        desc = _frontmatter_field(text, "description")
+        if not desc:
+            continue
+        yield (f"{name}: {desc} — full note: {f}", {"source": str(f), "kind": "claude-memory"})
+    if CODEX_SUMMARY.exists():
+        section = None
+        for line in CODEX_SUMMARY.read_text(errors="ignore").splitlines():
+            if line.startswith("## "):
+                title = line[3:].strip()
+                section = title if title in ("User preferences", "General Tips") else None
+                continue
+            if section and line.strip().startswith("- "):
+                bullet = line.strip()[2:].strip()
+                if len(bullet) > 20:
+                    prefix = "James preference" if section == "User preferences" else "Operating tip"
+                    yield (f"{prefix}: {bullet}", {"source": str(CODEX_SUMMARY), "kind": "codex-summary"})
+
+    # Codex registry: one row per task group (title + scope line).
+    # Source policy (owner ruling 2026-08-19): seed the CURRENT Claude corpus and
+    # the Codex corpus ONLY. NEVER seed OpenClaw workspace notes (antiquated).
+    # Grok bridge and ~/.claude/imported-memory (MacBook-era snapshot) stay out.
+    reg = Path.home() / ".codex/memories/MEMORY.md"
+    if reg.exists():
+        title, scope = None, ""
+        for line in reg.read_text(errors="ignore").splitlines():
+            if line.startswith("# Task Group:"):
+                if title:
+                    yield (f"Codex task group — {title}: {scope} — registry: {reg}", {"source": str(reg), "kind": "codex-registry"})
+                title = line[len("# Task Group:"):].strip()
+                scope = ""
+            elif title and not scope and line.startswith("scope:"):
+                scope = line[len("scope:"):].strip()
+        if title:
+            yield (f"Codex task group — {title}: {scope} — registry: {reg}", {"source": str(reg), "kind": "codex-registry"})
+
+    # Codex rollout summaries: one row per session summary file.
+    ro_dir = Path.home() / ".codex/memories/rollout_summaries"
+    if ro_dir.exists():
+        for f in sorted(ro_dir.glob("*.md")):
+            title, date, context = "", "", ""
+            for line in f.read_text(errors="ignore").splitlines():
+                if line.startswith("updated_at:") and not date:
+                    date = line.split(":", 1)[1].strip()[:10]
+                elif line.startswith("# ") and not title:
+                    title = line[2:].strip()
+                elif line.startswith("Rollout context:") and not context:
+                    context = line[len("Rollout context:"):].strip()
+                if title and context:
+                    break
+            if not title:
+                continue
+            text = f"Codex session {date}: {title}."
+            if context:
+                text += f" {context[:300]}"
+            text += f" — full summary: {f}"
+            yield (text, {"source": str(f), "kind": "codex-rollout"})
+
+
+def cmd_seed(args):
+    m = get_memory("llama")  # raw adds: embed-only, no LLM
+    old = m.get_all(filters={"run_id": SEED_RUN_ID}, top_k=10000)
+    old_rows = old.get("results", old) if isinstance(old, dict) else old
+    for r in old_rows:
+        m.delete(r["id"])
+    print(f"purged {len(old_rows)} previous seed rows")
+    n = 0
+    for fact, meta in _seed_rows():
+        meta["added_mdt"] = now_mdt()
+        m.add(
+            [{"role": "user", "content": fact}],
+            user_id=args.user,
+            agent_id="seeder",
+            run_id=SEED_RUN_ID,
+            metadata=meta,
+            infer=False,
+        )
+        n += 1
+        if n % 25 == 0:
+            print(f"  seeded {n}...")
+    print(f"seeded {n} corpus rows (run_id={SEED_RUN_ID})")
+
+
+def _serialize_consolidate_prompt(rows):
+    """Return the full, untruncated consolidation request for token admission."""
+    listing = "\n".join(f"- ({r['date']}) {r['text']}" for r in rows)
+    return (
+        "These overlapping memory notes describe the same thing. Merge them "
+        "into ONE current fact. When they conflict, the newest date wins and "
+        "the correction wins over the original. Keep names, paths, ports and "
+        "numbers exact. Output ONLY the single merged fact sentence, nothing else.\n"
+        + listing
+    )
+
+
+def _merge_admitted_prompt(prompt):
+    """Call qwen only with a prompt returned by Dream v2 token admission."""
+    _patch_ollama_think()
+    import ollama
+
+    client = ollama.Client(host=OLLAMA_URL)
+    resp = client.chat(
+        model=MODELS["qwen"],
+        messages=[{"role": "user", "content": prompt}],
+        options={"temperature": 0, "num_predict": 300},
+    )
+    return resp["message"]["content"].strip()
+
+
+def scroll_all(q, collection="studio0", *, page=SCROLL_PAGE, with_vectors=True, with_payload=True, scroll_filter=None):
+    """Yield every point in the collection, chaining qdrant's pagination offset.
+
+    `q.scroll(collection, limit=N)` returns `(points, next_page_offset)` and stops
+    at N. The old call sites took `points, _ = q.scroll(..., limit=10000)` and threw
+    the offset away, so consolidate only ever saw the first 10,000 rows of a 48,681
+    point collection — 20.5% coverage (measured 2026-08-21). Feed the offset back
+    until it comes home None.
+
+    Streams a page at a time on purpose. A qdrant Record holds its vector as a
+    Python list of 768 floats (~24 KB each); materialising all 48k at once is
+    ~1.2 GB resident. Callers convert to float32 as pages arrive and drop the
+    Records.
+    """
+    offset = None
+    while True:
+        points, offset = q.scroll(
+            collection,
+            limit=page,
+            offset=offset,
+            with_vectors=with_vectors,
+            with_payload=with_payload,
+            scroll_filter=scroll_filter,
+        )
+        if not points:
+            return
+        for p in points:
+            yield p
+        if offset is None:
+            return
+
+
+def pair_index(V, lo, hi=None, block=512):
+    """Upper-triangle pairs with lo <= cosine < hi. Returns (i[], j[], sim[]).
+
+    Blocked because the dense gram matrix does not fit: at 48,020 rows
+    `V @ V.T` is 8.8 GB of float32 and `np.triu` copies it again. V must already
+    be L2-normalised, so the dot product is the cosine.
+    """
+    import numpy as np
+
+    n = V.shape[0]
+    I, J, W = [], [], []
+    for s in range(0, n, block):
+        e = min(s + block, n)
+        S = V[s:e] @ V.T
+        for r in range(e - s):
+            S[r, : s + r + 1] = -2.0  # drop the diagonal and lower triangle
+        mask = S >= lo
+        if hi is not None:
+            mask &= S < hi
+        bi, bj = np.nonzero(mask)
+        if bi.size:
+            I.append(bi.astype(np.int32) + s)
+            J.append(bj.astype(np.int32))
+            W.append(S[bi, bj])
+        del S, mask
+    if not I:
+        empty_i = np.empty(0, np.int32)
+        return empty_i, empty_i.copy(), np.empty(0, np.float32)
+    return np.concatenate(I), np.concatenate(J), np.concatenate(W)
+
+
+def newest_anchor_order(dates, ids):
+    """Stable newest-first anchor order for star shards (newest is canonical)."""
+    return sorted(range(len(ids)), key=lambda i: (str(dates[i]), str(ids[i])), reverse=True)
+
+
+def cluster_star_anchored(V, I, J, W, lo, *, anchor_order=None, max_size=MAX_ROWS):
+    """Build non-transitive destructive shards around a newest-row anchor.
+
+    A connected component is intentionally *not* a merge unit.  Every member
+    is admitted only if it independently clears ``lo`` against the selected
+    newest anchor.  Once ``MAX_ROWS`` is reached, remaining neighbours are left
+    unclaimed so a later newest candidate forms a new shard.  A chain A~B~C
+    with A !~ C therefore yields [A,B] plus [C], never [A,B,C].
+
+    Singleton shards are returned for rows left behind by a transitive link.
+    Callers only send shards with two or more rows to destructive judges, but
+    retaining the singleton makes the refusal observable and testable.
+    """
+    import numpy as np
+
+    n = V.shape[0]
+    members, capped = {}, {}
+    stats = {
+        "chain_links_refused": 0,
+        "seed_check_failures": 0,
+        "capped_clusters": 0,
+        "capped_deferred": 0,
+        "singleton_shards": 0,
+    }
+    if len(W) == 0:
+        return members, capped, stats
+    if max_size < 2:
+        raise ValueError("MAX_ROWS must be at least 2")
+
+    # Compact, ordered symmetric adjacency: each anchor's direct candidates
+    # are ordered by similarity without materialising Python lists for millions
+    # of pairs.
+    rows = np.concatenate([I, J])
+    cols = np.concatenate([J, I])
+    sims = np.concatenate([W, W])
+    order = np.lexsort((cols, -sims, rows))
+    rows, cols = rows[order], cols[order]
+    del sims, order
+    indptr = np.searchsorted(rows, np.arange(n + 1))
+    degree = indptr[1:] - indptr[:-1]
+    del rows
+
+    if anchor_order is None:
+        # The documented alternative is most-connected; production callers
+        # pass newest-first timestamps so chain behaviour is deterministic.
+        anchor_order = sorted(range(n), key=lambda i: (-int(degree[i]), i))
+    else:
+        seen = set()
+        anchor_order = [int(i) for i in anchor_order if 0 <= int(i) < n and not (int(i) in seen or seen.add(int(i)))]
+        anchor_order.extend(i for i in range(n) if i not in seen)
+
+    owner = np.full(n, -1, dtype=np.int32)
+    unclaimed = np.ones(n, dtype=bool)
+    for seed in anchor_order:
+        if not unclaimed[seed] or not degree[seed]:
+            continue
+        direct = cols[indptr[seed]:indptr[seed + 1]]
+        available = [int(candidate) for candidate in direct if unclaimed[int(candidate)]]
+        if not available:
+            # This row only touched an earlier shard's member.  It is a visible
+            # singleton, not permission to follow that member transitively.
+            owner[seed] = seed
+            unclaimed[seed] = False
+            members[seed] = [seed]
+            stats["singleton_shards"] += 1
+            continue
+        chosen = available[: max_size - 1]
+        mem = [seed, *chosen]
+        # Pair construction guarantees this, but retain an executable
+        # invariant rather than trusting future changes to pair_index().
+        verified = [seed]
+        for candidate in chosen:
+            if float(V[candidate] @ V[seed]) >= lo:
+                verified.append(candidate)
+            else:
+                stats["seed_check_failures"] += 1
+        if len(verified) == 1:
+            owner[seed] = seed
+            unclaimed[seed] = False
+            members[seed] = [seed]
+            stats["singleton_shards"] += 1
+            continue
+        mem = verified
+        owner[mem] = seed
+        unclaimed[mem] = False
+        members[seed] = mem
+        overflow = len(available) - len(chosen)
+        if overflow:
+            capped[seed] = overflow
+
+    stats["capped_clusters"] = len(capped)
+    stats["capped_deferred"] = sum(capped.values())
+    # A pair spanning two shards is the edge a connected-component algorithm
+    # would have used to make a destructive transitive merge.
+    oi, oj = owner[I], owner[J]
+    stats["chain_links_refused"] = int((~((oi >= 0) & (oi == oj))).sum())
+    return members, capped, stats
+
+
+# Compatibility alias for older operators/scripts.  It is no longer seeded by
+# strongest-pair order: every call uses the non-transitive star implementation.
+def cluster_seeded(V, I, J, W, lo, max_size=MAX_ROWS, anchor_order=None):
+    return cluster_star_anchored(V, I, J, W, lo, anchor_order=anchor_order, max_size=max_size)
+
+
+def append_retired(q, point_id, *, retired_by, reason, superseded_by=None, fallback_text="", with_vector=False,
+                   collection="studio0", action="tombstone", status_after=TOMBSTONE_STATUS):
+    """Append one complete point and planned action to the undo ledger first.
+
+    data/retired-log.jsonl is the recovery path for every hard delete in this
+    system: one JSON object per line carrying the id, the FULL payload, the full
+    text, who retired it and why. Before this existed, mem0-dream:revise logged
+    `r['text'][:120]` and then hard-deleted the row, so a revise-caused loss was
+    unrecoverable (qdrant has no undelete).
+
+    Raises on write failure by design — a caller must never delete a row it
+    could not log. The vector is omitted by default: the text is in the record,
+    so re-embedding reconstructs it.
+    """
+    payload, vector = None, None
+    try:
+        got = q.retrieve(collection, ids=[point_id], with_payload=True, with_vectors=with_vector)
+        if got:
+            payload = got[0].payload
+            if with_vector:
+                vector = got[0].vector
+    except Exception as e:  # retrieval is best-effort; the ledger line is not
+        payload = {"_retrieve_error": f"{type(e).__name__}: {e}"}
+    text = (payload or {}).get("data") or (payload or {}).get("memory") or fallback_text
+    rec = {
+        "retired_at": now_iso(),
+        "action": action,
+        "status_after": status_after,
+        "id": str(point_id),
+        "retired_by": retired_by,
+        "reason": reason,
+        "superseded_by": superseded_by,
+        "text": text,
+        "payload": payload,
+    }
+    if vector is not None:
+        rec["vector"] = vector
+    RETIRED_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(RETIRED_LOG, "a") as f:
+        f.write(json.dumps(rec, default=str, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def tombstone_point(q, point_id, *, retired_by, reason, superseded_by=None,
+                    fallback_text="", collection="studio0"):
+    """Reversibly retire one point after its full pre-change payload is logged."""
+    found = q.retrieve(collection, ids=[point_id], with_payload=True, with_vectors=False)
+    if not found:
+        return False
+    current = found[0].payload or {}
+    if current.get("status") in RETIRED_STATUSES:
+        return False
+    retired_at = now_iso()
+    append_retired(
+        q,
+        point_id,
+        retired_by=retired_by,
+        reason=reason,
+        superseded_by=superseded_by,
+        fallback_text=fallback_text,
+        collection=collection,
+        action="tombstone",
+        status_after=TOMBSTONE_STATUS,
+    )
+    q.set_payload(
+        collection_name=collection,
+        payload={
+            "status": TOMBSTONE_STATUS,
+            "retired_at": retired_at,
+            "retire_reason": reason,
+            "retired_by": retired_by,
+            "superseded_by": superseded_by,
+        },
+        points=[point_id],
+        wait=True,
+    )
+    return True
+
+
+def tombstone_memory_id(point_id, *, retired_by, reason, superseded_by=None):
+    from qdrant_client import QdrantClient
+
+    q = QdrantClient(host="127.0.0.1", port=6333, timeout=120)
+    return tombstone_point(
+        q,
+        point_id,
+        retired_by=retired_by,
+        reason=reason,
+        superseded_by=superseded_by,
+    )
+
+
+def _messages_text(messages):
+    if isinstance(messages, str):
+        return messages.strip()
+    parts = []
+    for message in messages or []:
+        if isinstance(message, dict) and message.get("content"):
+            parts.append(str(message["content"]).strip())
+    return "\n".join(part for part in parts if part)
+
+
+def novelty_add(memory, messages, *, threshold=0.92, log_path=None, **add_kwargs):
+    """Skip a near-duplicate ingest candidate and append a privacy-safe receipt."""
+    text = _messages_text(messages)
+    user_id = add_kwargs.get("user_id")
+    if text and user_id:
+        fast = importlib.machinery.SourceFileLoader(
+            "mem0_recall_fast_novelty", str(Path(__file__).resolve().parent / "mem0_recall_fast.py")
+        ).load_module()
+        hits = fast.search(
+            text,
+            limit=1,
+            min_score=threshold,
+            timeout_s=10.0,
+            user_id=user_id,
+        )
+        hit = hits[0] if isinstance(hits, list) and hits else None
+        score = hit.get("score") if isinstance(hit, dict) else None
+        if isinstance(score, (int, float)) and score >= threshold:
+            target = Path(log_path) if log_path else DATA / "novelty-skipped.jsonl"
+            rec = {
+                "at": now_iso(),
+                "action": "novelty-skip",
+                "threshold": threshold,
+                "score": float(score),
+                "candidate_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                "candidate_chars": len(text),
+                "matched_id": hit.get("id"),
+                "run_id": add_kwargs.get("run_id"),
+                "source": (add_kwargs.get("metadata") or {}).get("source"),
+            }
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "a") as handle:
+                handle.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            return {"results": [], "novelty_skipped": True, "matched_id": hit.get("id"), "score": float(score)}
+    return memory.add(messages, **add_kwargs)
+
+
+def novelty_prune_events(memory, events, *, user_id, agent_id, q=None, log_path=None):
+    """Delete just-stored ingest events whose exact text already lives in this lane.
+
+    novelty_add() screens the whole multi-KB digest, which can never cosine-match
+    a short stored fact, and mem0's internal infer dedup is scoped to the
+    per-file run_id — an always-empty bucket — so verbatim cross-thread repeats
+    (re-injected global instructions) stored up to 128 copies before the
+    2026-08-28 curation swarm. This screens each EXTRACTED fact after storage:
+    exact md5 text match (mem0's own `hash` payload key), same user and lane,
+    live rows only, excluding the event's own point. Deterministic — no
+    similarity threshold; near-duplicates stay dream's nightly band (>=0.75).
+    Fail-open: any lookup or delete error keeps the row.
+    Returns (kept_events, deduped_count).
+    """
+    from qdrant_client import QdrantClient
+    from qdrant_client import models as qm
+
+    kept, deduped = [], 0
+    for ev in events or []:
+        text = str(ev.get("memory") or "").strip()
+        ev_id = ev.get("id")
+        # Self-exclusion needs a real qdrant point id (UUID or int) — qdrant
+        # 400s a HasIdCondition on anything else, which the fail-open catch
+        # would silently turn into "no duplicate". An id with any other shape
+        # cannot be a stored point, so keep the event untouched instead of
+        # risking a self-match delete.
+        if ev_id is not None and not isinstance(ev_id, int):
+            try:
+                uuid.UUID(str(ev_id))
+            except (ValueError, AttributeError):
+                ev_id = None
+        if not text or ev_id is None:
+            kept.append(ev)
+            continue
+        try:
+            if q is None:
+                q = QdrantClient(host="127.0.0.1", port=6333, timeout=10)
+            dup = q.count(
+                "studio0",
+                count_filter=qm.Filter(
+                    must=[
+                        qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id)),
+                        qm.FieldCondition(key="agent_id", match=qm.MatchValue(value=agent_id)),
+                        qm.FieldCondition(key="hash", match=qm.MatchValue(value=hashlib.md5(text.encode()).hexdigest())),
+                    ],
+                    must_not=[
+                        qm.HasIdCondition(has_id=[ev_id]),
+                        qm.FieldCondition(key="status", match=qm.MatchAny(any=["tombstoned", "decayed"])),
+                    ],
+                ),
+                exact=True,
+            ).count
+        except Exception:
+            kept.append(ev)
+            continue
+        if dup:
+            try:
+                memory.delete(ev_id)
+            except Exception:
+                kept.append(ev)
+                continue
+            target = Path(log_path) if log_path else DATA / "novelty-skipped.jsonl"
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(target, "a") as handle:
+                    handle.write(json.dumps({
+                        "at": now_iso(),
+                        "action": "novelty-fact-skip",
+                        "agent_id": agent_id,
+                        "candidate_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                        "candidate_chars": len(text),
+                        "duplicates_live": dup,
+                        "deleted_id": str(ev_id),
+                    }, ensure_ascii=False, default=str) + "\n")
+                    handle.flush()
+            except Exception:
+                pass
+            deduped += 1
+        else:
+            kept.append(ev)
+    return kept, deduped
+
+
+def load_organic(q, user, *, want_vectors=True, date_keys=("added_mdt", "created_at")):
+    """Stream the whole collection; keep only this user's non-seed rows.
+
+    Returns (ids, texts, dates, V, scanned). V is one L2-normalised float32
+    matrix — 148 MB at 48k x 768, which all-pairs cosine needs anyway — built by
+    converting each page as it arrives rather than holding 48k qdrant Records.
+    """
+    import numpy as np
+
+    ids, texts, dates, chunks, buf, scanned = [], [], [], [], [], 0
+    for p in scroll_all(q, with_vectors=want_vectors, with_payload=True):
+        scanned += 1
+        pay = p.payload or {}
+        if (
+            pay.get("user_id") != user
+            or pay.get("run_id") == SEED_RUN_ID
+            or pay.get("status") in RETIRED_STATUSES
+            or pay.get("is_canary") is True
+        ):
+            continue
+        text = pay.get("data") or pay.get("memory") or ""
+        vec = p.vector if isinstance(p.vector, list) else (p.vector or {}).get("", [])
+        if not (text and vec):
+            continue
+        ids.append(str(p.id))
+        texts.append(text)
+        dates.append(next((pay[k] for k in date_keys if pay.get(k)), "?"))
+        buf.append(np.asarray(vec, dtype=np.float32))
+        if len(buf) >= 4096:
+            chunks.append(np.stack(buf))
+            buf = []
+    if buf:
+        chunks.append(np.stack(buf))
+    V = np.concatenate(chunks) if chunks else np.zeros((0, EMBED_DIMS), np.float32)
+    del chunks, buf
+    if V.shape[0]:
+        V /= np.linalg.norm(V, axis=1, keepdims=True) + 1e-9
+    return ids, texts, dates, V, scanned
+
+
+def cmd_consolidate(args):
+    """Merge near-duplicate organic rows (never seed rows). Vector cosine via qdrant."""
+    from qdrant_client import QdrantClient
+
+    t0 = time.time()
+    q = QdrantClient(host="127.0.0.1", port=6333, timeout=120)
+    try:
+        true_count = q.count("studio0", exact=True).count
+    except Exception as e:
+        true_count = f"unavailable ({type(e).__name__})"
+
+    ids, texts, dates, V, scanned = load_organic(q, args.user)
+    n = len(ids)
+    print(f"scanned {scanned} points (collection reports {true_count}); {n} organic rows for user '{args.user}'")
+    if n < 2:
+        print(f"{n} organic rows — nothing to consolidate  [{time.time() - t0:.0f}s]")
+        _save_consolidate_state()
+        return
+
+    I, J, W = pair_index(V, args.threshold)
+    pairs = len(W)
+    members, capped, stats = cluster_star_anchored(
+        V, I, J, W, args.threshold,
+        anchor_order=newest_anchor_order(dates, ids),
+    )
+    del I, J, W
+    dup_clusters = [
+        [{"id": ids[x], "text": texts[x], "date": dates[x]} for x in mem]
+        for mem in members.values()
+        if len(mem) > 1
+    ]
+    print(f"{n} organic rows, {pairs} near-dup pairs >= {args.threshold}, {len(dup_clusters)} clusters to merge")
+    print(
+        f"  guard: {stats['chain_links_refused']} transitive links refused, "
+        f"{stats['capped_clusters']} star shards hit the {MAX_ROWS}-row cap "
+        f"({stats['capped_deferred']} rows form later shards), {stats['seed_check_failures']} anchor-threshold failures"
+    )
+    if not dup_clusters:
+        _save_consolidate_state()
+        print(f"consolidate done: 0 merges  [{time.time() - t0:.0f}s]")
+        return
+
+    log = open(BASE / "data/consolidate.log", "a")
+    log.write(
+        f"{now_mdt()} RUN scanned={scanned} collection={true_count} organic={n} pairs={pairs} "
+        f"clusters={len(dup_clusters)} threshold={args.threshold} cap={MAX_ROWS} "
+        f"chain_links_refused={stats['chain_links_refused']} seed_check_failures={stats['seed_check_failures']} "
+        f"capped_clusters={stats['capped_clusters']} capped_deferred={stats['capped_deferred']} "
+        f"dry_run={bool(args.dry_run)}\n"
+    )
+    # Runaway families are announced, never silently trimmed.
+    for seed, deferred in sorted(capped.items(), key=lambda kv: -kv[1]):
+        warn = (
+            f"WARN runaway family: anchor [{ids[seed]}] filled the {MAX_ROWS}-row cap, "
+            f"{deferred} direct neighbours will form later star shard(s) — {texts[seed][:160]}"
+        )
+        print(f"  {warn}")
+        log.write(f"{now_mdt()} {warn}\n")
+
+    def token_log(line):
+        print(f"  {line}")
+        log.write(f"{now_mdt()} {line}\n")
+        log.flush()
+
+    m = None if args.dry_run else get_memory("llama")
+    merged_n = retired_n = 0
+    for c in dup_clusters:
+        if args.dry_run:
+            # Preview only. The qwen merge call is skipped here: at full
+            # coverage a dry run would otherwise fire thousands of 27B calls
+            # and never finish. The live path below is unchanged.
+            log.write(f"{now_mdt()} WOULD MERGE {len(c)} rows (dry-run: no LLM call, no changes):\n")
+            for r in c:
+                log.write(f"  - OLD [{r['id']}] {r['text']}\n")
+            merged_n += 1
+            retired_n += len(c)
+            continue
+        admissions = SAFETY.admit_serialized_prompt(
+            phase="CONSOLIDATE",
+            model=MODELS["qwen"],
+            rows=c,
+            render_prompt=_serialize_consolidate_prompt,
+            log=token_log,
+        )
+        for admission in admissions:
+            sub = list(admission.rows)
+            # There is no direct qwen call outside this admission loop.
+            merged = _merge_admitted_prompt(admission.prompt)
+            print(f"  MERGE {len(sub)} rows -> {merged}")
+            log.write(f"{now_mdt()} MERGED {len(sub)} rows:\n")
+            for r in sub:
+                log.write(f"  - OLD [{r['id']}] {r['text']}\n")
+            res = m.add(
+                [{"role": "user", "content": merged}],
+                user_id=args.user,
+                agent_id="consolidate",
+                metadata={"added_mdt": now_mdt(), "source": "consolidate", "merged_from": [r["id"] for r in sub]},
+                infer=False,
+            )
+            evs = res.get("results", res) if isinstance(res, dict) else res
+            new_id = evs[0].get("id") if isinstance(evs, list) and evs and isinstance(evs[0], dict) else None
+            for r in sub:
+                tombstone_point(
+                    q,
+                    r["id"],
+                    retired_by="consolidate",
+                    reason=f"merged into {new_id or 'new consolidate row'} at threshold {args.threshold}",
+                    superseded_by=new_id,
+                    fallback_text=r["text"],
+                )
+            log.write(f"  -> NEW [{new_id}]: {merged}\n")
+            merged_n += 1
+            retired_n += len(sub)
+    log.close()
+    if not args.dry_run:
+        _save_consolidate_state()
+    verb = "would merge" if args.dry_run else "merged"
+    print(f"consolidate done: {verb} {merged_n} clusters, {retired_n} rows retired  [{time.time() - t0:.0f}s]")
+
+
+def _save_consolidate_state():
+    try:
+        from qdrant_client import QdrantClient
+
+        q = QdrantClient(host="127.0.0.1", port=6333, timeout=120)
+        count = q.count("studio0").count
+        (BASE / "data/consolidate-state.json").write_text(json.dumps({"count_at_last_run": count, "at": now_mdt()}))
+    except Exception:
+        pass
+
+
+def main():
+    p = argparse.ArgumentParser(prog="mem0ctl", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def common(sp, with_model=False):
+        sp.add_argument("--user", default="james")
+        sp.add_argument("--agent", default=None)
+        if with_model:
+            sp.add_argument("--model", choices=["qwen", "llama"], default="qwen")
+
+    sp = sub.add_parser("add")
+    sp.add_argument("text")
+    sp.add_argument("--run", default=None)
+    sp.add_argument("--raw", action="store_true", help="store verbatim, skip LLM extraction")
+    common(sp, with_model=True)
+    sp.set_defaults(fn=cmd_add)
+
+    sp = sub.add_parser("search")
+    sp.add_argument("text")
+    sp.add_argument("--limit", type=int, default=5)
+    sp.add_argument("--threshold", type=float, default=0.1)
+    sp.add_argument(
+        "--include-tombstoned",
+        action="store_true",
+        help="forensics: include tombstoned and decayed rows",
+    )
+    common(sp)
+    sp.set_defaults(fn=cmd_search)
+
+    sp = sub.add_parser("list")
+    sp.add_argument("--limit", type=int, default=20)
+    common(sp)
+    sp.set_defaults(fn=cmd_list)
+
+    sp = sub.add_parser("review-decayed", help="list decayed rows for human review")
+    sp.add_argument("--user", default="james")
+    sp.add_argument("--limit", type=int, default=100)
+    sp.set_defaults(fn=cmd_review_decayed)
+
+    sp = sub.add_parser("delete")
+    sp.add_argument("text", metavar="MEMORY_ID")
+    sp.set_defaults(fn=cmd_delete)
+
+    sp = sub.add_parser("stats")
+    sp.add_argument("--user", default="james")
+    sp.set_defaults(fn=cmd_stats)
+
+    sp = sub.add_parser("seed", help="(re)index the memory corpus: purge old seed rows, add fresh ones")
+    sp.add_argument("--user", default="james")
+    sp.set_defaults(fn=cmd_seed)
+
+    sp = sub.add_parser("consolidate", help="merge near-duplicate organic rows; seed rows untouched")
+    sp.add_argument("--user", default="james")
+    sp.add_argument("--threshold", type=float, default=0.90)
+    sp.add_argument("--dry-run", action="store_true")
+    sp.set_defaults(fn=cmd_consolidate)
+
+    args = p.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

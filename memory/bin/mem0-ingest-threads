@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""Bulk thread ingestion — mine every Claude/Codex chat thread on Studio0
+into mem0 via local qwen extraction. Free, resumable, background-safe.
+
+- Sources: ~/.claude/projects/**/*.jsonl and ~/.codex/sessions/**/rollout-*.jsonl
+  (Codex sessions that already have a rollout summary are skipped — the summary
+  is already seeded; CI battery/reviewer-case sessions are excluded as noise).
+- Extraction: qwen3.8:27b-mlx (think off) with the same charter as the session
+  hook; llama fallback. Regex post-filter deletes secret/PII/money rows.
+- Resumable: data/ingest-state.json records every processed path.
+- Suppresses the hook's auto-consolidate trigger while running (bumps the
+  consolidate-state count each file); run `mem0ctl consolidate` at the end.
+
+Usage:
+  mem0-ingest-threads [--source all|claude|codex] [--limit N] [--dry-run]
+                      [--min-chars 600] [--oldest-first]
+"""
+
+import os
+
+os.environ["MEM0_TELEMETRY"] = "false"
+
+import argparse
+import importlib.machinery
+import json
+import re
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BASE / "bin/mem0ctl")).load_module()
+HOOK = importlib.machinery.SourceFileLoader("mem0hook_mod", str(BASE / "bin/mem0-capture-hook")).load_module()
+
+STATE_F = BASE / "data/ingest-state.json"
+LOG_F = BASE / "data/ingest.log"
+EXCLUDE_PROJECT = re.compile(r"nros-reviewer-sealed|private-tmp-pr-|-T-nros-")
+MAX_MSGS = 60
+MAX_CHARS = 12000
+LIVE_GRACE_S = 1800  # skip files modified in the last 30 min (live sessions)
+
+INGEST_SUFFIX = """
+This is an OLD session; its date is given in the header. Extract only facts likely still durable.
+Prefix time-bound facts with their date, e.g. 'As of 2026-07-30, ...'. Skip anything that was clearly transient."""
+
+
+def log(msg):
+    with open(LOG_F, "a") as f:
+        f.write(f"{CTL.now_mdt()} {msg}\n")
+
+
+def load_state():
+    if STATE_F.exists():
+        return json.loads(STATE_F.read_text())
+    return {"done": {}}
+
+
+def save_state(st):
+    STATE_F.write_text(json.dumps(st))
+
+
+def suppress_consolidate_trigger():
+    try:
+        from qdrant_client import QdrantClient
+
+        count = QdrantClient(host="127.0.0.1", port=6333).count("studio0").count
+        (BASE / "data/consolidate-state.json").write_text(
+            json.dumps({"count_at_last_run": count, "at": CTL.now_mdt(), "note": "ingest-suppression"})
+        )
+    except Exception:
+        pass
+
+
+def claude_files():
+    root = Path.home() / ".claude/projects"
+    for f in root.glob("*/*.jsonl"):
+        if EXCLUDE_PROJECT.search(f.parent.name):
+            continue
+        yield f, "claude-thread"
+
+
+def codex_files():
+    summarized = set()
+    ro = Path.home() / ".codex/memories/rollout_summaries"
+    for s in ro.glob("*.md"):
+        for line in s.read_text(errors="ignore").splitlines()[:6]:
+            if line.startswith("rollout_path:"):
+                summarized.add(Path(line.split(":", 1)[1].strip()).name)
+    root = Path.home() / ".codex/sessions"
+    for f in root.rglob("rollout-*.jsonl"):
+        if f.name in summarized:
+            continue
+        yield f, "codex-thread"
+
+
+def extract_texts(path: Path):
+    """Yield (role, text) from Claude- or Codex-format JSONL, skipping boilerplate."""
+    with open(path, errors="ignore") as fh:
+        cwd = ""
+        for raw in fh:
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                continue
+            cwd = cwd or obj.get("cwd", "") or ((obj.get("payload") or {}).get("cwd", "") if obj.get("type") == "session_meta" else "")
+            role, blocks = None, None
+            if obj.get("type") in ("user", "assistant"):  # claude format
+                role = obj["type"]
+                blocks = (obj.get("message") or {}).get("content")
+            elif obj.get("type") == "response_item":  # codex format
+                p = obj.get("payload") or {}
+                if p.get("type") == "message" and p.get("role") in ("user", "assistant"):
+                    role = p["role"]
+                    blocks = p.get("content")
+            if role is None:
+                continue
+            text = ""
+            if isinstance(blocks, str):
+                text = blocks
+            elif isinstance(blocks, list):
+                text = " ".join(
+                    b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") in ("text", "input_text", "output_text")
+                )
+            text = text.strip()
+            # Codex transcripts carry the global AGENTS.md/CLAUDE.md policy and
+            # harness context as plain user messages with these prefixes (the
+            # same set mem0-codex-hook masks). Without this skip they re-extract
+            # as "facts" from nearly every session — measured up to 128 copies
+            # of one policy sentence before the 2026-08-28 curation swarm.
+            if not text or text.startswith((
+                "<environment_context>", "<user_instructions>", "<system-reminder>",
+                "<task-notification>", "<command-name>", "<local-command", "Caveat:",
+                "# AGENTS.md instructions", "<recommended_plugins>", "<permissions",
+                "<app-context>", "<skills_instructions>", "<plugins_instructions>",
+                "<apps_instructions>",
+            )):
+                continue
+            yield cwd, role, text
+
+
+def digest_file(path: Path):
+    msgs, cwd = [], ""
+    for c, role, text in extract_texts(path):
+        cwd = cwd or c
+        msgs.append(f"{role.upper()}: {text[:1500]}")
+    if not msgs:
+        return "", ""
+    body = "\n".join(msgs[-MAX_MSGS:])[-MAX_CHARS:]
+    date = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
+    return f"SESSION DATE: {date}\nSESSION CWD: {cwd or 'unknown'}\n\n{body}", date
+
+
+def process(path: Path, kind: str, args, m_qwen):
+    digest, date = digest_file(path)
+    if len(digest) < args.min_chars:
+        return "skipped-small", 0, 0
+    if args.dry_run:
+        print(f"--- {path.name} ({len(digest)} chars) ---")
+        print(digest[:600])
+        return "dry-run", 0, 0
+    run_id = f"thr-{path.stem[:48]}"
+
+    def do(m):
+        return CTL.novelty_add(
+            m,
+            [{"role": "user", "content": digest}],
+            threshold=0.92,
+            user_id="james",
+            agent_id="thread-ingest",
+            run_id=run_id,
+            metadata={"source": str(path), "kind": kind, "thread_date": date, "added_mdt": CTL.now_mdt()},
+            prompt=HOOK.SAFE_PROMPT + INGEST_SUFFIX,
+        )
+
+    try:
+        res = do(m_qwen)
+    except Exception:
+        res = do(CTL.get_memory("llama"))
+    events = res.get("results", res) if isinstance(res, dict) else res
+    dropped = 0
+    m = m_qwen
+    survivors = []
+    for ev in events or []:
+        text = ev.get("memory", "")
+        if any(p.search(text) for p in HOOK.DROP_PATTERNS):
+            try:
+                m.delete(ev.get("id"))
+            except Exception:
+                pass
+            dropped += 1
+        else:
+            survivors.append(ev)
+    survivors, deduped = CTL.novelty_prune_events(m, survivors, user_id="james", agent_id="thread-ingest")
+    return "ok", len(survivors), dropped + deduped
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dump", metavar="FILE", help="print full extracted conversation text of one thread file and exit (for herd lanes)")
+    ap.add_argument("--source", choices=["all", "claude", "codex"], default="all")
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--min-chars", type=int, default=600)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--oldest-first", action="store_true")
+    args = ap.parse_args()
+
+    if args.dump:
+        p = Path(args.dump)
+        date = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d")
+        print(f"SESSION DATE: {date}\nFILE: {p}\n")
+        for cwd, role, text in extract_texts(p):
+            print(f"{role.upper()}: {text}")
+        return
+
+    import atexit
+
+    lock = BASE / "data/ingest.lock"
+    if lock.exists():
+        try:
+            os.kill(int(lock.read_text()), 0)
+            print(f"already running (pid {lock.read_text()}); exiting")
+            return
+        except (ProcessLookupError, ValueError):
+            pass
+    lock.write_text(str(os.getpid()))
+    atexit.register(lambda: lock.unlink(missing_ok=True))
+
+    files = []
+    if args.source in ("all", "claude"):
+        files += list(claude_files())
+    if args.source in ("all", "codex"):
+        files += list(codex_files())
+    now = time.time()
+    files = [(f, k) for f, k in files if now - f.stat().st_mtime > LIVE_GRACE_S]
+    files.sort(key=lambda t: t[0].stat().st_mtime, reverse=not args.oldest_first)
+
+    st = load_state()
+    todo = [(f, k) for f, k in files if str(f) not in st["done"]]
+    if args.limit:
+        todo = todo[: args.limit]
+    print(f"{len(files)} candidate threads, {len(todo)} to process")
+    log(f"RUN-START source={args.source} candidates={len(files)} todo={len(todo)}")
+
+    m_qwen = None if args.dry_run else CTL.get_memory("qwen")
+    total_kept = 0
+    for i, (f, kind) in enumerate(todo, 1):
+        t0 = time.time()
+        try:
+            status, kept, dropped = process(f, kind, args, m_qwen)
+        except Exception as e:
+            status, kept, dropped = f"error:{type(e).__name__}", 0, 0
+        dt = time.time() - t0
+        total_kept += kept
+        if not args.dry_run:
+            st["done"][str(f)] = {"status": status, "kept": kept, "dropped": dropped, "at": CTL.now_mdt()}
+            save_state(st)
+            suppress_consolidate_trigger()
+        log(f"[{i}/{len(todo)}] {status} kept={kept} dropped={dropped} {dt:.0f}s {f}")
+        if i % 10 == 0:
+            print(f"[{i}/{len(todo)}] total facts kept so far: {total_kept}", flush=True)
+    log(f"RUN-END processed={len(todo)} total_kept={total_kept}")
+    print(f"done: {len(todo)} threads, {total_kept} facts kept")
+
+
+if __name__ == "__main__":
+    main()

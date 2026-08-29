@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""mem0-scope-backfill — write the additive `scope` key onto every memory.
+
+NON-DESTRUCTIVE BY CONSTRUCTION. The only Qdrant call that mutates anything is
+`set_payload(payload={"scope": ...}, points=[...])`, which merges one key into
+an existing payload. This tool never calls delete, never calls
+overwrite_payload, never writes `data`, and never touches vectors. After every
+batch it re-reads the rows it just wrote and compares a hash of the memory text
+against the hash taken before the write; a single mismatch aborts the run.
+
+Resumable: the Qdrant scroll offset, counts, and a run id live in
+data/scope-backfill-cursor.json. Killing the process loses at most one batch.
+
+  mem0-scope-backfill run --limit 500        # pilot slice
+  mem0-scope-backfill run --origin-default   # opt-in: teammate rows -> person:<them>
+  mem0-scope-backfill run                    # full store, resumes at the cursor
+  mem0-scope-backfill run --dry-run          # classify + log, write nothing
+  mem0-scope-backfill status
+  mem0-scope-backfill verify --n 30          # hand-check sheet: text + assigned scope
+  mem0-scope-backfill index                  # optional keyword index on `scope`
+  mem0-scope-backfill reset                  # clear the cursor (not the data)
+"""
+
+import argparse
+import hashlib
+import importlib.machinery
+import json
+import random
+import sys
+import time
+from collections import Counter
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+BASE = BIN.parent
+LIB = importlib.machinery.SourceFileLoader("mem0_scope_lib", str(BIN / "mem0_scope_lib.py")).load_module()
+CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BIN / "mem0ctl")).load_module()
+
+LOG = BASE / "data/scope-backfill.log"
+CURSOR = BASE / "data/scope-backfill-cursor.json"
+LABELS = BASE / "data/scope-backfill-labels.jsonl"
+PAGE = 200
+
+
+def log(msg: str):
+    line = f"{CTL.now_mdt()}  {msg}"
+    print(line, flush=True)
+    with open(LOG, "a") as f:
+        f.write(line + "\n")
+
+
+def load_cursor() -> dict:
+    if CURSOR.exists():
+        return json.loads(CURSOR.read_text())
+    return {"offset": None, "seen": 0, "written": 0, "skipped": 0, "started_mdt": None, "runs": []}
+
+
+def save_cursor(c: dict):
+    CURSOR.write_text(json.dumps(c, indent=2, default=str))
+
+
+def text_hash(payload: dict) -> str:
+    return hashlib.sha256((payload.get("data") or "").encode()).hexdigest()
+
+
+def qdrant_retry(what, fn):
+    """Retry transient Qdrant failures instead of dying on one blip.
+
+    Measured 2026-08-28: the 04:45 sweep fired while the 03:30 dream was
+    still hammering Qdrant and a single server-side 408 killed the whole
+    run. The cursor makes this tool resumable and set_payload is an
+    idempotent merge, so a bounded retry is always safe; integrity aborts
+    (hash mismatch) are raised by our own checks, never retried here."""
+    for attempt in range(1, 5):
+        try:
+            return fn()
+        except Exception as e:
+            name = type(e).__name__
+            transient = ("Timeout" in name or "Connection" in name
+                         or any(s in str(e) for s in ("408", "429", "502", "503", "504")))
+            if not transient or attempt == 4:
+                raise
+            wait = 20 * attempt
+            log(f"RETRY {what} attempt={attempt} wait={wait}s {name}: {str(e)[:120]}")
+            time.sleep(wait)
+
+
+def cmd_run(args):
+    q = LIB.qdrant()
+    clf = LIB.Classifier(log=log, origin_default=args.origin_default)
+    floors = LIB.identifier_floors(reload=True)
+    if floors:
+        log(f"identifier floors active: {[f['name'] for f in floors]}")
+    else:
+        log(f"!! WARNING: no identifier floors loaded from {LIB.IDENTIFIER_FLOOR_FILE} — "
+            f"live infrastructure identifiers will NOT be forced to ops")
+    log(f"=== backfill start  endpoints={clf.endpoints}  limit={args.limit or 'ALL'}  dry_run={args.dry_run} ===")
+    c = load_cursor()
+    if not c["started_mdt"]:
+        c["started_mdt"] = CTL.now_mdt()
+    offset = c["offset"]
+    processed = 0
+    scope_counts = Counter()
+    t0 = time.time()
+    labels_fh = open(LABELS, "a")
+
+    try:
+        while True:
+            if args.limit and processed >= args.limit:
+                log(f"limit {args.limit} reached")
+                break
+            pts, next_off = qdrant_retry("scroll", lambda: q.scroll(
+                LIB.COLLECTION, limit=PAGE, offset=offset, with_payload=True, with_vectors=False
+            ))
+            if not pts:
+                log("end of collection")
+                offset = None
+                break
+
+            rows, pre_hash = [], {}
+            for p in pts:
+                pay = p.payload or {}
+                pid = str(p.id)
+                c["seen"] += 1
+                if pay.get("scope") and not args.force:
+                    c["skipped"] += 1
+                    continue
+                rows.append({"id": pid, "data": pay.get("data") or pay.get("memory") or "",
+                             "source": pay.get("source") or ""})
+                pre_hash[pid] = text_hash(pay)
+
+            if rows:
+                if args.limit:
+                    room = args.limit - processed
+                    if len(rows) > room:
+                        rows = rows[:room]
+                        pre_hash = {r["id"]: pre_hash[r["id"]] for r in rows}
+
+                # Classifier.run() streams to a file; the backfill needs the
+                # records in hand to write payloads, so use the same pull-queue
+                # fan-out inline.
+                recs = _classify_inline(clf, rows, args.batch)
+
+                for rec in recs:
+                    labels_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    scope_counts[rec["scope"]] += 1
+                labels_fh.flush()
+
+                if not args.dry_run:
+                    pairs = [(r["id"], r["scope"]) for r in recs]
+                    qdrant_retry("set_scope", lambda: LIB.set_scope(q, pairs))
+                    # integrity proof: memory text must be byte-identical after the write
+                    back = qdrant_retry("retrieve", lambda: q.retrieve(
+                        LIB.COLLECTION, ids=[p for p, _ in pairs], with_payload=True))
+                    bad = []
+                    for bp in back:
+                        pid = str(bp.id)
+                        if text_hash(bp.payload or {}) != pre_hash.get(pid):
+                            bad.append(pid)
+                    if bad:
+                        log(f"!! ABORT: memory text changed for {len(bad)} rows: {bad[:5]}")
+                        sys.exit(2)
+                    got = sum(1 for bp in back if (bp.payload or {}).get("scope"))
+                    if got != len(back):
+                        log(f"!! ABORT: scope missing after write on {len(back)-got} rows")
+                        sys.exit(2)
+                    c["written"] += len(pairs)
+                processed += len(recs)
+
+            offset = next_off
+            c["offset"] = str(offset) if offset is not None else None
+            save_cursor(c)
+            rate = processed / max(time.time() - t0, 1e-9)
+            log(f"seen={c['seen']} written={c['written']} skipped={c['skipped']} "
+                f"this_run={processed} rate={rate*60:.0f}/min")
+            if next_off is None:
+                log("end of collection")
+                break
+    finally:
+        labels_fh.close()
+        c["runs"].append({"at": CTL.now_mdt(), "processed": processed, "dry_run": args.dry_run,
+                          "scopes": dict(scope_counts)})
+        c["offset"] = str(offset) if offset is not None else None
+        save_cursor(c)
+        log(f"=== backfill stop  processed={processed}  scopes={dict(scope_counts)} ===")
+
+
+def _classify_inline(clf, rows, batch_size):
+    """Same pull-queue fan-out as Classifier.run, but returns the records."""
+    import queue as _q
+    import threading as _t
+
+    work_q, results = _q.Queue(), _q.Queue()
+    for i in range(0, len(rows), batch_size):
+        work_q.put(rows[i : i + batch_size])
+    n_batches = work_q.qsize()
+
+    def worker(host):
+        while True:
+            try:
+                batch = work_q.get_nowait()
+            except _q.Empty:
+                return
+            try:
+                results.put(clf.classify_batch(batch, host))
+            except Exception as e:
+                log(f"{host} failed ({e}); re-queueing")
+                work_q.put(batch)
+                return
+
+    threads = [_t.Thread(target=worker, args=(h,), daemon=True) for h in clf.endpoints]
+    for t in threads:
+        t.start()
+    out, got = [], 0
+    while got < n_batches:
+        try:
+            out.extend(results.get(timeout=5))
+            got += 1
+        except _q.Empty:
+            if not any(t.is_alive() for t in threads):
+                log("all endpoints retired mid-page")
+                break
+    return out
+
+
+def cmd_status(args):
+    q = LIB.qdrant()
+    total = q.count(LIB.COLLECTION, exact=True).count
+    scoped = {}
+    try:
+        for hit in q.facet(LIB.COLLECTION, key="scope", limit=200, exact=True).hits:
+            scoped[str(hit.value)] = hit.count
+    except Exception as e:
+        print(f"(facet unavailable: {e})")
+    have = sum(scoped.values())
+    print(f"collection rows : {total:,}")
+    print(f"with scope      : {have:,}  ({have/total*100:.1f}%)")
+    print(f"without scope   : {total-have:,}  -> read as personal:james (default-closed)")
+    for k, v in sorted(scoped.items(), key=lambda kv: -kv[1]):
+        print(f"   {k:26s} {v:,}")
+    c = load_cursor()
+    print(f"\ncursor: offset={c['offset']} seen={c['seen']} written={c['written']} skipped={c['skipped']}")
+    for r in c["runs"][-5:]:
+        print(f"   run {r['at']}  processed={r['processed']}  dry_run={r['dry_run']}")
+
+
+def cmd_verify(args):
+    """Print a hand-check sheet: the memory text next to the scope assigned."""
+    if not LABELS.exists():
+        sys.exit("no labels yet — run the pilot first")
+    labels = [json.loads(l) for l in open(LABELS)]
+    seen, uniq = set(), []
+    for r in reversed(labels):  # newest label per id wins
+        if r["id"] not in seen:
+            seen.add(r["id"])
+            uniq.append(r)
+    rnd = random.Random(args.seed)
+    pick = rnd.sample(uniq, min(args.n, len(uniq)))
+    q = LIB.qdrant()
+    pts = {str(p.id): (p.payload or {}) for p in q.retrieve(LIB.COLLECTION, ids=[r["id"] for r in pick], with_payload=True)}
+    rows = []
+    for i, r in enumerate(pick, 1):
+        pay = pts.get(r["id"], {})
+        rows.append({
+            "n": i, "id": r["id"], "assigned": r["scope"], "cat": r["cat"],
+            "sensitive": r["sensitive"], "reason": r["reason"],
+            "stored_scope": pay.get("scope"), "kind": pay.get("kind"),
+            "text": (pay.get("data") or "").replace("\n", " "),
+        })
+    if args.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+    for r in rows:
+        print(f"\n[{r['n']:02d}] {r['assigned']}   (cat={r['cat']} sens={int(r['sensitive'])} kind={r['kind']})")
+        print(f"     stored_scope={r['stored_scope']}  reason={r['reason']}")
+        print(f"     {r['text'][:400]}")
+        print(f"     id={r['id']}")
+
+
+def cmd_index(args):
+    """Create the keyword payload index on `scope`. Additive; speeds up filtered
+    search. Safe to run at any time, but it is an explicit act, not automatic."""
+    q = LIB.qdrant()
+    q.create_payload_index(collection_name=LIB.COLLECTION, field_name="scope", field_schema="keyword")
+    log("created keyword payload index on `scope`")
+
+
+def cmd_reset(args):
+    if CURSOR.exists():
+        CURSOR.unlink()
+    log("cursor cleared (stored scopes untouched)")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="mem0-scope-backfill", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--limit", type=int, default=0, help="stop after N rows (0 = whole store)")
+    r.add_argument("--batch", type=int, default=20)
+    r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--force", action="store_true", help="re-classify rows that already have a scope")
+    r.add_argument("--origin-default", action="store_true",
+                   help="file an unplaceable row mined from a teammate's own machine under "
+                        "person:<them> instead of personal:james. WIDENS who can read those "
+                        "rows — off unless James asks for it. Regex-floor and model-flagged "
+                        "sensitive rows are never softened by this.")
+    r.set_defaults(fn=cmd_run)
+    sub.add_parser("status").set_defaults(fn=cmd_status)
+    v = sub.add_parser("verify")
+    v.add_argument("--n", type=int, default=30)
+    v.add_argument("--seed", type=int, default=20260820)
+    v.add_argument("--json", action="store_true")
+    v.set_defaults(fn=cmd_verify)
+    sub.add_parser("index").set_defaults(fn=cmd_index)
+    sub.add_parser("reset").set_defaults(fn=cmd_reset)
+    a = ap.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

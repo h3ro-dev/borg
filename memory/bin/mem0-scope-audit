@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""mem0-scope-audit — what is actually encoded in the Studio0 memory store.
+
+Read-only. Draws a fixed-seed random sample from the Qdrant collection,
+classifies each row with local qwen across the fleet Ollama endpoints, and
+writes a composition report. Nothing is written back to the store; the scope
+WRITE path is `mem0-scope-backfill`.
+
+  mem0-scope-audit dump                     # refresh data/scope-audit/corpus.jsonl
+  mem0-scope-audit sample  [--n 2000] [--seed 20260820]
+  mem0-scope-audit classify [--batch 20]    # resumable
+  mem0-scope-audit report                   # -> SCOPE-AUDIT.md
+"""
+
+import argparse
+import importlib.machinery
+import json
+import math
+import random
+import sys
+from collections import Counter, defaultdict
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+LIB = importlib.machinery.SourceFileLoader(
+    "mem0_scope_lib", str(Path(__file__).resolve().parent / "mem0_scope_lib.py")
+).load_module()
+
+WORK = BASE / "data/scope-audit"
+CORPUS = WORK / "corpus.jsonl"
+SAMPLE = WORK / "sample.jsonl"
+LABELS = WORK / "labels-audit.jsonl"
+REPORT = BASE / "SCOPE-AUDIT.md"
+
+KEEP = ("kind", "source", "agent_id", "run_id", "user_id", "added_mdt", "thread_date", "role", "scope")
+
+
+def cmd_dump(args):
+    WORK.mkdir(parents=True, exist_ok=True)
+    q = LIB.qdrant()
+    n = 0
+    with open(CORPUS, "w") as out:
+        for p in LIB.scroll_all(q):
+            pay = p.payload or {}
+            rec = {"id": str(p.id), "data": pay.get("data") or pay.get("memory") or ""}
+            for k in KEEP:
+                if k in pay:
+                    rec[k] = pay[k]
+            out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            n += 1
+    print(f"dumped {n} rows -> {CORPUS}")
+
+
+def load(path):
+    return [json.loads(l) for l in open(path)]
+
+
+def cmd_sample(args):
+    rows = load(CORPUS)
+    rnd = random.Random(args.seed)
+    pick = rnd.sample(rows, min(args.n, len(rows)))
+    with open(SAMPLE, "w") as out:
+        for r in pick:
+            out.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"population={len(rows)}  sample={len(pick)}  seed={args.seed} -> {SAMPLE}")
+
+
+def cmd_classify(args):
+    rows = load(SAMPLE)
+    done = set()
+    if LABELS.exists():
+        for l in open(LABELS):
+            try:
+                done.add(json.loads(l)["id"])
+            except Exception:
+                pass
+    clf = LIB.Classifier(log=lambda m: print(f"  ! {m}", file=sys.stderr))
+    print(f"endpoints: {clf.endpoints}")
+    print(f"{len(rows)} sampled, {len(done)} already labelled, {len(rows)-len(done)} to go")
+    for n, tot in clf.run(rows, args.batch, LABELS, done):
+        print(f"  {n}/{tot}", flush=True)
+    print("classify complete")
+
+
+def wilson(k, n, z=1.96):
+    """95% CI for a proportion — the sample is not the census; say so with numbers."""
+    if n == 0:
+        return (0.0, 0.0)
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (max(0.0, c - h), min(1.0, c + h))
+
+
+def cmd_report(args):
+    """Compute the audit statistics and write data/scope-audit/stats.json.
+
+    Numbers only — the narrative report (SCOPE-AUDIT.md) is written against
+    this file so every figure in prose is traceable to a computed value.
+    """
+    pop = load(CORPUS)
+    labels = {r["id"]: r for r in load(LABELS)}
+    sample = [r for r in load(SAMPLE) if r["id"] in labels]
+    N, n = len(pop), len(sample)
+
+    def ci(k):
+        lo, hi = wilson(k, n)
+        return {"k": k, "pct": round(k / n * 100, 2), "ci": [round(lo * 100, 2), round(hi * 100, 2)],
+                "projected": round(k / n * N)}
+
+    cats = Counter(labels[r["id"]]["cat"] for r in sample)
+    scopes = Counter(labels[r["id"]]["scope"] for r in sample)
+    clients = Counter(s.split(":", 1)[1] for s in
+                      (labels[r["id"]]["scope"] for r in sample) if s.startswith("client:"))
+    sens = [r for r in sample if labels[r["id"]]["sensitive"]]
+    kind_sample = Counter(r.get("kind", "(none)") for r in sample)
+    sens_kind = Counter(r.get("kind", "(none)") for r in sens)
+    cat_by_kind = defaultdict(Counter)
+    for r in sample:
+        cat_by_kind[r.get("kind", "(none)")][labels[r["id"]]["cat"]] += 1
+
+    stats = {
+        "population": N,
+        "sample": n,
+        "seed": args.seed,
+        "moe_50pct": round(1.96 * math.sqrt(0.25 / n) * 100, 2) if n else None,
+        "categories": {k: ci(v) for k, v in cats.most_common()},
+        "scopes": {k: ci(v) for k, v in scopes.most_common()},
+        "clients": {k: {"k": v, "projected": round(v / n * N)} for k, v in clients.most_common()},
+        "population_by_kind": dict(Counter(r.get("kind", "(none)") for r in pop).most_common()),
+        "population_by_agent": dict(Counter(r.get("agent_id", "(none)") for r in pop).most_common()),
+        "sample_by_kind": dict(kind_sample.most_common()),
+        "sensitive": ci(len(sens)),
+        "sensitive_by_kind": {k: {"k": v, "of": kind_sample.get(k, 0)} for k, v in sens_kind.most_common()},
+        "sensitive_ids": [r["id"] for r in sens],
+        "personal_reasons": dict(Counter(labels[r["id"]]["reason"] for r in sample
+                                         if labels[r["id"]]["scope"] == LIB.SCOPE_PERSONAL).most_common()),
+        "personal_cats": dict(Counter(labels[r["id"]]["cat"] for r in sample
+                                      if labels[r["id"]]["scope"] == LIB.SCOPE_PERSONAL).most_common()),
+        "cat_by_kind": {k: dict(v.most_common()) for k, v in cat_by_kind.items()},
+        "unclassified": cats.get("unclassified", 0) + cats.get("", 0),
+    }
+    out = WORK / "stats.json"
+    out.write_text(json.dumps(stats, indent=2))
+    print(json.dumps({k: v for k, v in stats.items() if k not in ("sensitive_ids",)}, indent=2)[:4000])
+    print(f"\n-> {out}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="mem0-scope-audit")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("dump"); s.set_defaults(fn=cmd_dump)
+    s = sub.add_parser("sample"); s.add_argument("--n", type=int, default=2000); s.add_argument("--seed", type=int, default=20260820); s.set_defaults(fn=cmd_sample)
+    s = sub.add_parser("classify"); s.add_argument("--batch", type=int, default=20); s.set_defaults(fn=cmd_classify)
+    s = sub.add_parser("report"); s.add_argument("--seed", type=int, default=20260820); s.set_defaults(fn=cmd_report)
+    a = p.parse_args()
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

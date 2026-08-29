@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.DS_Store
+# weights held pending memorization review — see adapters/WEIGHTS-STATUS.md
+adapters/*/adapters.safetensors

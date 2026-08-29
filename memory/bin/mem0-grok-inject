@@ -1,0 +1,667 @@
+#!/usr/bin/env python3
+"""Grok SessionStart hook — write a mem0 digest Grok injects automatically.
+
+Grok SessionStart stdout is ignored, so this writes ~/.grok/memory/mem0-live.md
+for native first-turn memory injection. Search is embed-only (no LLM).
+
+Retrieval path is direct HTTP to ollama (embed) and qdrant (vector search) using
+stdlib urllib only. No mem0 / fastembed / onnx import, so there is no interpreter
+warm-up tax: measured 45-95 ms embed + 4-40 ms search on this machine, versus the
+5.8-20 s (frequently timing out) `mem0ctl search` subprocess this replaced.
+
+Two retrieval modes:
+  project — cwd is a real project directory. Query terms come from the directory
+            name, the git repo name, the branch, and recently touched files.
+  root    — cwd is "/", $HOME or another non-project root. A single generic query
+            returns near-duplicate boilerplate, so instead run a composite of
+            three legs (active programs / standing rules / open commitments),
+            merge, de-duplicate and recency-weight them.
+
+Gate: RELEVANCE_FLOOR is 0.62. Measured 2026-08-21 on collection `studio0`
+(48,681 points, nomic-embed-text 768d, cosine): eight deliberately off-topic
+queries peaked at 0.5738 and averaged 0.5400, while genuine hits ran 0.62-0.84.
+An ANN index always returns k results, so without a floor above the noise band
+the digest fills with confident irrelevance.
+
+Miss behaviour: if nothing clears the floor, or a backing service is down, any
+existing digest is DELETED and nothing is written. A header-only or "no hits"
+file is itself indexable noise, and a stale digest is worse than none.
+
+Kill switch: touch ~/Library/Memory/mem0/HOOK_OFF
+Always exit 0.
+"""
+
+import hashlib
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+from datetime import datetime, timedelta
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+OUT = Path.home() / ".grok" / "memory" / "mem0-live.md"
+LOG = BASE / "data" / "grok-inject.log"
+
+OLLAMA_URL = os.environ.get("MEM0_OLLAMA_URL", "http://127.0.0.1:11434")
+QDRANT_URL = os.environ.get("MEM0_QDRANT_URL", "http://127.0.0.1:6333")
+COLLECTION = os.environ.get("MEM0_COLLECTION", "studio0")
+EMBED_MODEL = "nomic-embed-text:latest"
+USER_ID = "james"
+
+# Default-closed scope boundary (FINDING A1). Every direct Qdrant read this
+# hook performs is constrained to scopes explicitly granted here. Rows whose
+# payload has no `scope` field are personal:james by policy and cannot match
+# a MatchAny on scope, so they are excluded structurally. Unset/empty grants
+# ZERO scopes: the hook must retrieve nothing at all.
+HOOK_ALLOWED_SCOPES = frozenset(
+    s.strip() for s in os.environ.get("MEM0_GROK_SCOPES", "").split(",") if s.strip()
+)
+IMPOSSIBLE_SCOPE = "__scope_boundary__no_scopes_granted__"
+
+RELEVANCE_FLOOR = float(os.environ.get("MEM0_GROK_FLOOR", "0.62"))
+MAX_FACTS = 8
+PER_LEG_CAP = 4
+OVERFETCH = 24
+FACT_CHARS = 300
+BODY_CHAR_BUDGET = 3300  # ~825 tokens; the digest contract caps at 900
+# Restatement guards. mem0 stores the same fact many times in slightly different
+# words, so Jaccard alone under-catches. Measured 2026-08-21 on three real
+# restatements of one 2026-07-28 rule: Jaccard 0.24-0.45, containment 0.48-0.68,
+# while genuinely distinct facts sat at containment 0.10-0.21. Same-day
+# restatements therefore get the looser containment bar.
+NEAR_DUP_JACCARD = 0.55
+NEAR_DUP_CONTAIN = 0.62
+NEAR_DUP_CONTAIN_SAME_DAY = 0.42
+NEAR_DUP_MIN_OVERLAP = 6  # guards short facts against accidental merging
+HTTP_TIMEOUT = 10.0
+# Hard wall-clock budget, inside Grok's 25 s hook timeout. A hanging (rather than
+# refusing) ollama or qdrant would otherwise burn 6 requests x HTTP_TIMEOUT. Once
+# the deadline passes, retrieval stops and whatever already cleared the floor is
+# written.
+#
+# Why 10 s and not 4 s: Studio0 runs a real fleet. Measured 2026-08-21 17:04 MDT
+# at load average 131, with qwen3.8:27b (19 GB) and qwen3.8:27b-mlx (35 GB) both
+# resident, a single nomic-embed-text call took 14.98 s — the same call took
+# 45-95 ms on the same machine at 12:50. Embedding latency here is a function of
+# fleet contention, not of the model. A 4 s timeout turned every busy moment into
+# a missing digest, which is the defect this script exists to fix.
+DEADLINE_S = 16.0
+
+# Embedding cache. The three root-mode leg queries are fixed strings and the
+# project-mode queries are stable per directory, so their embeddings never change
+# and ollama does not need to be consulted twice for the same text. On a warm
+# cache a root-mode start needs no ollama call at all and finishes on the qdrant
+# search alone — which is what keeps the hook fast while the fleet is loaded.
+EMB_CACHE = BASE / "data" / "grok-inject-embcache.json"
+EMB_CACHE_MAX = 64
+
+socket.setdefaulttimeout(HTTP_TIMEOUT)
+
+ROOTISH = {"/", "/Users", "/tmp", "/private/tmp", "/var", os.sep}
+
+STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "as",
+    "is", "was", "were", "are", "be", "been", "by", "at", "that", "this", "it",
+    "its", "from", "not", "no", "but", "has", "have", "had", "which", "than",
+    "then", "so", "if", "when", "while", "into", "over", "per", "via", "all",
+}
+
+
+# --------------------------------------------------------------------------- io
+
+def log(record: dict) -> None:
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(LOG, "a") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
+def post(url: str, body: dict, timeout: float = HTTP_TIMEOUT) -> dict:
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+_FAST_EMBED = "unset"
+
+
+def _fast_embed():
+    """Use the sibling fast-recall module for embedding when it exists.
+
+    A parallel lane may land ~/Library/Memory/mem0/bin/mem0_recall_fast.py. Adopt
+    it only if it exposes a callable `embed`; any failure falls back to the inline
+    path below, which is already at the measured latency floor.
+    """
+    global _FAST_EMBED
+    if _FAST_EMBED != "unset":
+        return _FAST_EMBED
+    _FAST_EMBED = None
+    try:
+        if (BASE / "bin" / "mem0_recall_fast.py").exists():
+            sys.path.insert(0, str(BASE / "bin"))
+            import mem0_recall_fast  # type: ignore
+
+            fn = getattr(mem0_recall_fast, "embed", None)
+            if callable(fn):
+                _FAST_EMBED = fn
+    except Exception:
+        _FAST_EMBED = None
+    return _FAST_EMBED
+
+
+def _cache_key(text: str) -> str:
+    return hashlib.sha256(f"{EMBED_MODEL}\x00{text}".encode()).hexdigest()[:32]
+
+
+def _cache_load() -> dict:
+    try:
+        data = json.loads(EMB_CACHE.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _cache_store(cache: dict) -> None:
+    try:
+        if len(cache) > EMB_CACHE_MAX:
+            for k in list(cache)[: len(cache) - EMB_CACHE_MAX]:
+                cache.pop(k, None)
+        EMB_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = EMB_CACHE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cache, separators=(",", ":")))
+        tmp.replace(EMB_CACHE)
+    except Exception:
+        pass
+
+
+def embed(text: str, timeout: float = HTTP_TIMEOUT, cache: dict | None = None):
+    key = _cache_key(text)
+    if cache is not None:
+        hit = cache.get(key)
+        if isinstance(hit, list) and hit:
+            return hit
+    fn = _fast_embed()
+    if fn is not None:
+        try:
+            vec = fn(text)
+            if vec:
+                vec = list(vec)
+                if cache is not None:
+                    cache[key] = vec
+                return vec
+        except Exception:
+            pass
+    r = post(f"{OLLAMA_URL}/api/embed", {"model": EMBED_MODEL, "input": text}, timeout)
+    vec = r["embeddings"][0]
+    if cache is not None:
+        cache[key] = vec
+    return vec
+
+
+def _scope_clause() -> dict:
+    """Default-closed scope condition applied to every Qdrant read."""
+    if not HOOK_ALLOWED_SCOPES:
+        # No scopes granted: match nothing. Fail closed, never open.
+        return {"key": "scope", "match": {"value": IMPOSSIBLE_SCOPE}}
+    return {"key": "scope", "match": {"any": sorted(HOOK_ALLOWED_SCOPES)}}
+
+
+def vsearch(vector, limit: int, since: str = "", timeout: float = HTTP_TIMEOUT) -> list[dict]:
+    flt = {
+        "must": [
+            {"key": "user_id", "match": {"value": USER_ID}},
+            _scope_clause(),
+        ]
+    }
+    flt["must_not"] = [
+        {"key": "status", "match": {"value": "tombstoned"}},
+        {"key": "status", "match": {"value": "decayed"}},
+        {"key": "is_canary", "match": {"value": True}},
+    ]
+    if since:
+        flt["must"].append({"key": "thread_date", "range": {"gte": since}})
+    body = {
+        "query": vector,
+        "limit": limit,
+        "filter": flt,
+        "with_payload": [
+            "data", "kind", "agent_id", "thread_date", "added_mdt", "scope", "hash",
+        ],
+    }
+    r = post(f"{QDRANT_URL}/collections/{COLLECTION}/points/query", body, timeout)
+    return r["result"]["points"]
+
+
+# ------------------------------------------------------------------ query build
+
+def pick(payload: dict, *keys, default=""):
+    for k in keys:
+        v = payload.get(k)
+        if v:
+            return v
+    return default
+
+
+def workspace(payload: dict) -> str:
+    return (
+        pick(payload, "cwd", "workspaceRoot", "workspace_root")
+        or os.environ.get("GROK_WORKSPACE_ROOT")
+        or os.getcwd()
+    )
+
+
+def git(cwd: str, *args, timeout=1.5) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", cwd, *args], text=True, timeout=timeout, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        return ""
+
+
+def origin_name(cwd: str) -> str:
+    raw = git(cwd, "remote", "get-url", "origin")
+    if not raw:
+        return ""
+    name = raw.rstrip("/").rsplit("/", 1)[-1]
+    return name[:-4] if name.endswith(".git") else name
+
+
+def recent_files(cwd: str, want: int = 8) -> list[str]:
+    """Basenames of recently touched files — the best cheap signal of live work."""
+    names: list[str] = []
+    out = git(cwd, "log", "-3", "--name-only", "--pretty=format:", timeout=2.0)
+    for line in out.splitlines():
+        line = line.strip()
+        if line:
+            names.append(Path(line).stem)
+    if not names:
+        try:
+            entries = []
+            with os.scandir(cwd) as it:
+                for e in it:
+                    if e.name.startswith("."):
+                        continue
+                    try:
+                        entries.append((e.stat().st_mtime, Path(e.name).stem))
+                    except OSError:
+                        continue
+            entries.sort(reverse=True)
+            names = [n for _, n in entries[: want * 2]]
+        except Exception:
+            names = []
+    seen, out_names = set(), []
+    for n in names:
+        n = re.sub(r"[-_]+", " ", n).strip()
+        key = n.lower()
+        if n and key not in seen and len(n) > 2:
+            seen.add(key)
+            out_names.append(n)
+        if len(out_names) >= want:
+            break
+    return out_names
+
+
+def is_rootish(cwd: str) -> bool:
+    if not cwd:
+        return True
+    p = str(Path(cwd))
+    home = str(Path.home())
+    if p in ROOTISH or p == home:
+        return True
+    # An ancestor of $HOME (for example /Users) carries no project signal.
+    return home.startswith(p + os.sep) and p != home
+
+
+def project_legs(cwd: str, since_recent: str) -> list[tuple[str, str, str]]:
+    """(leg name, query text, thread_date floor) for a real project directory."""
+    parts: list[str] = []
+    dirname = re.sub(r"[-_]+", " ", Path(cwd).name).strip()
+    if dirname:
+        parts.append(dirname)
+    origin = origin_name(cwd)
+    if origin:
+        o = re.sub(r"[-_]+", " ", origin).strip()
+        if o.lower() not in " ".join(parts).lower():
+            parts.append(o)
+    branch = git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
+    if branch and branch not in ("HEAD", "master", "main"):
+        parts.append(re.sub(r"[-_/]+", " ", branch).strip())
+    files = recent_files(cwd)
+
+    identity = " ".join(parts) or dirname or "project"
+    legs = [("project", f"{identity} {' '.join(files[:6])}".strip(), "")]
+    legs.append(
+        ("project-open", f"{identity} open issues blockers decisions next action", since_recent)
+    )
+    return legs
+
+
+def root_legs(since_recent: str, since_month: str) -> list[tuple[str, str, str]]:
+    """Composite for a root/home workspace, where one generic query returns slop."""
+    return [
+        (
+            "programs",
+            "active programs and projects currently in progress, live work underway, "
+            "current status of client and platform lanes",
+            since_recent,
+        ),
+        (
+            "rules",
+            "James standing rules and operating defaults: approval gates, done-state "
+            "language, evidence before completion claims, reporting style",
+            "",
+        ),
+        (
+            "commitments",
+            "open commitments and pending decisions: awaiting approval, not yet sent, "
+            "blocked, on hold, promised but unverified",
+            since_month,
+        ),
+    ]
+
+
+# ----------------------------------------------------------------- merge / rank
+
+def norm_tokens(text: str) -> set:
+    words = re.findall(r"[a-z0-9#]+", text.lower())
+    return {w for w in words if w not in STOPWORDS and len(w) > 2}
+
+
+def near_dup(tokens: set, date_str: str, kept: list[tuple[set, str]]) -> bool:
+    for prev, prev_date in kept:
+        union = tokens | prev
+        smaller = min(len(tokens), len(prev))
+        if not union or not smaller:
+            continue
+        overlap = len(tokens & prev)
+        if overlap / len(union) >= NEAR_DUP_JACCARD:
+            return True
+        contain = overlap / smaller
+        if contain >= NEAR_DUP_CONTAIN:
+            return True
+        if (
+            date_str
+            and date_str == prev_date
+            and contain >= NEAR_DUP_CONTAIN_SAME_DAY
+            and overlap >= NEAR_DUP_MIN_OVERLAP
+        ):
+            return True
+    return False
+
+
+def fact_date(payload: dict) -> str:
+    td = payload.get("thread_date") or ""
+    if td:
+        return td[:10]
+    return (payload.get("added_mdt") or "")[:10]
+
+
+def recency_bonus(date_str: str, today: datetime) -> float:
+    """Ordering nudge only — never lets a fact through the floor."""
+    if not date_str:
+        return 0.0
+    try:
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return 0.0
+    age = (today - d).days
+    if age <= 7:
+        return 0.03
+    if age <= 14:
+        return 0.02
+    if age <= 30:
+        return 0.01
+    return 0.0
+
+
+def collect(legs, today: datetime, started: float) -> tuple[list[dict], int, bool, int]:
+    seen_hash, kept_tokens, out = set(), [], []
+    raw_count = 0
+    truncated = False
+    first_error = None
+    cache = _cache_load()
+    cache_before = len(cache)
+    embed_calls = 0
+    for leg_name, text, since in legs:
+        left = DEADLINE_S - (time.time() - started)
+        if left <= 0.5:
+            truncated = True
+            break
+        try:
+            budget = min(HTTP_TIMEOUT, left)
+            before = len(cache)
+            vec = embed(text, budget, cache)
+            if len(cache) != before:
+                embed_calls += 1
+            points = vsearch(vec, OVERFETCH, since, budget)
+        except Exception as e:
+            # One dead leg must not lose the legs that already worked.
+            first_error = first_error or e
+            truncated = True
+            continue
+        raw_count += len(points)
+        taken = 0
+        for p in points:
+            if taken >= PER_LEG_CAP:
+                break
+            score = float(p.get("score") or 0.0)
+            if score < RELEVANCE_FLOOR:
+                break  # results are score-ordered
+            pl = p.get("payload") or {}
+            # Belt-and-braces: even a filter regression cannot render an
+            # ungranted or unscoped row into the digest.
+            if (pl.get("scope") or "") not in HOOK_ALLOWED_SCOPES:
+                continue
+            body = (pl.get("data") or "").strip()
+            if not body:
+                continue
+            h = pl.get("hash") or body[:120].lower()
+            if h in seen_hash:
+                continue
+            date_str = fact_date(pl)
+            toks = norm_tokens(body)
+            if near_dup(toks, date_str, kept_tokens):
+                continue
+            seen_hash.add(h)
+            kept_tokens.append((toks, date_str))
+            out.append(
+                {
+                    "text": body,
+                    "kind": pl.get("kind") or "mem0",
+                    "agent": pl.get("agent_id") or "",
+                    "date": date_str,
+                    "score": score,
+                    "rank": score + recency_bonus(date_str, today),
+                    "leg": leg_name,
+                }
+            )
+            taken += 1
+    if len(cache) != cache_before:
+        _cache_store(cache)
+    if not out and first_error is not None:
+        raise first_error
+    out.sort(key=lambda r: r["rank"], reverse=True)
+    return out[:MAX_FACTS], raw_count, truncated, embed_calls
+
+
+# ------------------------------------------------------------------- rendering
+
+def tag(f: dict) -> str:
+    bits = [f["kind"]]
+    if f["agent"]:
+        bits.append(f["agent"])
+    if f["date"]:
+        bits.append(f["date"])
+    return " · ".join(bits)
+
+
+def clip(text: str, limit: int = FACT_CHARS) -> str:
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0]
+    return cut.rstrip(",;:.") + "…"
+
+
+LEG_HEADINGS = {
+    "programs": "Active programs",
+    "rules": "Standing rules",
+    "commitments": "Open commitments",
+    "project": "This project",
+    "project-open": "Open on this project",
+}
+
+
+def render(cwd: str, mode: str, legs, facts: list[dict], now_str: str) -> str:
+    out = [
+        "# mem0 live digest",
+        "",
+        f"Written: `{now_str}`",
+        f"Workspace: `{cwd}`",
+        f"Retrieval: `{mode}` — " + ", ".join(f"`{n}`" for n, _, _ in legs),
+        "",
+        "Candidate recall only — not live truth. Verify files and ledgers before acting.",
+        "Do not store credentials, tokens, cookies, or client contact data.",
+        "",
+    ]
+    used = 0
+    for leg_name, _, _ in legs:
+        group = [f for f in facts if f["leg"] == leg_name]
+        if not group:
+            continue
+        heading = f"## {LEG_HEADINGS.get(leg_name, leg_name)}"
+        pending = [heading, ""]
+        for f in group:
+            line = f"- {clip(f['text'])}  _[{tag(f)} · {f['score']:.2f}]_"
+            if used + len(line) > BODY_CHAR_BUDGET:
+                break
+            pending.append(line)
+            used += len(line)
+        if len(pending) > 2:
+            out.extend(pending + [""])
+    return "\n".join(out)
+
+
+def remove_stale() -> bool:
+    try:
+        if OUT.exists():
+            OUT.unlink()
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# ------------------------------------------------------------------------ main
+
+def main() -> int:
+    started = time.time()
+    if (BASE / "HOOK_OFF").exists():
+        return 0
+    try:
+        payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if pick(payload, "subagentType", "subagent_type"):
+        return 0
+
+    cwd = workspace(payload)
+    today = datetime.now()
+    since_recent = (today - timedelta(days=14)).strftime("%Y-%m-%d")
+    since_month = (today - timedelta(days=45)).strftime("%Y-%m-%d")
+
+    if is_rootish(cwd):
+        mode, legs = "root", root_legs(since_recent, since_month)
+    else:
+        mode, legs = "project", project_legs(cwd, since_recent)
+
+    base = {
+        "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "event": "inject",
+        "mode": mode,
+        "cwd": cwd,
+        "legs": [n for n, _, _ in legs],
+        "query_terms": [t for _, t, _ in legs],
+        "floor": RELEVANCE_FLOOR,
+    }
+
+    try:
+        facts, raw, truncated, embed_calls = collect(legs, today, started)
+    except Exception as e:
+        removed = remove_stale()
+        base.update(
+            {
+                "hits": 0,
+                "action": "skipped",
+                "reason": "retrieval-unavailable",
+                "error": type(e).__name__,
+                "removed_stale": removed,
+                "elapsed_ms": int((time.time() - started) * 1000),
+            }
+        )
+        log(base)
+        return 0
+
+    if not facts:
+        removed = remove_stale()
+        base.update(
+            {
+                "hits": 0,
+                "candidates": raw,
+                "embed_calls": embed_calls,
+                "action": "skipped",
+                "reason": "partial-below-floor" if truncated else "below-floor",
+                "removed_stale": removed,
+                "elapsed_ms": int((time.time() - started) * 1000),
+            }
+        )
+        log(base)
+        return 0
+
+    from zoneinfo import ZoneInfo
+
+    now_str = datetime.now(ZoneInfo("America/Denver")).strftime("%Y-%m-%d %H:%M MDT")
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    # Atomic: if Grok's 25 s hook timeout kills this process mid-write, a partial
+    # digest must never become the file Grok indexes.
+    tmp = OUT.with_suffix(".md.tmp")
+    tmp.write_text(render(cwd, mode, legs, facts, now_str), encoding="utf-8")
+    tmp.replace(OUT)
+
+    base.update(
+        {
+            "hits": len(facts),
+            "candidates": raw,
+            "embed_calls": embed_calls,
+            "top_score": round(facts[0]["score"], 4),
+            "min_score": round(facts[-1]["score"], 4),
+            "bytes": OUT.stat().st_size,
+            "partial": truncated,
+            "action": "wrote",
+            "elapsed_ms": int((time.time() - started) * 1000),
+        }
+    )
+    log(base)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as e:
+        log({"event": "inject", "action": "skipped", "reason": "fatal", "error": repr(e)[:200]})
+        raise SystemExit(0)

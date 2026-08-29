@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""OpenAI-/v1 -> Ollama-native shim with GRAMMAR-ENFORCED schemas.
+
+Why: Ollama's OpenAI-compat /v1 endpoint IGNORES response_format json_schema
+(measured 2026-08-20: strict schema request returned a markdown table), and
+there is no way to disable qwen thinking through it. Ollama's NATIVE /api/chat
+enforces `format=<json schema>` at the decoder and accepts think:false.
+
+This shim listens on 127.0.0.1:11500, translates:
+  POST /v1/chat/completions -> POST {upstream}/api/chat
+    - response_format json_schema  -> format=<schema>   (grammar-enforced)
+    - response_format json_object  -> format="json"
+    - temperature/max_tokens       -> options
+    - think:false injected for qwen* models
+    - logprobs/top_logprobs passed through
+  POST /v1/embeddings -> forwarded verbatim to {upstream}/v1/embeddings
+
+Upstream: OLLAMA_UPSTREAM env (default http://127.0.0.1:11434).
+Run: nohup .../ollama-schema-shim >> .../data/shim.log 2>&1 &
+     (on :11500 launchd owns it — com.studio0.ollama-schema-shim, KeepAlive)
+
+PAIR TEE (added 2026-08-28)
+--------------------------
+Every /chat/completions round-trip is copied to data/shim-pairs.jsonl so the
+live backfill's own traffic becomes the training corpus for the next student.
+The 2026-08-28 canary proved a student is only a drop-in replacement for the
+callsite it was trained on: the crowned 4B aced extract_nodes.extract_text and
+scored 0/534 on dedupe_edges.resolve_edge, a shape it had never seen. graphiti
+generates all six shapes here, so this is where to harvest them.
+
+The tee is fire-and-forget and structurally cannot touch the response path:
+the request thread only does one bounded `put_nowait`; a single daemon thread
+does every string, JSON and file operation. Queue full, write error or any
+other failure bumps a counter in data/shim-pairs.jsonl.stats.json and is
+otherwise ignored. Turn it off with SHIM_PAIRS=off.
+"""
+
+import json
+import os
+import queue
+import threading
+import time
+import urllib.request
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+UPSTREAM = os.environ.get("OLLAMA_UPSTREAM", "http://127.0.0.1:11434")
+PORT = int(os.environ.get("SHIM_PORT", "11500"))
+# SHIM_THINK=on lets qwen reason privately while the grammar locks the output
+# shape (GGUF engine supports both simultaneously — measured 2026-08-20, and
+# thinking recovered the supersession judgment that no-think missed).
+THINK = os.environ.get("SHIM_THINK", "off").lower() == "on"
+
+# --- pair tee ---------------------------------------------------------------
+_BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TEE_ON = os.environ.get("SHIM_PAIRS", "on").lower() != "off"
+TEE_F = os.environ.get("SHIM_PAIRS_LOG",
+                       os.path.join(_BASE, "data", "shim-pairs.jsonl"))
+TEE_STATS_F = TEE_F + ".stats.json"
+TEE_MAX_BYTES = int(os.environ.get("SHIM_PAIRS_MAX_BYTES", "65536"))
+TEE_QUEUE_MAX = int(os.environ.get("SHIM_PAIRS_QUEUE", "2000"))
+
+# graphiti names the pydantic model in response_format.json_schema.name, and
+# that name is 1:1 with the internal callsite for every shape the pipeline
+# actually makes (measured against the canary's own per-call log, which read
+# graphiti's `prompt_name` kwarg from inside the client — unavailable out here).
+CALL_TYPE_BY_SCHEMA = {
+    "ExtractedEntities": "extract_nodes.extract_text",   # ambiguous, see below
+    "SummarizedEntities": "extract_nodes.extract_summaries_batch",
+    "EntitySummary": "extract_nodes.extract_summary",
+    "ExtractedEdges": "extract_edges.edge",
+    "EdgeTimestamps": "extract_edges.extract_timestamps",
+    "BatchEdgeTimestamps": "extract_edges.extract_timestamps_batch",
+    "NodeResolutions": "dedupe_nodes.nodes",
+    "NodeDuplicate": "dedupe_nodes.node",
+    "EdgeDuplicate": "dedupe_edges.resolve_edge",
+    "CombinedExtraction": "extract_nodes_and_edges.extract_combined",
+    "Summary": "summarize_nodes.summarize_pair",
+    "SummaryDescription": "summarize_nodes.summary_description",
+}
+# Three callsites share ExtractedEntities, so that one name is not enough.
+AMBIGUOUS_SCHEMAS = {"ExtractedEntities"}
+# Verbatim fragments of graphiti's own system prompts. Used to split an
+# ambiguous schema name, and as the only signal when a request carries no
+# schema at all (json_object mode, the reranker).
+CALL_TYPE_BY_PROMPT = (
+    ("entity extraction specialist for unstructured text",
+     "extract_nodes.extract_text"),
+    ("entity extraction specialist for conversational messages",
+     "extract_nodes.extract_message"),
+    ("entity extraction specialist for JSON data",
+     "extract_nodes.extract_json"),
+    ("generates concise entity summaries from provided context",
+     "extract_nodes.extract_summaries_batch"),
+    ("extracts entity summaries from the provided text",
+     "extract_nodes.extract_summary"),
+    ("entity attribute extraction specialist",
+     "extract_nodes.extract_attributes"),
+    ("expert fact extractor that extracts fact triples",
+     "extract_edges.edge"),
+    ("fact attribute extraction specialist",
+     "extract_edges.extract_attributes"),
+    ("extract temporal bounds from facts",
+     "extract_edges.extract_timestamps"),
+    ("groups duplicate nodes by UUID", "dedupe_nodes.node_list"),
+    ("entity deduplication assistant", "dedupe_nodes.nodes"),
+    ("fact deduplication assistant", "dedupe_edges.resolve_edge"),
+    ("combines summaries into a single dense factual summary",
+     "summarize_nodes.summarize_pair"),
+    ("describes provided contents in a single sentence",
+     "summarize_nodes.summary_description"),
+    ("determining whether the passage is relevant to the query",
+     "reranker.passage_relevance"),
+)
+
+_tee_q = queue.Queue(maxsize=TEE_QUEUE_MAX)
+_tee_lock = threading.Lock()
+_tee_stats = {"schema": "shim-pairs/1", "pid": os.getpid(), "port": PORT,
+              "started_at": None, "updated_at": None, "written": 0,
+              "truncated": 0, "ok_true": 0, "ok_false": 0,
+              "dropped_queue_full": 0, "errors_enqueue": 0,
+              "errors_write": 0, "errors_stats": 0, "by_call_type": {}}
+
+
+def _bump(key, n=1):
+    """Counter bump that can never raise into a request thread."""
+    try:
+        with _tee_lock:
+            _tee_stats[key] = _tee_stats.get(key, 0) + n
+    except Exception:                      # noqa: BLE001 - logging is never fatal
+        pass
+
+
+def tee(body, out, ok, err=None):
+    """Hand one round-trip to the writer thread. Never blocks, never raises."""
+    if not TEE_ON:
+        return
+    try:
+        _tee_q.put_nowait((time.time(), body, out, ok, err))
+    except queue.Full:
+        _bump("dropped_queue_full")
+    except Exception:                      # noqa: BLE001 - logging is never fatal
+        _bump("errors_enqueue")
+
+
+def _prompt_blob(msgs):
+    parts = []
+    for m in msgs[:4]:
+        c = m.get("content")
+        if isinstance(c, str):
+            parts.append(c[:600])
+    return "\n".join(parts)
+
+
+def call_type(body, schema_name):
+    """graphiti's own callsite label for this request, best effort."""
+    label = CALL_TYPE_BY_SCHEMA.get(schema_name)
+    if label and schema_name not in AMBIGUOUS_SCHEMAS:
+        return label
+    blob = _prompt_blob(body.get("messages") or [])
+    for needle, name in CALL_TYPE_BY_PROMPT:
+        if needle in blob:
+            return name
+    if label:
+        return label
+    return "unknown:" + (schema_name or "no-schema")
+
+
+def _cap(rec, cap):
+    """Serialize `rec` inside `cap` bytes, still valid JSON. Halves the largest
+    text field until it fits, so a giant prompt is trimmed rather than dropped."""
+    truncated = False
+    for _ in range(60):
+        line = json.dumps(rec, ensure_ascii=False)
+        if len(line.encode("utf-8")) <= cap:
+            return line, truncated
+        targets = []
+        if isinstance(rec.get("response"), str):
+            targets.append(("response", None, rec["response"]))
+        for i, m in enumerate(rec.get("messages") or []):
+            if isinstance(m.get("content"), str):
+                targets.append(("messages", i, m["content"]))
+        biggest = max(targets, key=lambda t: len(t[2])) if targets else None
+        if biggest is None or len(biggest[2]) <= 200:
+            break
+        truncated = True
+        rec["truncated"] = True
+        key, idx, text = biggest
+        keep = max(200, len(text) // 2)
+        cut = text[:keep] + "...[cut %d chars]" % (len(text) - keep)
+        if idx is None:
+            rec[key] = cut
+        else:
+            rec[key][idx]["content"] = cut
+    # Nothing left to shrink: keep the shape, drop the payload.
+    rec["truncated"] = True
+    rec["messages"] = []
+    rec["response"] = ""
+    return json.dumps(rec, ensure_ascii=False), True
+
+
+def _record(item):
+    at, body, out, ok, err = item
+    msgs = []
+    for m in (body.get("messages") or []):
+        c = m.get("content")
+        msgs.append({"role": m.get("role", "user"),
+                     "content": c if isinstance(c, str)
+                     else json.dumps(c, ensure_ascii=False)})
+    resp = ""
+    if out:
+        try:
+            resp = out["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError, TypeError):
+            resp = ""
+    rf = body.get("response_format") or {}
+    schema_name = (rf.get("json_schema") or {}).get("name")
+    rec = {"at": datetime.fromtimestamp(at).astimezone().isoformat(
+               timespec="seconds"),
+           "call_type": call_type(body, schema_name),
+           "messages": msgs,
+           "response": resp,
+           "model": body.get("model", ""),
+           "ok": bool(ok)}
+    if schema_name:
+        rec["schema"] = schema_name
+    if err:
+        rec["error"] = err
+    rec["port"] = PORT
+    return rec
+
+
+def _write_stats():
+    try:
+        with _tee_lock:
+            _tee_stats["updated_at"] = datetime.now().astimezone().isoformat(
+                timespec="seconds")
+            blob = json.dumps(_tee_stats, indent=1)
+        tmp = TEE_STATS_F + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(blob)
+        os.replace(tmp, TEE_STATS_F)
+    except Exception:                      # noqa: BLE001 - logging is never fatal
+        _bump("errors_stats")
+
+
+def _tee_writer():
+    """The only thread that touches the pairs file. Nothing it does — a full
+    disk, a bad record, a permission error — can reach a request thread."""
+    fh, since_stats, last_stats = None, 0, 0.0
+    _tee_stats["started_at"] = datetime.now().astimezone().isoformat(
+        timespec="seconds")
+    while True:
+        try:
+            item = _tee_q.get(timeout=10)
+        except queue.Empty:
+            # Idle: keep the sidecar current so it never reads as stale.
+            _write_stats()
+            since_stats, last_stats = 0, time.time()
+            continue
+        try:
+            rec = _record(item)
+            line, cut = _cap(rec, TEE_MAX_BYTES)
+            if fh is None:
+                fh = open(TEE_F, "a", encoding="utf-8")
+            fh.write(line + "\n")
+            fh.flush()
+            with _tee_lock:
+                _tee_stats["written"] += 1
+                _tee_stats["ok_true" if rec["ok"] else "ok_false"] += 1
+                if cut:
+                    _tee_stats["truncated"] += 1
+                by = _tee_stats["by_call_type"]
+                by[rec["call_type"]] = by.get(rec["call_type"], 0) + 1
+            since_stats += 1
+        except Exception:                  # noqa: BLE001 - logging is never fatal
+            _bump("errors_write")
+            try:
+                if fh is not None:
+                    fh.close()
+            except Exception:              # noqa: BLE001
+                pass
+            fh = None
+        if since_stats >= 10 or time.time() - last_stats > 10:
+            _write_stats()
+            since_stats, last_stats = 0, time.time()
+
+
+def post_upstream(path, payload, timeout=600):
+    req = urllib.request.Request(
+        UPSTREAM + path,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def translate_chat(body):
+    model = body.get("model", "")
+    native = {
+        "model": model,
+        "messages": [
+            {"role": m.get("role", "user"), "content": m.get("content") or ""}
+            for m in body.get("messages", [])
+        ],
+        "stream": False,
+        "options": {},
+    }
+    if body.get("temperature") is not None:
+        native["options"]["temperature"] = body["temperature"]
+    mt = body.get("max_tokens") or body.get("max_completion_tokens")
+    if mt:
+        native["options"]["num_predict"] = mt
+    rf = body.get("response_format") or {}
+    if rf.get("type") == "json_schema":
+        schema = (rf.get("json_schema") or {}).get("schema")
+        native["format"] = schema if schema else "json"
+    elif rf.get("type") == "json_object":
+        native["format"] = "json"
+    if model.startswith("qwen"):
+        native["think"] = THINK
+    # pin the model in memory: 5-minute keep_alive churn between 20GB models
+    # is what wedged the scheduler on 2026-08-21 — swaps stall every queue
+    native["keep_alive"] = os.environ.get("SHIM_KEEP_ALIVE", "2h")
+    if body.get("logprobs"):
+        native["logprobs"] = True
+        if body.get("top_logprobs"):
+            native["top_logprobs"] = body["top_logprobs"]
+    return native
+
+
+def to_openai(native_resp, model):
+    msg = native_resp.get("message", {})
+    return {
+        "id": "shim-" + str(int(time.time() * 1000)),
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": msg.get("content", "")},
+                "finish_reason": "stop",
+                "logprobs": msg.get("logprobs"),
+            }
+        ],
+        "usage": {
+            "prompt_tokens": native_resp.get("prompt_eval_count", 0),
+            "completion_tokens": native_resp.get("eval_count", 0),
+            "total_tokens": native_resp.get("prompt_eval_count", 0) + native_resp.get("eval_count", 0),
+        },
+    }
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def _reply(self, code, obj):
+        data = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):
+        try:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        except Exception:
+            return self._reply(400, {"error": "bad json"})
+        is_chat = self.path.rstrip("/").endswith("/chat/completions")
+        try:
+            if is_chat:
+                native = translate_chat(body)
+                resp = post_upstream("/api/chat", native)
+                out = to_openai(resp, body.get("model", ""))
+                # Enqueue before the reply so a client that hangs up mid-write
+                # still leaves the pair on disk. It is one bounded put_nowait —
+                # no I/O, no serialization, nothing that can block or raise.
+                tee(body, out, True)
+                return self._reply(200, out)
+            if self.path.rstrip("/").endswith("/embeddings"):
+                resp = post_upstream("/v1/embeddings", body)
+                return self._reply(200, resp)
+            return self._reply(404, {"error": f"unsupported path {self.path}"})
+        except Exception as e:
+            err = f"{type(e).__name__}: {str(e)[:200]}"
+            if is_chat:
+                tee(body, None, False, err)
+            return self._reply(500, {"error": err})
+
+    def do_GET(self):
+        if self.path in ("/", "/health"):
+            return self._reply(200, {"ok": True, "upstream": UPSTREAM})
+        return self._reply(404, {"error": "unknown"})
+
+
+if __name__ == "__main__":
+    print(f"schema-shim on 127.0.0.1:{PORT} -> {UPSTREAM}", flush=True)
+    if TEE_ON:
+        # Daemon: the tee must never hold the shim open at shutdown.
+        threading.Thread(target=_tee_writer, name="pair-tee",
+                         daemon=True).start()
+        print(f"pair-tee -> {TEE_F} (cap {TEE_MAX_BYTES}B/record)", flush=True)
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""mem0 MCP server — Studio0 shared local memory over stdio.
+
+Exposes the same store as `mem0ctl` (Qdrant server container mem0-qdrant on
+127.0.0.1:6333, Ollama models on 127.0.0.1:11434, telemetry disabled).
+Register in Claude Code:  claude mcp add --scope user mem0 -- <this file>
+Register in Codex:        [mcp_servers.mem0] command = "<this file>"
+Register in Grok Build:   grok mcp add --scope user mem0 <this file>  (startup_timeout_sec = 60)
+"""
+
+import os
+
+os.environ["MEM0_TELEMETRY"] = "false"
+
+import importlib.machinery
+import json
+import secrets
+import sys
+import threading
+from pathlib import Path
+
+CTL = importlib.machinery.SourceFileLoader(
+    "mem0ctl_mod", str(Path(__file__).resolve().parent / "mem0ctl")
+).load_module()
+FAST = importlib.machinery.SourceFileLoader(
+    "mem0_recall_fast_mcp", str(Path(__file__).resolve().parent / "mem0_recall_fast.py")
+).load_module()
+
+from fastmcp import FastMCP
+
+HTTP_MODE = "--http" in sys.argv
+TOKEN_F = Path(__file__).resolve().parent.parent / "data/mcp-token"
+
+
+def _load_or_create_token() -> str:
+    if not TOKEN_F.exists():
+        TOKEN_F.write_text(secrets.token_urlsafe(32))
+        TOKEN_F.chmod(0o600)
+    return TOKEN_F.read_text().strip()
+
+
+_auth = None
+if HTTP_MODE:
+    from fastmcp.server.auth import AccessToken, TokenVerifier
+
+    class StaticBearerVerifier(TokenVerifier):
+        """Tailnet exposure still requires auth: the tailnet has non-James devices."""
+
+        def __init__(self, token: str):
+            super().__init__()
+            self._token = token
+
+        async def verify_token(self, token: str):
+            if secrets.compare_digest(token, self._token):
+                return AccessToken(token=token, client_id="studio0-fleet", scopes=["memory"])
+            return None
+
+    _auth = StaticBearerVerifier(_load_or_create_token())
+
+mcp = FastMCP("mem0", auth=_auth)
+
+USER = "james"
+_instances = {}
+_lock = threading.Lock()
+
+
+def M(model_key: str = "llama"):
+    with _lock:
+        if model_key not in _instances:
+            _instances[model_key] = CTL.get_memory(model_key)
+        return _instances[model_key]
+
+
+def _rows(res):
+    return res.get("results", res) if isinstance(res, dict) else res
+
+
+def _fmt(rows):
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "memory": r.get("memory"),
+                "score": round(r["score"], 3) if isinstance(r.get("score"), (int, float)) else None,
+                "id": r.get("id"),
+                "agent": r.get("agent_id"),
+                "metadata": r.get("metadata"),
+            }
+        )
+    return json.dumps(out, default=str, ensure_ascii=False)
+
+
+@mcp.tool
+def memory_search(query: str, limit: int = 5, agent: str = "") -> str:
+    """Search Studio0 shared memory by meaning (works with zero keyword overlap).
+    Returns facts with relevance scores, ids, and metadata; corpus-seeded rows
+    carry a source file path in metadata for full detail. Use this FIRST when
+    you need an operational fact, a prior decision, a preference, or a pointer
+    into James's memory corpus."""
+    return _fmt(FAST.search(
+        query,
+        limit=limit,
+        min_score=0.1,
+        timeout_s=10.0,
+        user_id=USER,
+        agent_id=agent or None,
+    ))
+
+
+@mcp.tool
+def memory_add(text: str, agent: str = "", run_id: str = "", raw: bool = False) -> str:
+    """Store a durable fact in Studio0 shared memory. One plain sentence per
+    fact works best. NEVER store credentials, tokens, cookies, client personal
+    data (emails/phones/addresses), or dollar amounts. Set raw=true to store
+    verbatim (skips LLM distillation). Pass your agent name in `agent`."""
+    def do(model_key):
+        return M(model_key).add(
+            [{"role": "user", "content": text}],
+            user_id=USER,
+            agent_id=agent or None,
+            run_id=run_id or None,
+            metadata={"added_mdt": CTL.now_mdt(), "source": "mcp"},
+            infer=not raw,
+        )
+
+    try:
+        res, used = do("qwen"), "qwen"
+    except Exception:
+        res, used = do("llama"), "llama"
+    events = _rows(res)
+    if not events:
+        return json.dumps({"model": CTL.MODELS[used], "events": [], "note": "no memory change — extractor found nothing new; retry with raw=true to store verbatim"})
+    return json.dumps({"model": CTL.MODELS[used], "events": events}, default=str, ensure_ascii=False)
+
+
+@mcp.tool
+def memory_list(limit: int = 20, agent: str = "") -> str:
+    """List stored memories (newest-agnostic dump, up to `limit`)."""
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    must = [FieldCondition(key="user_id", match=MatchValue(value=USER))]
+    if agent:
+        must.append(FieldCondition(key="agent_id", match=MatchValue(value=agent)))
+    points, _ = QdrantClient(host="127.0.0.1", port=6333).scroll(
+        "studio0",
+        scroll_filter=Filter(
+            must=must,
+            must_not=[
+                FieldCondition(key="status", match=MatchValue(value=CTL.TOMBSTONE_STATUS)),
+                FieldCondition(key="status", match=MatchValue(value=CTL.DECAY_STATUS)),
+                FieldCondition(key="is_canary", match=MatchValue(value=True)),
+            ],
+        ),
+        limit=limit,
+        with_payload=True,
+        with_vectors=False,
+    )
+    rows = [
+        {
+            "id": str(point.id),
+            "memory": (point.payload or {}).get("data") or "",
+            "agent_id": (point.payload or {}).get("agent_id"),
+            "metadata": point.payload or {},
+        }
+        for point in points
+    ]
+    return _fmt(rows)
+
+
+@mcp.tool
+def memory_delete(memory_id: str) -> str:
+    """Reversibly retire one memory by its id."""
+    changed = CTL.tombstone_memory_id(
+        memory_id,
+        retired_by="mcp",
+        reason="explicit MCP retirement",
+    )
+    return json.dumps({"tombstoned": memory_id, "changed": changed})
+
+
+@mcp.tool
+def memory_stats() -> str:
+    """Count memories and show the per-agent breakdown."""
+    n, agents = CTL._qdrant_stats(USER)
+    return json.dumps({"total": n, "by_agent": agents})
+
+
+if __name__ == "__main__":
+    if HTTP_MODE:
+        i = sys.argv.index("--http")
+        port = int(sys.argv[i + 1]) if len(sys.argv) > i + 1 and sys.argv[i + 1].isdigit() else 8765
+        mcp.run(transport="http", host="127.0.0.1", port=port)
+    else:
+        mcp.run()

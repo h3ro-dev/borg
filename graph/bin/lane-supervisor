@@ -1,0 +1,761 @@
+#!/usr/bin/env python3
+"""Crash/stall supervisor for the graphiti pipeline lanes (Studio0).
+
+Owner order 2026-08-21 09:47 MDT: "python crashed, we need some type of
+monitoring to catch and restart stuff when these alerts hit."
+
+House shape (officers/HARNESS-CHARTER.md): launchd supervises, this CLI does
+the work, an append-only JSONL is the receipt. One pass per invocation —
+launchd owns the loop (com.studio0.graphiti-lanes, StartInterval 300).
+
+Pass order:
+    kill switch -> ollama -> schema shim -> lanes -> crash scan
+
+HARD RULES (owner doctrine, measured 2026-08-21):
+  * Kill ONLY by lockfile pid, -TERM then -KILL after 10s. NEVER pkill by
+    pattern — a pattern kill took out our own monitors twice on 08-21.
+  * Locks are authoritative. A live, matching lock pid means hands off.
+  * STALLED  = lock pid alive but log mtime older than the lane's threshold.
+  * DEAD     = lock missing / pid gone without the lane's stop condition met.
+  * ollama is restarted only when /api/version itself fails — never because
+    it is merely slow or busy.
+  * LUNA is paid: total pairs are hard-capped at 200 and each relaunch asks
+    only for the remaining balance.
+
+Kill switch: create the file `KILL_SWITCH` beside this executable
+(bin/KILL_SWITCH) and the supervisor stands down without touching anything.
+"""
+import argparse
+import json
+import os
+import re
+import signal
+import subprocess
+import time
+import urllib.error
+import urllib.request
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+BASE = BIN.parent
+DATA = BASE / "data"
+VENV_PY = BASE / "venv" / "bin" / "python"
+
+RECEIPTS = DATA / "supervisor-receipts.jsonl"
+SEEN_CRASHES = DATA / "supervisor-seen-crashes.json"
+SELF_LOCK = DATA / "supervisor.lock"
+KILL_SWITCH = BIN / "KILL_SWITCH"
+CRASH_DIR = Path.home() / "Library" / "Logs" / "DiagnosticReports"
+
+SCHEMA = "lane-supervisor/1"
+ROTATE_BYTES = 8 * 1024 * 1024
+
+# Restart governor: a crash-looping lane must not become a restart storm.
+MIN_RESTART_GAP_S = 240
+RESTART_BUDGET = 4
+RESTART_WINDOW_S = 3600
+DEP_COOLDOWN_S = {"schema-shim": 600, "ollama": 1800}
+
+SHIM_HEALTH = "http://127.0.0.1:11500/health"
+SHIM_TIMEOUT_S = 5
+OLLAMA_VERSION = "http://127.0.0.1:11434/api/version"
+OLLAMA_TIMEOUT_S = 10
+BREW = "/opt/homebrew/bin/brew"
+
+LUNA_PAIR_CAP = 600          # owner raised 200 -> 600 on 2026-08-21
+CRASH_WINDOW_S = 24 * 3600
+
+# --- lane table -------------------------------------------------------------
+# stall_s: log mtime older than this, with a live lock pid, means STALLED.
+# start_re: the lane's own "here is what I queued" line; episodes=0 on the
+#           most recent one is the lane's stop condition.
+LANES = [
+    {
+        # Owner 2026-08-21 ~10:00 MDT: bulk mode is BENCHED (measured no
+        # advantage — batch-10's first batch ran >43 min, ~258s/ep, against
+        # serial's known 278s/ep). The canonical graph lane is the SERIAL
+        # script. backfill_bulk.py is listed as benched, not deleted: it
+        # shares this lock, so the supervisor must still recognise it as a
+        # legitimate lock holder and leave it alone if a human runs it.
+        "name": "graph",
+        "script": "backfill.py",
+        "argv": ["backfill.py", "--limit", "2000", "--fetch", "12000"],
+        "env": {},
+        "benched": ["backfill_bulk.py"],
+        "lock": "backfill.lock",
+        "log": "backfill.log",
+        "nohup": "backfill-nohup.out",
+        "stall_s": 25 * 60,
+        "start_re": r"RUN-START\b.*\bslice_episodes=(\d+)",
+        "tag": None,
+    },
+    {
+        "name": "ox",
+        "script": "harvest/ox_harvest.py",
+        "argv": ["harvest/ox_harvest.py", "--limit", "1500", "--fetch",
+                 "30000", "--workers", "16"],
+        "env": {},
+        "lock": "ox-harvest.lock",
+        "log": "ox-harvest.log",
+        "nohup": "harvest-nohup.out",
+        "stall_s": 20 * 60,
+        "start_re": r"HARVEST-START\b.*\bepisodes=(\d+)",
+        "tag": "ox",
+    },
+    {
+        "name": "qwen",
+        "script": "harvest/ox_harvest.py",
+        "argv": ["harvest/ox_harvest.py", "--limit", "1000", "--fetch",
+                 "30000", "--workers", "6"],
+        "env": {"HARVEST_TAG": "qwen",
+                "HARVEST_MODEL": "qwen3.8:27b-mlx",
+                "HARVEST_URL": ("http://127.0.0.1:11436/v1/chat/completions,"
+                                "http://127.0.0.1:11437/v1/chat/completions,"
+                                "http://127.0.0.1:11438/v1/chat/completions")},
+        "lock": "qwen-harvest.lock",
+        "log": "qwen-harvest.log",
+        "nohup": "qwen-harvest-nohup.out",
+        "stall_s": 20 * 60,
+        "start_re": r"HARVEST-START\b.*\bepisodes=(\d+)",
+        "tag": "qwen",
+    },
+    {
+        "name": "luna",
+        "script": "harvest/ox_harvest.py",
+        "argv": ["harvest/ox_harvest.py", "--limit", "600", "--fetch",
+                 "30000", "--workers", "5"],
+        "env": {"HARVEST_TAG": "luna", "HARVEST_MODEL": "gpt-5.6-luna",
+                "HARVEST_CLI": "codex", "HARVEST_EFFORT": "max"},
+        "lock": "luna-harvest.lock",
+        "log": "luna-harvest.log",
+        "nohup": "luna-harvest-nohup.out",
+        "stall_s": 20 * 60,
+        "start_re": r"HARVEST-START\b.*\bepisodes=(\d+)",
+        "tag": "luna",
+        "paid": True,
+        "pairs": "training-pairs-luna.jsonl",
+        "pair_cap": LUNA_PAIR_CAP,
+    },
+    {
+        # Owner: TERRA finished 60/60 at 09:31 MDT. Considered every pass so
+        # the receipt proves it was looked at; never relaunched.
+        "name": "terra",
+        "complete": True,
+        "log": "terra-harvest.log",
+        "pairs": "training-pairs-terra.jsonl",
+    },
+]
+
+
+# --- small helpers ----------------------------------------------------------
+def now():
+    return datetime.now().astimezone()
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def proc_cmd(pid):
+    """Full command line of one pid, or '' if it is gone. Read-only."""
+    r = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def proc_env(pid):
+    """Command line plus environment of one pid (macOS `ps -E`). Read-only."""
+    r = subprocess.run(["ps", "-p", str(pid), "-wwwEo", "command="],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def read_lock(path):
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def log_age_s(path):
+    try:
+        return time.time() - path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def tail_text(path, nbytes=256 * 1024):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - nbytes))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def count_lines(path):
+    try:
+        with open(path, "rb") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
+
+
+def last_queued(log_path, start_re):
+    """Episodes queued by the most recent start line, or None if never run."""
+    hits = re.findall(start_re, tail_text(log_path))
+    return int(hits[-1]) if hits else None
+
+
+# --- receipts ---------------------------------------------------------------
+class Receipts:
+    def __init__(self, pass_id, dry_run):
+        self.pass_id = pass_id
+        self.dry_run = dry_run
+        self.lines = []
+        if RECEIPTS.exists() and RECEIPTS.stat().st_size > ROTATE_BYTES:
+            RECEIPTS.rename(RECEIPTS.with_suffix(
+                f".{now():%Y%m%dT%H%M%S}.jsonl"))
+
+    def write(self, target, kind, state, action, reason, **detail):
+        t = now()
+        rec = {"schema": SCHEMA, "pass": self.pass_id,
+               "ts": t.isoformat(timespec="seconds"),
+               "ts_utc": t.astimezone(timezone.utc).isoformat(
+                   timespec="seconds"),
+               "target": target, "kind": kind, "state": state,
+               "action": action, "reason": reason}
+        if self.dry_run:
+            rec["dry_run"] = True
+        if detail:
+            rec["detail"] = detail
+        line = json.dumps(rec, sort_keys=False)
+        with open(RECEIPTS, "a") as f:
+            f.write(line + "\n")
+        os.chmod(RECEIPTS, 0o600)
+        self.lines.append(rec)
+        print(line, flush=True)
+        return rec
+
+
+def recent_actions(target, action, window_s):
+    """Timestamps of past receipts for one target/action inside a window."""
+    out, cutoff = [], time.time() - window_s
+    for line in tail_text(RECEIPTS, 512 * 1024).splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r.get("target") != target or r.get("action") != action:
+            continue
+        if r.get("dry_run"):
+            continue
+        try:
+            ts = datetime.fromisoformat(r["ts"]).timestamp()
+        except (KeyError, ValueError):
+            continue
+        if ts >= cutoff:
+            out.append(ts)
+    return sorted(out)
+
+
+def governor_block(name):
+    """Reason string if the restart governor forbids a restart, else None."""
+    hist = recent_actions(name, "restart", RESTART_WINDOW_S)
+    if hist and time.time() - hist[-1] < MIN_RESTART_GAP_S:
+        return (f"restart-gap-not-elapsed "
+                f"({int(time.time() - hist[-1])}s < {MIN_RESTART_GAP_S}s)")
+    if len(hist) >= RESTART_BUDGET:
+        return (f"restart-budget-exhausted ({len(hist)} restarts in "
+                f"{RESTART_WINDOW_S // 60}min) — needs a human")
+    return None
+
+
+# --- process control --------------------------------------------------------
+def is_python_proc(cmd):
+    """True only for a real python executable. Watcher shells carry the lane's
+    command line inside their own argv (`zsh -c '... ox_harvest.py ...'`), so
+    a substring match alone mistakes a watcher for the lane it watches."""
+    first = cmd.split(" ", 1)[0] if cmd else ""
+    return "python" in Path(first).name.lower()
+
+
+def pid_runs(pid, script, tag):
+    """True only if this pid is a python process running `script` under `tag`."""
+    blob = proc_env(pid)
+    if not is_python_proc(blob) or script not in blob:
+        return False
+    if tag is None:
+        return True
+    m = re.search(r"\bHARVEST_TAG=(\S+)", blob)
+    return (m.group(1) if m else "ox") == tag
+
+
+def lane_pid_matches(pid, lane):
+    """True only if this pid really is this lane's canonical script. Guards
+    against a recycled pid in a stale lock — we never kill what we cannot
+    positively identify."""
+    return pid_runs(pid, lane["script"], lane.get("tag"))
+
+
+def benched_pid_matches(pid, lane):
+    """A retired script that still shares this lane's lock. It is a valid lock
+    holder: never launched by us, never killed by us, always deferred to."""
+    return any(pid_runs(pid, s, lane.get("tag"))
+               for s in lane.get("benched", []))
+
+
+def find_lane_process(lane):
+    """Any live pid writing this lane, canonical or benched, found read-only.
+    Never used to kill — only to refuse launching a second writer."""
+    scripts = [lane["script"]] + list(lane.get("benched", []))
+    r = subprocess.run(["ps", "-axo", "pid=,command="],
+                       capture_output=True, text=True)
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        pid_s, _, cmd = line.partition(" ")
+        if not pid_s.isdigit() or not is_python_proc(cmd):
+            continue
+        if "lane-supervisor" in cmd or int(pid_s) == os.getpid():
+            continue
+        for s in scripts:
+            if s in cmd and pid_runs(int(pid_s), s, lane.get("tag")):
+                return int(pid_s)
+    return None
+
+
+def terminate(pid, grace_s=10):
+    """-TERM, then -KILL after the grace period. By pid only, never a pattern."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return "already-gone"
+    deadline = time.time() + grace_s
+    while time.time() < deadline:
+        if not pid_alive(pid):
+            return "term"
+        time.sleep(0.5)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return "term"
+    for _ in range(10):
+        if not pid_alive(pid):
+            return "kill"
+        time.sleep(0.5)
+    return "survived"
+
+
+LANE_ENV_KEYS = ("HARVEST_TAG", "HARVEST_MODEL", "HARVEST_URL", "HARVEST_CLI",
+                 "HARVEST_EFFORT", "GRAPH_LLM_URL", "GRAPH_LLM_MODEL",
+                 "SEMAPHORE_LIMIT")
+
+
+def lane_environ(lane):
+    """A clean environment: every lane-shaping key is dropped first, so no
+    value inherited from launchd or a shell can mis-tag a relaunched lane."""
+    env = dict(os.environ)
+    for k in LANE_ENV_KEYS:
+        env.pop(k, None)
+    env.update(lane.get("env") or {})
+    return env
+
+
+def launch(lane, argv_override=None):
+    """Start a lane detached, then wait for its own lock to prove it is up."""
+    lock, log = DATA / lane["lock"], DATA / lane["log"]
+    before = last_queued(log, lane["start_re"])
+    argv = [str(VENV_PY)] + list(argv_override or lane["argv"])
+    out = open(DATA / lane["nohup"], "a")
+    try:
+        p = subprocess.Popen(argv, cwd=str(BASE), env=lane_environ(lane),
+                             stdin=subprocess.DEVNULL, stdout=out,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+    finally:
+        out.close()
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        time.sleep(1)
+        lp = read_lock(lock)
+        if lp and pid_alive(lp):
+            break
+        if p.poll() is not None:
+            break
+    # The lock proves the process started; its own start line proves it got
+    # as far as queueing work. Both go in the receipt.
+    for _ in range(25):
+        if last_queued(log, lane["start_re"]) != before or p.poll() is not None:
+            break
+        time.sleep(1)
+    lp = read_lock(lock)
+    return {"argv": argv[1:], "spawned_pid": p.pid, "lock_pid": lp,
+            "lock_live": bool(lp and pid_alive(lp)),
+            "queued_before": before,
+            "queued_now": last_queued(log, lane["start_re"]),
+            "exited_early": p.poll()}
+
+
+# --- dependency checks ------------------------------------------------------
+def http_ok(url, timeout_s):
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as r:
+            body = r.read(4096).decode("utf-8", "replace").strip()
+            return r.status == 200, round(time.time() - t0, 3), body[:200]
+    except Exception as e:                      # noqa: BLE001 - any failure
+        return False, round(time.time() - t0, 3), f"{type(e).__name__}: {e}"[:200]
+
+
+def cooldown_block(target):
+    hist = recent_actions(target, "restart", DEP_COOLDOWN_S[target])
+    if hist:
+        return (f"cooldown-active (restarted {int(time.time() - hist[-1])}s "
+                f"ago, cooldown {DEP_COOLDOWN_S[target]}s)")
+    return None
+
+
+def check_ollama(rc, dry):
+    ok, secs, body = http_ok(OLLAMA_VERSION, OLLAMA_TIMEOUT_S)
+    if ok:
+        return rc.write("ollama", "dep", "healthy", "noop",
+                        "api-version-answered", seconds=secs, body=body)
+    block = cooldown_block("ollama")
+    if block:
+        return rc.write("ollama", "dep", "down", "skip", block,
+                        seconds=secs, probe=body)
+    if dry:
+        return rc.write("ollama", "dep", "down", "noop", "dry-run",
+                        would_action="restart", seconds=secs, probe=body)
+    r = subprocess.run([BREW, "services", "restart", "ollama"],
+                       capture_output=True, text=True, timeout=120)
+    ok2, secs2, body2 = http_ok(OLLAMA_VERSION, OLLAMA_TIMEOUT_S)
+    return rc.write("ollama", "dep", "down", "restart",
+                    "api-version-failed", probe=body, rc=r.returncode,
+                    brew_out=(r.stdout + r.stderr).strip()[:300],
+                    recovered=ok2, after_probe=body2, after_seconds=secs2)
+
+
+def shim_pids():
+    """Shim pids found read-only, with this supervisor and the finder itself
+    excluded. Found by pgrep, killed only one-by-one by pid."""
+    r = subprocess.run(["pgrep", "-f", "ollama-schema-shim"],
+                       capture_output=True, text=True)
+    mine = {os.getpid(), os.getppid()}
+    out = []
+    for s in r.stdout.split():
+        if not s.isdigit() or int(s) in mine:
+            continue
+        cmd = proc_cmd(int(s))
+        if "ollama-schema-shim" in cmd and "lane-supervisor" not in cmd:
+            out.append(int(s))
+    return out
+
+
+def check_shim(rc, dry):
+    ok, secs, body = http_ok(SHIM_HEALTH, SHIM_TIMEOUT_S)
+    pids = shim_pids()
+    if ok:
+        return rc.write("schema-shim", "dep", "healthy", "noop",
+                        "health-answered", seconds=secs, pids=pids, body=body)
+    block = cooldown_block("schema-shim")
+    if block:
+        return rc.write("schema-shim", "dep", "down", "skip", block,
+                        seconds=secs, probe=body, pids=pids)
+    if dry:
+        return rc.write("schema-shim", "dep", "down", "noop", "dry-run",
+                        would_action="restart", seconds=secs, probe=body,
+                        pids=pids)
+    killed = {p: terminate(p) for p in pids}
+    outf = open(DATA / "shim.log", "a")
+    env = dict(os.environ, SHIM_THINK="on")
+    try:
+        p = subprocess.Popen([str(VENV_PY), "bin/ollama-schema-shim"],
+                             cwd=str(BASE), env=env, stdin=subprocess.DEVNULL,
+                             stdout=outf, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+    finally:
+        outf.close()
+    ok2, body2 = False, "not-probed"
+    for _ in range(15):
+        time.sleep(1)
+        ok2, _secs2, body2 = http_ok(SHIM_HEALTH, SHIM_TIMEOUT_S)
+        if ok2:
+            break
+    return rc.write("schema-shim", "dep", "down", "restart",
+                    f"health-failed-or-slow (>{SHIM_TIMEOUT_S}s)", probe=body,
+                    killed=killed, new_pid=p.pid, recovered=ok2,
+                    after_probe=body2)
+
+
+# --- lanes ------------------------------------------------------------------
+def luna_budget(lane):
+    """Remaining paid pairs. Caps total luna output at exactly the hard cap."""
+    have = count_lines(DATA / lane["pairs"])
+    return have, max(0, lane["pair_cap"] - have)
+
+
+def check_lane(rc, lane, dry):
+    name = lane["name"]
+    if lane.get("complete"):
+        return rc.write(name, "lane", "done", "noop",
+                        "lane-complete-owner-declared",
+                        pairs=count_lines(DATA / lane["pairs"]))
+
+    lock_f, log_f = DATA / lane["lock"], DATA / lane["log"]
+    pid = read_lock(lock_f)
+    age = log_age_s(log_f)
+    queued = last_queued(log_f, lane["start_re"])
+    base = {"lock_pid": pid, "log_age_s": None if age is None else int(age),
+            "stall_after_s": lane["stall_s"], "last_start_episodes": queued}
+    if lane.get("paid"):
+        base["pairs"], base["pair_budget"] = luna_budget(lane)
+
+    # --- lock pid alive: the lock is authoritative, so decide who holds it
+    # before touching anything.
+    if pid and pid_alive(pid):
+        if not lane_pid_matches(pid, lane):
+            base["holder_cmd"] = proc_cmd(pid)[:160]
+            if benched_pid_matches(pid, lane):
+                return rc.write(name, "lane", "benched-running", "skip",
+                                "lock held by a benched script — deferring, "
+                                "neither killing nor relaunching", **base)
+            # An unrecognised live holder is NOT proof of a recycled pid: on
+            # 2026-08-21 this branch deleted a valid lock and started a second
+            # graph writer, because the lane table was one revision stale.
+            # A live lock now always wins; a human resolves the mismatch.
+            return rc.write(name, "lane", "unrecognised-holder", "skip",
+                            "lock pid alive but not a known script for this "
+                            "lane — refusing to touch a live lock", **base)
+        if age is not None and age > lane["stall_s"]:
+            if dry:
+                return rc.write(name, "lane", "stalled", "noop", "dry-run",
+                                would_action="kill+restart", **base)
+            block = governor_block(name)
+            if block:
+                return rc.write(name, "lane", "stalled", "skip", block, **base)
+            base["kill_result"] = terminate(pid, grace_s=10)
+            if pid_alive(pid):
+                return rc.write(name, "lane", "stalled", "skip",
+                                "kill-failed-process-survived", **base)
+            if read_lock(lock_f) == pid:
+                lock_f.unlink(missing_ok=True)
+            return restart(rc, lane,
+                           f"stalled log idle {int(age)}s > {lane['stall_s']}s",
+                           base, dry)
+        return rc.write(name, "lane", "healthy", "noop",
+                        "lock-pid-alive-and-log-fresh", **base)
+
+    # --- no live lock: done, or dead and owed a relaunch
+    if queued == 0:
+        return rc.write(name, "lane", "done", "noop",
+                        "last-start-queued-0-episodes", **base)
+    if lane.get("paid") and base["pair_budget"] <= 0:
+        return rc.write(name, "lane", "done", "noop",
+                        f"paid-cap-reached ({base['pairs']}/"
+                        f"{lane['pair_cap']} pairs)", **base)
+    if dry:
+        return rc.write(name, "lane", "dead", "noop", "dry-run",
+                        would_action="restart", **base)
+    reason = ("lock-missing" if pid is None else f"lock-pid-{pid}-gone")
+    return restart(rc, lane, reason, base, dry)
+
+
+def restart(rc, lane, reason, base, dry):
+    """The only path that starts a lane. Every guard lives here so no caller
+    can reach a launch without passing all of them."""
+    name = lane["name"]
+    block = governor_block(name)
+    if block:
+        return rc.write(name, "lane", "dead", "skip", block, **base)
+    other = find_lane_process(lane)
+    if other:
+        base["running_pid"] = other
+        return rc.write(name, "lane", "running", "skip",
+                        "process-alive-without-lock — refusing a second "
+                        "writer", **base)
+    argv = None
+    if lane.get("paid"):
+        have, budget = luna_budget(lane)
+        if budget <= 0:
+            return rc.write(name, "lane", "done", "skip",
+                            f"paid-cap-reached ({have}/{lane['pair_cap']})",
+                            **base)
+        argv = list(lane["argv"])
+        argv[argv.index("--limit") + 1] = str(budget)
+    base["launch"] = launch(lane, argv)
+    state = "restarted" if base["launch"]["lock_live"] else "restart-unproven"
+    return rc.write(name, "lane", state, "restart", reason, **base)
+
+
+# --- crash scan -------------------------------------------------------------
+_VENV_LIBS = None
+
+
+def venv_lib_basenames():
+    """Every compiled library our own venv could load. Walked at most once."""
+    global _VENV_LIBS
+    if _VENV_LIBS is None:
+        _VENV_LIBS = set()
+        for _root, _dirs, files in os.walk(BASE / "venv"):
+            for f in files:
+                if f.endswith((".so", ".dylib")):
+                    _VENV_LIBS.add(f)
+    return _VENV_LIBS
+
+
+def parse_ips(path):
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    head, _, rest = raw.partition("\n")
+    try:
+        return json.loads(head), json.loads(rest)
+    except ValueError:
+        return None, None
+
+
+def crash_record(path, payload):
+    """Attribute one crash. Apple redacts .ips paths to /Users/USER/.../*/ so
+    an exact 'Memory/graphiti' match is usually impossible — we fall back to
+    the loaded libraries, which do carry real basenames."""
+    imgs = payload.get("usedImages") or []
+    mem_imgs = [i for i in imgs if "Library/Memory" in (i.get("path") or "")]
+    if not mem_imgs and "Memory/graphiti" not in (payload.get("procPath") or ""):
+        return None
+    basenames = sorted({Path(i["path"]).name for i in mem_imgs})
+    ours = venv_lib_basenames()
+    foreign = [b for b in basenames if b not in ours]
+    if "Memory/graphiti" in (payload.get("procPath") or "") or str(
+            BASE) in (payload.get("procPath") or ""):
+        verdict, confidence = "graphiti", "exact-path"
+    elif foreign:
+        verdict, confidence = "not-graphiti", "library-mismatch"
+    else:
+        verdict, confidence = "possibly-graphiti", "library-subset"
+    ft = payload.get("faultingThread") or 0
+    frames = []
+    try:
+        for fr in (payload["threads"][ft].get("frames") or [])[:14]:
+            img = imgs[fr["imageIndex"]] if fr.get(
+                "imageIndex") is not None else {}
+            frames.append(f"{img.get('name', '?')} {fr.get('symbol', '')}")
+    except (IndexError, KeyError, TypeError):
+        pass
+    term = payload.get("termination") or {}
+    return {"file": path.name,
+            "crash_time": payload.get("captureTime"),
+            "proc": payload.get("procName"),
+            "proc_path": payload.get("procPath"),
+            "pid": payload.get("pid"),
+            "parent": payload.get("parentProc"),
+            "responsible": payload.get("responsibleProc"),
+            "coalition": payload.get("coalitionName"),
+            "signal": (payload.get("exception") or {}).get("signal"),
+            "termination": term.get("indicator"),
+            "asi": payload.get("asi"),
+            "launched": payload.get("procLaunch"),
+            "verdict": verdict, "confidence": confidence,
+            "foreign_libs": foreign[:8],
+            "top_frames": frames[:14]}
+
+
+def scan_crashes(rc, dry=False):
+    try:
+        seen = json.loads(SEEN_CRASHES.read_text())
+    except (OSError, ValueError):
+        seen = {}
+    files = sorted(list(CRASH_DIR.glob("*.ips")) +
+                   list((CRASH_DIR / "Retired").glob("*.ips")))
+    cutoff, checked = time.time() - CRASH_WINDOW_S, 0
+    for p in files:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if st.st_mtime < cutoff or st.st_size > 8 * 1024 * 1024:
+            continue
+        key = f"{p.name}:{int(st.st_mtime)}"
+        if key in seen or checked >= 40:
+            continue
+        checked += 1
+        _summary, payload = parse_ips(p)
+        rec = crash_record(p, payload) if payload else None
+        seen[key] = {"at": now().isoformat(timespec="seconds"),
+                     "verdict": (rec or {}).get("verdict", "unrelated")}
+        if rec:
+            rc.write("crash-scan", "crash", rec["verdict"], "record",
+                     "memory-tree-crash-report-identified", **rec)
+    # A dry run must leave no trace: persisting "seen" here would silently
+    # suppress the real record on the next live pass.
+    if not dry:
+        SEEN_CRASHES.write_text(json.dumps(seen, indent=1, sort_keys=True))
+    return checked
+
+
+# --- pass -------------------------------------------------------------------
+def take_self_lock(rc):
+    pid = read_lock(SELF_LOCK)
+    if pid and pid != os.getpid() and pid_alive(pid) and \
+            "lane-supervisor" in proc_cmd(pid):
+        rc.write("supervisor", "system", "busy", "skip",
+                 "previous-pass-still-running", other_pid=pid)
+        return False
+    SELF_LOCK.write_text(str(os.getpid()))
+    return True
+
+
+def main():
+    ap = argparse.ArgumentParser(description="one supervision pass")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="decide and receipt, but change nothing")
+    args = ap.parse_args()
+
+    pass_id = f"{now():%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:8]}"
+    rc = Receipts(pass_id, args.dry_run)
+
+    if KILL_SWITCH.exists():
+        rc.write("supervisor", "system", "halted", "skip",
+                 "kill-switch-present", switch=str(KILL_SWITCH))
+        return 0
+    if not take_self_lock(rc):
+        return 0
+    try:
+        # Every step is isolated: a dependency check that throws must never
+        # stop the lanes — the lanes are the reason this thing exists.
+        for target, fn in (("ollama", check_ollama), ("schema-shim", check_shim)):
+            try:
+                fn(rc, args.dry_run)
+            except Exception as e:                       # noqa: BLE001
+                rc.write(target, "dep", "error", "skip",
+                         f"supervisor-error {type(e).__name__}: {e}"[:300])
+        for lane in LANES:
+            try:
+                check_lane(rc, lane, args.dry_run)
+            except Exception as e:                       # noqa: BLE001
+                rc.write(lane["name"], "lane", "error", "skip",
+                         f"supervisor-error {type(e).__name__}: {e}"[:300])
+        try:
+            scan_crashes(rc, args.dry_run)
+        except Exception as e:                           # noqa: BLE001
+            rc.write("crash-scan", "crash", "error", "skip",
+                     f"supervisor-error {type(e).__name__}: {e}"[:300])
+        acted = [r for r in rc.lines if r["action"] in ("restart", "record")]
+        rc.write("supervisor", "system", "ok", "noop", "pass-complete",
+                 receipts=len(rc.lines), actions=len(acted))
+    finally:
+        if read_lock(SELF_LOCK) == os.getpid():
+            SELF_LOCK.unlink(missing_ok=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

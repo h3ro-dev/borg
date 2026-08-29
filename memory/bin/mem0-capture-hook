@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""SessionEnd hook — auto-capture durable facts into mem0.
+
+Works for Claude Code (snake_case + Claude jsonl) and Grok Build
+(camelCase + Grok jsonl). Reads hook JSON on stdin, digests the transcript
+tail, has qwen extract durable operational facts, stores them, then
+post-filters secrets/contact data. Logged to data/captures.log.
+
+Kill switch: touch ~/Library/Memory/mem0/HOOK_OFF
+Never blocks session end: always exits 0.
+
+D4 fix: the dedup marker is written ONLY after a proven-successful store;
+a failed/timed-out capture leaves no marker so the session is retried.
+"""
+
+import os
+
+os.environ["MEM0_TELEMETRY"] = "false"
+
+# MEM0_CAPTURE_SKIP=1 (2026-08-28): headless machinery sessions (dream
+# judges, cartographer passes, one-shot -p calls) opt out of inline
+# extraction — a capture must never tax or fail its host workload (the
+# memory-integration-contract law; this hook cost grok -p ~2-4 min per
+# call and poisoned headless Claude runs at 120s). Interactive sessions
+# are unaffected. The async-queue capture refactor is the durable fix.
+if os.environ.get("MEM0_CAPTURE_SKIP") == "1":
+    print("mem0-capture-hook: skipped (MEM0_CAPTURE_SKIP=1)")
+    raise SystemExit(0)
+
+import importlib.machinery
+import json
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+LOG = BASE / "data/captures.log"
+RUNS = BASE / "data/hook-runs"
+ALERT_PATH_ENV = "MEM0_CAPTURE_ALERT_PATH"
+RETRY_BACKOFF_SECONDS = float(os.environ.get("MEM0_CAPTURE_RETRY_BACKOFF", "3"))
+CAPTURE_RETRIES = int(os.environ.get("MEM0_CAPTURE_RETRIES", "1"))
+MAX_CHARS = 10000
+MAX_MSGS = 40
+MIN_SESSION_CHARS = 400
+CONSOLIDATE_EVERY = 25
+USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.S)
+
+SAFE_PROMPT = """This conversation is an AI coding-agent work session on James's Mac Studio (Studio0).
+Extract only durable operational facts that stay true after the session ends and would help a future agent:
+decisions made and approvals given; system facts learned (ports, paths, container names, repo names, service states, tool behavior); preferences and rules stated by James; project status changes (what became live, merged, installed, broken, or fixed).
+Never extract: credentials, API keys, tokens, cookies, passwords, or strings that look like them; email addresses, phone numbers, or street addresses; speculation, undecided plans, or transient conversation; restatements of code. (Business pricing and money facts ARE allowed — owner ruling 2026-08-19.)
+Each memory must be one plain self-contained sentence."""
+
+DROP_PATTERNS = [
+    re.compile(r"(?i)(api[_-]?key|secret|token|passwd|password|cookie|bearer\s+[A-Za-z0-9])"),
+    re.compile(r"[\w.+-]+@[\w-]+\.[A-Za-z]{2,}"),
+    re.compile(r"\+?1?[\s.\-]?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b"),
+    re.compile(r"\b[A-Za-z0-9_\-]{32,}\b"),
+]
+
+
+def log(line: str):
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(line.rstrip() + "\n")
+
+
+def alert_path() -> Path:
+    return Path(os.environ.get(ALERT_PATH_ENV, str(BASE / "data/CAPTURE-ALERT")))
+
+
+def _fail_count_file() -> Path:
+    return alert_path().parent / ".capture-fail-count"
+
+
+def bump_fail_count() -> int:
+    f = _fail_count_file()
+    try:
+        n = int(f.read_text().strip() or "0") + 1
+    except Exception:
+        n = 1
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(str(n))
+    except Exception:
+        pass
+    return n
+
+
+def reset_fail_count() -> None:
+    try:
+        _fail_count_file().unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def write_alert(session: str, reason: str, failures: int, stamp: str):
+    """Write a marker file a monitor can watch. Never raises."""
+    try:
+        p = alert_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            f"CAPTURE-ALERT {stamp}\n"
+            f"consecutive_failures={failures}\n"
+            f"session={session}\n"
+            f"reason={reason}\n"
+        )
+    except Exception:
+        pass
+
+
+def run_capture(do_fn, model_keys=("qwen", "llama"), retries=CAPTURE_RETRIES,
+                backoff=RETRY_BACKOFF_SECONDS, sleep=time.sleep):
+    """Try each model key in order; on total failure retry the whole chain
+    `retries` times (default 1) after `backoff` seconds. Raises the last error."""
+    last_err = None
+    for attempt in range(retries + 1):
+        for key in model_keys:
+            try:
+                return do_fn(key)
+            except Exception as e:
+                last_err = e
+        if attempt < retries and backoff > 0:
+            sleep(backoff)
+    raise last_err
+
+
+def pick(payload: dict, *keys, default=""):
+    for k in keys:
+        v = payload.get(k)
+        if v:
+            return v
+    return default
+
+
+def event_text(obj: dict) -> str:
+    if obj.get("type") not in ("user", "assistant"):
+        return ""
+    if obj.get("synthetic_reason") == "project_instructions":
+        return ""
+    content = obj.get("content")
+    if content is None:
+        content = (obj.get("message") or {}).get("content")
+    text = ""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = " ".join(
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    text = text.strip()
+    if not text:
+        return ""
+    m = USER_QUERY_RE.search(text)
+    if m:
+        text = m.group(1).strip()
+    return text
+
+
+def transcript_digest(path: str) -> str:
+    msgs = []
+    try:
+        with open(path, errors="ignore") as f:
+            for raw in f:
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+                text = event_text(obj)
+                if text:
+                    msgs.append(f"{obj.get('type', '?').upper()}: {text[:1500]}")
+    except Exception:
+        return ""
+    digest = "\n".join(msgs[-MAX_MSGS:])
+    return digest[-MAX_CHARS:]
+
+
+def find_transcript(payload: dict, session: str) -> str:
+    tp = pick(payload, "transcriptPath", "transcript_path")
+    if tp and Path(tp).is_file():
+        return tp
+    sid = session or os.environ.get("GROK_SESSION_ID", "")
+    if not sid or sid == "unknown":
+        return ""
+    hits = list((Path.home() / ".grok" / "sessions").glob(f"**/{sid}/chat_history.jsonl"))
+    return str(hits[0]) if hits else ""
+
+
+def marker_path(session: str) -> Path:
+    return RUNS / re.sub(r"[^A-Za-z0-9._-]+", "_", session)
+
+
+def already_ran(session: str) -> bool:
+    """Check-only dedup gate (D4 fix): NEVER writes the marker here.
+    Writing before the store marked failed captures as 'captured' forever."""
+    if not session or session == "unknown":
+        return False
+    return marker_path(session).exists()
+
+
+def mark_captured(session: str) -> None:
+    """Write the dedup marker. Call ONLY after a proven-successful store
+    (`m.add` returned without raising). An empty result counts as success:
+    extraction legitimately found nothing durable, and failing to mark would
+    retry every low-content session forever."""
+    if not session or session == "unknown":
+        return
+    RUNS.mkdir(parents=True, exist_ok=True)
+    marker_path(session).write_text("1")
+
+
+def agent_id(payload: dict) -> str:
+    env = os.environ.get("GROK_HOOK_EVENT", "")
+    name = str(pick(payload, "hookEventName", "hook_event_name")).lower()
+    if env or "grok" in name or name == "session_end":
+        if env or os.environ.get("GROK_SESSION_ID"):
+            return "grok-hook"
+    return "claude-hook"
+
+
+def main():
+    if (BASE / "HOOK_OFF").exists():
+        return
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        return
+    if pick(payload, "subagentType", "subagent_type"):
+        return
+    session = pick(payload, "sessionId", "session_id", default="unknown")
+    cwd = pick(payload, "cwd", "workspaceRoot", "workspace_root") or os.environ.get(
+        "GROK_WORKSPACE_ROOT", ""
+    )
+    tp = find_transcript(payload, session)
+    digest = transcript_digest(tp) if tp else ""
+    if len(digest) < MIN_SESSION_CHARS:
+        return
+    if already_ran(session):
+        log(f"SKIP-DUP session={session}")
+        return
+
+    CTL = importlib.machinery.SourceFileLoader(
+        "mem0ctl_mod", str(BASE / "bin" / "mem0ctl")
+    ).load_module()
+    aid = agent_id(payload)
+
+    def do(model_key):
+        m = CTL.get_memory(model_key)
+        return m, m.add(
+            [{"role": "user", "content": digest}],
+            user_id="james",
+            agent_id=aid,
+            run_id=session,
+            metadata={
+                "added_mdt": CTL.now_mdt(),
+                "source": "session-hook",
+                "cwd": cwd,
+            },
+            prompt=SAFE_PROMPT,
+        )
+
+    try:
+        m, res = run_capture(do)
+    except Exception as e:
+        n = bump_fail_count()
+        log(f"{CTL.now_mdt()} HOOK-ERROR session={session} {e}")
+        write_alert(session, str(e), n, CTL.now_mdt())
+        return
+
+    reset_fail_count()
+    mark_captured(session)
+
+    events = res.get("results", res) if isinstance(res, dict) else res
+    for ev in events or []:
+        text = ev.get("memory", "")
+        mid = ev.get("id", "")
+        if any(p.search(text) for p in DROP_PATTERNS):
+            try:
+                if mid:
+                    m.delete(mid)
+            except Exception:
+                pass
+            log(f"{CTL.now_mdt()} DROPPED session={session} :: {text}")
+        else:
+            log(f"{CTL.now_mdt()} KEPT [{mid}] session={session} :: {text}")
+    if not events:
+        log(f"{CTL.now_mdt()} EMPTY session={session} (no durable facts)")
+
+    try:
+        from qdrant_client import QdrantClient
+
+        count = QdrantClient(host="127.0.0.1", port=6333).count("studio0").count
+        state_f = BASE / "data/consolidate-state.json"
+        last = (
+            json.loads(state_f.read_text()).get("count_at_last_run", 0)
+            if state_f.exists()
+            else 0
+        )
+        if count - last >= CONSOLIDATE_EVERY:
+            subprocess.Popen(
+                [str(BASE / "bin/mem0ctl"), "consolidate"],
+                stdout=open(BASE / "data/consolidate.log", "a"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            log(f"{CTL.now_mdt()} CONSOLIDATE-TRIGGERED count={count} last={last}")
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
+    sys.exit(0)

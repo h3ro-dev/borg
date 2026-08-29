@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Email ingestion — mine the $MAILBOX (set via env) mailbox (Graph app-auth, read-only
+calls) into mem0, one conversation at a time, via local qwen extraction.
+
+Owner ruling 2026-08-19: no gates on email — grab context. Hygiene filters stay:
+no credentials, no contact data (names only). Pricing/business money facts allowed.
+
+- Creds: $BORG_MAIL_ENV (path you choose) (never printed).
+- Two phases: page all message headers -> group by conversationId -> per
+  conversation fetch bodies, digest, extract, store (agent email-ingest,
+  run_id eml-<conv>, kind email-thread).
+- Automated senders (no-reply/newsletters) are skipped entirely.
+- Resumable: data/email-ingest-state.json. Lockfile: data/email-ingest.lock.
+
+Usage: mem0-ingest-email [--probe] [--limit N] [--min-chars 400] [--dry-run]
+"""
+
+import os
+
+os.environ["MEM0_TELEMETRY"] = "false"
+
+import argparse
+import atexit
+import html
+import importlib.machinery
+import json
+import re
+import time
+from datetime import datetime
+from pathlib import Path
+
+import httpx
+
+BASE = Path(__file__).resolve().parent.parent
+CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BASE / "bin/mem0ctl")).load_module()
+HOOK = importlib.machinery.SourceFileLoader("mem0hook_mod", str(BASE / "bin/mem0-capture-hook")).load_module()
+
+ENV_F = Path.home() / ".config/borg/mail-graph.env"
+STATE_F = BASE / "data/email-ingest-state.json"
+LOG_F = BASE / "data/email-ingest.log"
+LOCK_F = BASE / "data/email-ingest.lock"
+GRAPH = "https://graph.microsoft.com/v1.0"
+AUTOMATED = re.compile(r"no-?reply|notifications?@|mailer|newsletter|donotreply|updates@|marketing@|billing@|invoice\+|automated|alerts?@", re.I)
+MAX_CHARS = 12000
+PER_MSG_CHARS = 1800
+
+EMAIL_PROMPT = """This is an email thread from James's business mailbox. Extract durable business facts a future agent would need:
+decisions and approvals; commitments made or received and who owns them; project and client status changes; pricing, proposals, and deal outcomes; who people are (name, role, company); what was agreed.
+Never extract: credentials, passwords, verification codes, or links; email addresses, phone numbers, or street addresses (refer to people by name only); newsletter or marketing content; receipt boilerplate; speculation.
+Each memory must be one plain self-contained sentence; prefix time-bound facts with the email date."""
+
+
+def log(msg):
+    with open(LOG_F, "a") as f:
+        f.write(f"{CTL.now_mdt()} {msg}\n")
+
+
+def load_env():
+    env = {}
+    for line in ENV_F.read_text().splitlines():
+        if "=" in line and not line.strip().startswith("#"):
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip().strip("'\"")
+    return env
+
+
+class Graph:
+    def __init__(self):
+        self.env = load_env()
+        self.client = httpx.Client(timeout=40)
+        self.token = None
+        self.token_at = 0
+
+    def auth(self):
+        if self.token and time.time() - self.token_at < 3000:
+            return self.token
+        r = self.client.post(
+            f"https://login.microsoftonline.com/{self.env['TENANT_ID']}/oauth2/v2.0/token",
+            data={
+                "grant_type": "client_credentials",
+                "client_id": self.env["CLIENT_ID"],
+                "client_secret": self.env["CLIENT_SECRET"],
+                "scope": "https://graph.microsoft.com/.default",
+            },
+        )
+        r.raise_for_status()
+        self.token = r.json()["access_token"]
+        self.token_at = time.time()
+        return self.token
+
+    def get(self, url, **params):
+        for attempt in (1, 2, 3):
+            r = self.client.get(
+                url,
+                params=params or None,
+                headers={"Authorization": f"Bearer {self.auth()}", "ConsistencyLevel": "eventual"},
+            )
+            if r.status_code == 401 and attempt == 1:
+                self.token = None
+                continue
+            if r.status_code == 429 or r.status_code >= 500:
+                time.sleep(int(r.headers.get("Retry-After", 5)))
+                continue
+            r.raise_for_status()
+            return r.json()
+        r.raise_for_status()
+
+    @property
+    def mailbox(self):
+        return self.env["TARGET_MAILBOX"]
+
+
+def strip_html(s: str) -> str:
+    s = re.sub(r"(?is)<(style|script)[^>]*>.*?</\1>", " ", s or "")
+    s = re.sub(r"(?s)<[^>]+>", " ", s)
+    s = html.unescape(s)
+    s = re.sub(r"[​-‏͏­﻿ -   ]", "", s)  # newsletter zero-width padding
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def sender_of(msg):
+    f = (msg.get("from") or {}).get("emailAddress") or {}
+    return f.get("name") or "unknown", (f.get("address") or "").lower()
+
+
+def collect_conversations(g: Graph, cap: int):
+    convs = {}
+    url = f"{GRAPH}/users/{g.mailbox}/messages"
+    params = {"$select": "id,subject,from,receivedDateTime,conversationId,isDraft", "$top": "100", "$orderby": "receivedDateTime desc"}
+    n = 0
+    while url:
+        data = g.get(url, **params)
+        params = {}
+        for m in data.get("value", []):
+            if m.get("isDraft"):
+                continue
+            cid = m.get("conversationId") or m["id"]
+            c = convs.setdefault(cid, {"subject": m.get("subject") or "(no subject)", "ids": [], "senders": set(), "latest": m.get("receivedDateTime", ""), "james": False})
+            c["ids"].append(m["id"])
+            addr = sender_of(m)[1]
+            c["senders"].add(addr)
+            if addr == g.mailbox.lower():
+                c["james"] = True  # James participated -> highest-value tier
+            n += 1
+        url = data.get("@odata.nextLink")
+        if cap and n >= cap:
+            break
+        print(f"  paged {n} messages, {len(convs)} conversations...", flush=True)
+    return convs, n
+
+
+def digest_conversation(g: Graph, conv):
+    parts = []
+    for mid in reversed(conv["ids"][:20]):  # oldest-first, cap 20 msgs
+        m = g.get(f"{GRAPH}/users/{g.mailbox}/messages/{mid}", **{"$select": "subject,from,receivedDateTime,body"})
+        name, _ = sender_of(m)
+        date = (m.get("receivedDateTime") or "")[:10]
+        body = strip_html((m.get("body") or {}).get("content", ""))[:PER_MSG_CHARS]
+        if body:
+            parts.append(f"[{date} {name}]: {body}")
+    if not parts:
+        return "", ""
+    d0 = (parts[0].split(" ", 1)[0]).strip("[")
+    return (f"EMAIL THREAD: {conv['subject']}\n\n" + "\n".join(parts))[:MAX_CHARS], d0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--probe", action="store_true")
+    ap.add_argument("--limit", type=int, default=0, help="max conversations to process this run")
+    ap.add_argument("--cap-messages", type=int, default=0, help="stop paging headers after N messages (0=all)")
+    ap.add_argument("--min-chars", type=int, default=400)
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    g = Graph()
+    if args.probe:
+        data = g.get(f"{GRAPH}/users/{g.mailbox}/messages", **{"$top": "1", "$count": "true"})
+        print(f"mailbox {g.mailbox}: ~{data.get('@odata.count', '?')} messages")
+        return
+
+    if LOCK_F.exists():
+        try:
+            os.kill(int(LOCK_F.read_text()), 0)
+            print("already running; exiting")
+            return
+        except (ProcessLookupError, ValueError):
+            pass
+    LOCK_F.write_text(str(os.getpid()))
+    atexit.register(lambda: LOCK_F.unlink(missing_ok=True))
+
+    print("collecting conversation index...")
+    convs, nmsg = collect_conversations(g, args.cap_messages)
+    st = json.loads(STATE_F.read_text()) if STATE_F.exists() else {"done": {}}
+    todo = [(cid, c) for cid, c in convs.items() if cid not in st["done"] and not all(AUTOMATED.search(s or "") for s in c["senders"])]
+    # Tier 1: threads James participated in (business context), then the rest; newest first within tiers.
+    todo.sort(key=lambda t: (t[1]["james"], t[1]["latest"]), reverse=True)
+    skipped_auto = len(convs) - len(todo) - sum(1 for c in convs if c in st["done"])
+    if args.limit:
+        todo = todo[: args.limit]
+    print(f"{nmsg} messages, {len(convs)} conversations, {len(todo)} to process (automated skipped)")
+    log(f"RUN-START messages={nmsg} conversations={len(convs)} todo={len(todo)}")
+
+    m_qwen = None if args.dry_run else CTL.get_memory("qwen")
+    total = 0
+    for i, (cid, conv) in enumerate(todo, 1):
+        t0 = time.time()
+        try:
+            digest, date = digest_conversation(g, conv)
+            if len(digest) < args.min_chars:
+                st["done"][cid] = {"status": "skipped-small"}
+                status, kept, dropped = "skipped-small", 0, 0
+            elif args.dry_run:
+                print(f"--- {conv['subject'][:70]} ---\n{digest[:500]}\n")
+                continue
+            else:
+                res = CTL.novelty_add(
+                    m_qwen,
+                    [{"role": "user", "content": digest}],
+                    threshold=0.92,
+                    user_id="james",
+                    agent_id="email-ingest",
+                    run_id=f"eml-{cid[-44:]}",
+                    metadata={"kind": "email-thread", "subject": conv["subject"][:120], "thread_date": date, "source": f"graph:{g.mailbox}", "added_mdt": CTL.now_mdt()},
+                    prompt=EMAIL_PROMPT,
+                )
+                events = res.get("results", res) if isinstance(res, dict) else res
+                dropped = 0
+                survivors = []
+                for ev in events or []:
+                    if any(p.search(ev.get("memory", "")) for p in HOOK.DROP_PATTERNS):
+                        try:
+                            m_qwen.delete(ev.get("id"))
+                        except Exception:
+                            pass
+                        dropped += 1
+                    else:
+                        survivors.append(ev)
+                survivors, deduped = CTL.novelty_prune_events(m_qwen, survivors, user_id="james", agent_id="email-ingest")
+                kept = len(survivors)
+                dropped += deduped
+                status = "ok"
+                st["done"][cid] = {"status": "ok", "kept": kept, "dropped": dropped, "subject": conv["subject"][:80]}
+        except Exception as e:
+            status, kept, dropped = f"error:{type(e).__name__}", 0, 0
+            st["done"][cid] = {"status": status}
+        total += kept
+        STATE_F.write_text(json.dumps(st))
+        try:
+            from qdrant_client import QdrantClient
+
+            count = QdrantClient(host="127.0.0.1", port=6333).count("studio0").count
+            (BASE / "data/consolidate-state.json").write_text(json.dumps({"count_at_last_run": count, "at": CTL.now_mdt(), "note": "email-suppression"}))
+        except Exception:
+            pass
+        log(f"[{i}/{len(todo)}] {status} kept={kept} dropped={dropped} {time.time()-t0:.0f}s :: {conv['subject'][:70]}")
+    log(f"RUN-END processed={len(todo)} total_kept={total}")
+    print(f"done: {len(todo)} conversations, {total} facts")
+
+
+if __name__ == "__main__":
+    main()
