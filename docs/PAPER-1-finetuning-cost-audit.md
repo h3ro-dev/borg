@@ -1,13 +1,5 @@
 # What Fine-Tuning Actually Cost: A Full Audit
 
-> **CORRECTION IN PROGRESS (2026-08-29).** Section 3 ("Rate #1") is wrong: it
-> treats the prepaid plans' *included usage value* ($2,000/week Claude,
-> $3,500/week Codex at 100% capacity) as the cash bill. The actual bill is the
-> prepaid subscription price per seat. The $8,171 window figure, the $2,754
-> and $4,956 allocations, and the 36:1 headline inherit the error and are
-> being re-derived under independent audit. Token-count and list-price rates
-> (Sections 4–6) are unaffected pending that audit.
-
 *The Borg estate, audited 2026-08-29. Five LoRA training runs, three adapters, two memory
 systems, one merciless promotion gate — and every token counted.*
 
@@ -15,26 +7,35 @@ systems, one merciless promotion gate — and every token counted.*
 
 ## The one-paragraph answer
 
-Training the models cost almost nothing. **Every token that touched a model during this
-program — teacher data generation, five training runs, all exams and canaries — prices out
-at about $75 at public API list rates** (≈$52 with the 30% enterprise discount we assume,
-under $1 in actual marginal cash because everything ran on owned hardware, local models,
-and free preview windows). The real cost was the intelligence *around* the training:
-allocated at the owner's stated subscription rates, the AI-agent engineering that designed,
-ran, debugged, and gated this program comes to **≈$2,754** for the fine-tuning work alone
-(≈$4,956 for the whole memory-system program it lives inside). The cost of fine-tuning is
-not the tokens. It is the engineering. And the engineering is exactly the part the
-open-sourced harness makes reusable.
+Training the models cost almost nothing at the token counter. **Every token that touched a
+model during this program — teacher data generation, five training runs, all exams and
+canaries — prices out at about $75 at public API list rates** (≈$52 with a 30% enterprise
+discount, under $1 in actual marginal cash because the runs sat on owned hardware, local
+models, and free preview windows).
+
+That $75 is not the bill, and neither is a stack of seat fees. **Prepaid cash is a fixed
+$214.90 after tax per Claude Max subscription and $214.90 after tax per ChatGPT Pro
+subscription (Utah).** What this paper reports next is how much of a weekly allotment the
+work used, in money people already understand: one Max bar is $8,000/month ($2,000/week)
+of API-equivalent capacity; one Pro bar is $14,000/month ($3,500/week). Fine-tuning used
+**25.4% of one weekly Claude Max bar and 64.2% of one weekly ChatGPT Pro bar**, which is
+**$2,754 API-equivalent** ($508 + $2,246). The whole memory-system program used **74.9% /
+98.8%** of those same weekly bars (**$4,956 API-equivalent**). If more than one account
+ran, those percents add (80% + 70% = 150%). The counted-token $75 versus the $2,754
+allotment is the discrepancy table below: untracked session work, not a second cash bill.
+The reusable part is still the harness.
 
 ---
 
 ## 1. Stated assumptions (read these first)
 
-1. **Claude subscription: $2,000 per week = 100% capacity.** Owner-stated planning rate.
-   Every week is treated as fully consumed (the fleet ran saturated through this window;
-   usage-limit stalls are on record).
-2. **Codex subscription: $14,000 per month = $3,500 per week = 100% capacity** across the
-   account fleet. Owner-stated planning rate.
+1. **Claude Max prepaid cash: $214.90 after tax per subscription (Utah).** Fixed monthly
+   cost. One Max seat is treated as **$8,000/month of API-equivalent allotment = $2,000/week.**
+   Tax is regional; $214.90 is this account's after-tax figure. The $8,000 figure is the
+   square bucket for this paper, not a metered invoice.
+2. **ChatGPT Pro / Codex prepaid cash: $214.90 after tax per subscription (Utah).** Same
+   shape. Allotment is **$14,000/month = $3,500/week** (square bucket). Percents across
+   accounts add: 80% + 70% = 150% of one weekly bar.
 3. **Attribution window: 2026-08-19 → 2026-08-29** (10.4 days = 1.486 weeks): memory-layer
    build began 08-19, pair harvesting 08-20, student training 08-27→29 (v3 was still
    training when this audit ran).
@@ -73,18 +74,53 @@ had been trained on one of the pipeline's six call shapes and scored 0/534 on a 
 had never seen. That verdict, not any benchmark, is why v3 exists — trained on all six
 shapes recorded from live traffic.
 
-## 3. Rate #1 — Subscription-allocated cost (the real bill)
+## 3. Rate #1 — Weekly allotment used (API-equivalent), not a seat count
 
-| | Claude | Codex | Total |
+Prepaid cash is fixed: **$214.90 after tax per Claude Max** and **$214.90 after tax per
+ChatGPT Pro** (Utah; tax is regional). This section does not multiply seats. It reports
+what percent of a weekly allotment the work used. Percents across accounts add. Over 100%
+means more than one weekly bar.
+
+**Square buckets (owner-chosen):** Claude Max $8,000/month = $2,000/week. ChatGPT Pro
+$14,000/month = $3,500/week.
+
+**How the percents were built.** The withdrawn table treated $2,000/week and $3,500/week
+as cash and assumed every week in the 1.486-week window was 100% burned, then took
+session-byte share of that window. Those byte-shares are a proxy for percent of weekly
+allotment, not a vendor usage dashboard. Reverse of that table:
+
+- Claude fine-tuning share of session bytes: 17.1%. Cumulative weekly-Max equivalent:
+  17.1% × 1.486 weeks = **25.4% of one weekly Claude Max bar**.
+- Codex fine-tuning: 43.2% × 1.486 = **64.2% of one weekly ChatGPT Pro bar**.
+- Whole program: Claude 50.4% × 1.486 = **74.9%**; Codex 66.5% × 1.486 = **98.8%**.
+
+If a second Max account had been in the tagged set, its percent would add (80% + 70% =
+150% of one weekly Max). Same rule for Pro.
+
+| | Claude Max | ChatGPT Pro | Combined |
 |---|---|---|---|
-| Window spend at stated rates (1.486 wk) | $2,971 | $5,200 | $8,171 |
-| Fine-tuning share of session bytes | 17.1% | 43.2% | — |
-| **Fine-tuning-only allocation** | **$508** | **$2,246** | **$2,754** |
-| Whole-Borg-program share | 50.4% | 66.5% | — |
-| **Whole-program allocation** | **$1,497** | **$3,458** | **$4,956** |
+| Fine-tuning, cumulative % of one weekly bar | 25.4% | 64.2% | — |
+| Fine-tuning, API-equivalent | 25.4% × $2,000 = **$508** | 64.2% × $3,500 = **$2,246** | **$2,754** |
+| Whole program, cumulative % of one weekly bar | 74.9% | 98.8% | — |
+| Whole program, API-equivalent | **$1,497** | **$3,458** | **$4,956** |
 
-Not included: the Grok subscription (one bake-off candidate + research lanes — immaterial),
-Ox Alpha (free evaluation window, $0), electricity (counted in Rate #4).
+Prepaid cash does not scale with those percents. The percents scale the $8,000 / $14,000
+allotments.
+
+Grok ran in the bake-off and research lanes; it is not given a square allotment in this
+table. Ox Alpha was a free evaluation window ($0). Electricity is Rate #4.
+
+### Counted tokens versus the allotment estimate
+
+| | Fine-tuning window |
+|---|---|
+| Rate #1 API-equivalent (25.4% Max + 64.2% Pro) | **$2,754** |
+| Rate #2 counted tokens at public list | **≈$75** |
+| Gap | **≈$2,679** |
+
+The gap is untracked session work (engineering tokens that never entered the LoRA
+counters) against the $8,000 / $14,000 square buckets. Both numbers stay. Neither is
+cash. Cash is the $214.90 prepaid.
 
 ## 4. Rate #2 — Straight-line public API equivalent
 
