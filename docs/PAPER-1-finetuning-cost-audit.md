@@ -1,5 +1,13 @@
 # What Fine-Tuning Actually Cost: A Full Audit
 
+> **CORRECTION IN PROGRESS (2026-08-29).** Section 3 ("Rate #1") is wrong: it
+> treats the prepaid plans' *included usage value* ($2,000/week Claude,
+> $3,500/week Codex at 100% capacity) as the cash bill. The actual bill is the
+> prepaid subscription price per seat. The $8,171 window figure, the $2,754
+> and $4,956 allocations, and the 36:1 headline inherit the error and are
+> being re-derived under independent audit. Token-count and list-price rates
+> (Sections 4–6) are unaffected pending that audit.
+
 *The Borg estate, audited 2026-08-29. Five LoRA training runs, three adapters, two memory
 systems, one merciless promotion gate — and every token counted.*
 
