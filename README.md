@@ -35,7 +35,7 @@ conductor that turns ChatGPT-account Codex seats into a steerable worker fleet.
 
 | Directory | What it holds |
 |---|---|
-| `adapters/` | Trained LoRA adapters for local extraction students, with honest model cards — including the one that failed its promotion canary and why |
+| `adapters/` | Trained LoRA adapters (weights included) for local extraction students, with honest model cards — including the predecessor that failed its promotion canary and why |
 | `memory/` | The mem0 layer: CLI, MCP servers (v1 + scoped v2), session hooks for Claude Code / Codex / Grok, nightly consolidation ("dream"), ingestion tools, tests |
 | `graph/` | The Graphiti layer: episode backfill, canary smoke test, and the **grammar shim** — an OpenAI-compatible proxy that grammar-locks local model JSON *and* tees every request/response into a free training corpus |
 | `training/` | Dataset builders, GPU-crash-tolerant training chains, and the eval harness: held-out exam, promotion canary, disproof probes |
@@ -55,7 +55,8 @@ conductor that turns ChatGPT-account Codex seats into a steerable worker fleet.
    shape. Data is a flow, not a stock you go harvest.
 4. **Secrets and client data never enter shared memory.** Extraction runs behind drop
    filters; scoped access (v2 MCP) gates who reads what; this public repo ships machinery
-   only — no data, no weights beyond the adapters, no private corpora.
+   and the adapter weights only — no data, no private corpora. The published adapters were
+   trained on identifier-scrubbed pairs and gated on a memorization probe.
 
 ## Quickstart
 
@@ -79,11 +80,14 @@ Small local students trained to take over extraction jobs from big models. Each 
 works **only** with the exact base model it was trained on (that is how LoRA works — the
 adapter is a delta on specific frozen weights):
 
+All three are trained on **identifier-scrubbed** pairs and shipped with their weights,
+after a memorization probe returned **zero sensitive-registry hits** on each:
+
 | Adapter | Base model (required, exact) | Job | Status |
 |---|---|---|---|
-| `graphiti-extraction-qwen3-1.7b-v1b` | `mlx-community/Qwen3-1.7B-4bit` | Graphiti entity/relation extraction | Exam-passed baseline |
-| `crowned-4b-step2800` | `mlx-community/Qwen3-4B-Instruct-2507-4bit` | Graphiti entity/relation extraction | Exam winner; **failed promotion canary** — shipped as a case study |
-| `capture-4b-lora-v1` | `mlx-community/Qwen3-4B-Instruct-2507-4bit` | Session-fact capture (mem0) | Format-solid; content agreement unmeasured (exact-match metric proved unsuitable) |
+| `graphiti-extraction-qwen3-1.7b` | `mlx-community/Qwen3-1.7B-4bit` | Graphiti entity/relation extraction | Clean retrain; exam-passed speed tier (92.75% JSON-valid, Jaccard 0.610, ~86 tok/s) |
+| `graphiti-extraction-qwen3-4b` | `mlx-community/Qwen3-4B-Instruct-2507-4bit` | Graphiti entity/relation extraction | Clean retrain of the exam winner that **failed its promotion canary** (93.5% JSON-valid, Jaccard 0.654) — successor to the case study, **not itself canaried** |
+| `capture-extraction-qwen3-4b` | `mlx-community/Qwen3-4B-Instruct-2507-4bit` | Session-fact capture (mem0) | Clean retrain; format-solid (100% JSON-valid, support-ref 1.0), content agreement still unmeasured — exact-match metric proved unsuitable |
 
 Full cards with every number: [adapters/README.md](adapters/README.md).
 
