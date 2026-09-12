@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "example_only": true,
+  "role": "fact-extraction",
+  "artifact_sha256": null,
+  "base_model": {
+    "id": null,
+    "immutable_revision": null,
+    "tokenizer_sha256": null,
+    "quantization": null
+  },
+  "training": {
+    "corpus_version": null,
+    "rights_ledger_ref": null,
+    "teacher_provider": null,
+    "teacher_terms_ref": null
+  },
+  "gates": {
+    "code_rights": "unknown",
+    "training_rights": "unknown",
+    "redistribution_rights": "unknown",
+    "privacy": "not_run",
+    "semantic_quality": "not_run",
+    "production_canary": "not_run"
+  },
+  "production_approved": false
+}

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "example_only": true,
+  "deployment": "single_customer",
+  "tenant": "example-tenant",
+  "project": "example-project",
+  "context": {
+    "transport": "mcp",
+    "url": "http://127.0.0.1:8770/mcp",
+    "authorization_ref": "env:BORG_CONTEXT_AUTHORIZATION",
+    "default_profile": "read-context"
+  },
+  "capture": {
+    "enabled": false,
+    "training_allowed": false,
+    "redistribution_allowed": false
+  },
+  "execution": {
+    "enabled": false,
+    "workspace_ref": "env:BORG_WORKSPACE_ROOT",
+    "require_work_claim": true
+  },
+  "models": {
+    "automatic_training": false,
+    "manifest_required": true
+  },
+  "privacy": {
+    "payload_logging": false,
+    "customer_training_opt_in_required": true
+  },
+  "coordination": {
+    "provider": "existing-agent-inbox",
+    "client_config_ref": "env:AGENT_INBOX_CLIENT_CONFIG",
+    "context_reads": [
+      "assignments.list",
+      "messages.list"
+    ],
+    "context_auto_poll": false,
+    "context_auto_ack": false,
+    "work_record_provider": "existing-beads",
+    "execution_provider": "existing-conductor"
+  }
+}

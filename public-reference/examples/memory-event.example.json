@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "example_only": true,
+  "tenant_id": "example-tenant",
+  "project_id": "example-project",
+  "source_event_id": "synthetic-event-001",
+  "source_version": "synthetic-v1",
+  "source_ref": "example://project/decision/001",
+  "scope": "project:example-project",
+  "observed_at": "2026-01-01T00:00:00Z",
+  "ingested_at": "2026-01-01T00:00:01Z",
+  "content": "The synthetic project uses a documented test command.",
+  "authority": "candidate",
+  "training_allowed": false,
+  "projection_status": {
+    "vector": "pending",
+    "graph": "pending"
+  }
+}
