@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "kind": "architecture-reference-only",
+  "files": [
+    "LICENSE",
+    "README.md",
+    "docs/architecture.md",
+    "docs/integrations.md",
+    "docs/licensing.md",
+    "docs/model-release-policy.md",
+    "docs/productization.md",
+    "docs/security.md",
+    "examples/borg.example.json",
+    "examples/memory-event.example.json",
+    "examples/model-manifest.example.json",
+    "tools/build_capsule.py",
+    "tests/test_release.py",
+    "release.json"
+  ]
+}

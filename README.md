@@ -1,5 +1,7 @@
 # The Borg
 
+> **Publication status (2026-09-12):** Start with the [public architecture reference](public-reference/README.md) for a bounded, data-free export and product/security/licensing review. The historical implementation below is not a complete portable installer: some imported lifecycle and scope modules are missing from this snapshot. Existing weights are research artifacts, not commercially cleared production models. A full repository clone includes historical files and weights; the architecture capsule does not.
+
 One brain, many hands. The Borg is a local-first shared memory system for AI agents: every
 agent session on the machine — Claude Code, Codex, Grok — reads from and writes to the same
 memory, so anything one agent learns, every agent knows. The collective grows every session.
@@ -53,9 +55,9 @@ conductor that turns ChatGPT-account Codex seats into a steerable worker fleet.
 3. **The corpus builds itself.** The grammar shim tees live production traffic into
    training pairs at zero marginal cost (~168 pairs/hour on this estate), tagged by call
    shape. Data is a flow, not a stock you go harvest.
-4. **Secrets and client data never enter shared memory.** Extraction runs behind drop
-   filters; scoped access (v2 MCP) gates who reads what; this public repo ships machinery
-   and the adapter weights only — no data, no private corpora. The published adapters were
+4. **Credentials are prohibited in memory; sensitive records require explicit scope.**
+   Extraction filters and scoped access are defenses, not a guarantee that a live store
+   contains no private information. Public releases must exclude private data and corpora. The published adapters were
    trained on identifier-scrubbed pairs and gated on a memorization probe.
 
 ## Quickstart

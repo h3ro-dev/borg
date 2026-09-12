@@ -1,3 +1,30 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Private runtime state and generated release artifacts must never be added.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.db
+*.db-*
+*.sqlite*
+*.log
+*.jsonl
+*.zip
+node_modules/
+.venv/
+venv/
+.secrets/
+credentials/
+tokens/
+private/
+dist/
+# Existing research weights remain tracked; new weights need separate clearance.
+*.safetensors
+*.gguf
+*.pt
+*.pth
