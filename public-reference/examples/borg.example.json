@@ -27,5 +27,17 @@
   "privacy": {
     "payload_logging": false,
     "customer_training_opt_in_required": true
+  },
+  "coordination": {
+    "provider": "existing-agent-inbox",
+    "client_config_ref": "env:AGENT_INBOX_CLIENT_CONFIG",
+    "context_reads": [
+      "assignments.list",
+      "messages.list"
+    ],
+    "context_auto_poll": false,
+    "context_auto_ack": false,
+    "work_record_provider": "existing-beads",
+    "execution_provider": "existing-conductor"
   }
 }

@@ -41,3 +41,7 @@ Lifecycle states: requested -> admitted -> running -> succeeded, failed, cancell
 ## Installation acceptance
 
 Use synthetic projects to test all registered clients: recall, source navigation, scope denial, restart/reconnect, long-lived command recovery, and missing-dependency behavior. Test write and desktop operations separately in disposable owned resources. Preserve provider and operating-system enforcement; changing connectors must not be a way to retry a denied action.
+
+## Shared Inbox across clients
+
+All client adapters participate in the same existing Agent Inbox through enrolled, per-caller configuration and current grants. Native hooks/checkpoints may receive actionable deliveries, while BORG context reads use non-leasing metadata operations. Installing configuration or reading a message does not prove an active client incorporated it. Preserve message IDs, leases, assignment versions, Beads work IDs, and native conductor receipts across handoffs. See [the Inbox contract and bridge](inbox-integration.md); do not create a second queue or assume memory-scope access grants message or command authority.

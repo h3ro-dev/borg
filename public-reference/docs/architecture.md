@@ -39,6 +39,10 @@ Use a durable ingestion record with an idempotency key and an outbox for downstr
 
 Record source event/version and independent vector and graph watermarks. A recent graph scan does not establish recent source ingestion. Retry only deduplicated operations; retain failed records in a bounded recovery queue. Rebuild derived indexes from approved sources and retained event metadata. For deletion, track graph, vector, caches, backups, and any training datasets separately; changing memory rows cannot remove knowledge from released weights.
 
+## Inbox coordination is not memory or execution
+
+Reuse the existing Agent Inbox for authenticated agent-to-agent messages, current assignment owners and versions, delegated grants, delivery leases, acknowledgments, and discoveries. BORG project orientation may join read-only Inbox metadata by exact work ID and scope, but it must not automatically poll or acknowledge work while gathering context. Beads remains the canonical work/acceptance record; conductors retain execution attempts and provider thread/turn receipts. See [Inbox integration](inbox-integration.md).
+
 ## Work is not memory
 
 Maintain distinct IDs for work item, owner claim, workspace, run attempt, provider thread, and provider turn. Preserve event sequence and terminal reason. A process being alive does not prove a task is owned or progressing. A stale ledger row saying RUNNING is historical evidence, not current status.

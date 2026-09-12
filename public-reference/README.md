@@ -34,3 +34,9 @@ The surrounding repository contains historical implementation snapshots and rese
 Current installations can be ahead of published source. Porting them requires configuration extraction, provenance review, tests, and a clean-machine acceptance run. Do not copy an operator's runtime folder into a release.
 
 This reference preserves the project's MIT notice. Third-party software, service subscriptions, model weights, trademarks, and private data are not relicensed by that notice. See the licensing review before building a commercial distribution.
+
+## Existing Agent Inbox integration
+
+Agent Inbox is part of the reference architecture rather than a replacement queue. BORG supplies source-linked memory; Agent Inbox supplies authenticated messages, versioned assignments, delivery leases, and discoveries; Beads remains the work/acceptance record; existing conductors execute runs. See [the Inbox integration guide](docs/inbox-integration.md).
+
+The included `integrations/inbox_context.py` reuses an already enrolled native Inbox client for bounded, non-leasing metadata reads. It does not bundle the Inbox Hub or any production message, grant, client configuration, credential, database, or account inventory.

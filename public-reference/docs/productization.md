@@ -27,6 +27,7 @@ Build provider interfaces for `recall`, `capture`, `source_fetch`, and run lifec
 | A: architectural release | This reference, explicit export list, tests and license map | Exact archive reviewed; no live payloads or weights; limitations visible |
 | B: reproducible core | Reconciled source, all imported modules, dependency lock/SBOM, settings migration | Clean-machine setup; unit/integration suites; backup and restore; no dependency on original workstation |
 | C: trusted memory | Durable ingestion/outbox, scope-at-write, independently visible projection lag, source resolver | Tenant/scope adversarial tests; duplicate and crash recovery; deletion receipts; semantic retrieval benchmark |
+| C2: shared coordination | Existing Agent Inbox clients, grants, messages/delivery leases, versioned assignments, discoveries and Beads linkage | Native caller identity; read-versus-poll distinction; stale lease/version rejection; reconnect and idempotent mutation receipts; no duplicate conductor work |
 | D: client parity | Supported versions of Claude, Codex, Grok and ChatGPT integrations | Native lifecycle and reconnect acceptance for each client; no unsupported credential reuse |
 | E: safe operations | Workspace isolation, claims, durable run receipts, expected-turn control | Disconnect/restart tests; no duplicate dispatch; approval handling; least-privilege operation profiles |
 | F: customer pilot | Customer-owned deployment, documentation, recovery and support process | Measured use-case value, support burden, right-sized compute, provider and license review |
@@ -44,3 +45,5 @@ A useful planning equation is contribution per customer = installation/support r
 ## What this release does not establish
 
 It is not a clean-machine runtime, audited enterprise sandbox, complete adapter distribution, legal clearance, trademark search, or evidence of paying customers. It is a constrained, inspectable architectural starting point for those deliverables. Production and customer readiness require the later gates above.
+
+Inbox is a required subsystem of the unified product, not a replacement messaging service to build later. Its portable runtime source, licensing/provenance, enrollment installer and full customer-isolation review remain separate packaging gates. This architecture release includes the integration contract, a narrow native-client metadata bridge and synthetic tests; it does not publish the operating Hub or its private state.

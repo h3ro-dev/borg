@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "example_only": true,
+  "components": {
+    "memory": "BORG",
+    "coordination": "Agent Inbox",
+    "work_record": "Beads",
+    "execution": "existing conductor"
+  },
+  "inbox": {
+    "client_module": "comms.hub.client",
+    "client_config_ref": "env:AGENT_INBOX_CLIENT_CONFIG",
+    "identity_fallback": false,
+    "read_operations": [
+      "assignments.list",
+      "messages.list"
+    ],
+    "automatic_poll": false,
+    "automatic_ack": false,
+    "automatic_memory_capture": false
+  },
+  "work_id": "example-task",
+  "scope": "/example/project",
+  "linkage": {
+    "message_id": "example-message",
+    "request_id": "example-request",
+    "assignment_version": 3,
+    "assignee": "example-agent",
+    "work_acceptance": "not_asserted",
+    "conductor_attempt_id": null,
+    "provider_thread_id": null,
+    "provider_turn_id": null
+  },
+  "delivery": {
+    "state": "queued",
+    "lease_id": null,
+    "work_outcome_ref": null
+  },
+  "training_allowed": false
+}
