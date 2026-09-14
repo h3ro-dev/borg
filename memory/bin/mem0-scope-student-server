@@ -1,0 +1,35 @@
+#!/bin/bash
+set -euo pipefail
+: "${BORG_HOME:?BORG_HOME is required}"
+: "${BORG_TRAINING_VENV:?BORG_TRAINING_VENV is required}"
+: "${BORG_SCOPE_ADAPTER_PATH:?BORG_SCOPE_ADAPTER_PATH is required}"
+: "${BORG_SCOPE_TRUST_ROWS:?BORG_SCOPE_TRUST_ROWS is required}"
+: "${BORG_GRAPH_MODEL:?BORG_GRAPH_MODEL is required}"
+: "${BORG_SCOPE_STUDENT_PORT:?BORG_SCOPE_STUDENT_PORT is required}"
+VENV="$BORG_TRAINING_VENV"
+BASE_MODEL="${BASE_MODEL:-$BORG_GRAPH_MODEL}"
+ADAPTER_PATH="${ADAPTER_PATH:-$BORG_SCOPE_ADAPTER_PATH}"
+PORT="${PORT:-$BORG_SCOPE_STUDENT_PORT}"; URL="http://127.0.0.1:${PORT}"
+TRUST_ROWS="${TRUST_ROWS:-$BORG_SCOPE_TRUST_ROWS}"
+BIN="$BORG_HOME/mem0/bin"; PID=
+[[ -x "$VENV/bin/python" && -d "$ADAPTER_PATH" && -s "$TRUST_ROWS" ]] || { echo NEEDS-HUMAN >&2; exit 2; }
+cleanup() { [[ -z "$PID" ]] || { kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; }; }
+trap cleanup EXIT INT TERM
+start() { "$VENV/bin/python" "$BIN/mem0-scope-student-serve.py" --model "$BASE_MODEL" "$@" --port "$PORT" >"${TMPDIR:-/tmp}/mem0-scope-student-server.log" 2>&1 & PID=$!; for _ in $(seq 1 90); do curl -fsS "$URL/v1/models" >/dev/null 2>&1 && return; sleep 1; done; return 1; }
+gate() {
+  "$VENV/bin/python" - "$URL" "$1" "$TRUST_ROWS" "$BIN" <<'PY'
+import importlib.util,json,sys
+url,mode,path,bindir=sys.argv[1:]; s=importlib.util.spec_from_file_location('student',bindir+'/mem0_scope_student.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+rows=[json.loads(x) for x in open(path) if x.strip()]; hits=0
+for r in rows:
+ g=m.StudentClassifier(endpoints=[url]).classify_batch([{'id':r['id'],'data':r['data']}],url)[0]; t=dict(r['target']); actual={'i':0,'c':g['cat'],'s':g['slug'],'p':int(g['sensitive'])}; hits += actual==t
+print(f'{mode}_exact={hits}/{len(rows)} ({hits/len(rows):.1%})')
+import os
+min_adapter=int(os.environ.get("TRUST_MIN_ADAPTER","15")); max_base=int(os.environ.get("TRUST_MAX_BASE","10"))
+if (mode=='adapter' and hits<min_adapter) or (mode=='base' and hits>max_base): raise SystemExit(1)
+PY
+}
+start --adapter-path "$ADAPTER_PATH"; gate adapter
+cleanup; PID=
+start; gate base
+echo "TRUST-GATE PASS: adapter >=${TRUST_MIN_ADAPTER:-15}/20 and base <=${TRUST_MAX_BASE:-10}/20 (calibrated 2026-09-02: base measured 6/20, loaded adapters 18-19/20)"

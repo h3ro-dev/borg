@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Program heartbeat — deterministic plain-language status for a BORG install.
+Tracks deltas via a state file. Notification is available only through an
+explicit command and destination supplied by the new owner.
+
+Covers: memory store growth, mining fleet, knowledge graph + training data,
+Spark lanes (patrol/verify), qwen findings, follow-up (commitments), and
+what's being built right now.
+
+Usage: mem0-program-status [--send]   (omit --send to just print)
+
+Print-only runs are read-only: the +delta baseline (program-status-state.json)
+moves only after a successful --send, so test runs never reset it.
+"""
+
+import json
+import os
+import re
+import shlex
+import subprocess
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import httpx
+from borg_config import CONFIG, BorgConfigError
+
+MEM = CONFIG.mem0_root
+GRAPH = CONFIG.graph_root
+STATE_F = CONFIG.data_root / "program-status-state.json"
+QDRANT = CONFIG.qdrant_url
+COLLECTION = CONFIG.qdrant_collection
+
+
+def optional_path(name):
+    value = os.environ.get(name)
+    return Path(value).expanduser() if value else None
+
+
+def now():
+    return datetime.now(ZoneInfo("America/Denver"))
+
+
+def mtime_dt(p):
+    try:
+        return datetime.fromtimestamp(Path(p).stat().st_mtime, ZoneInfo("America/Denver"))
+    except Exception:
+        return None
+
+
+def age_str(dt):
+    """Compact age of a past datetime: 12m / 30h / 3d."""
+    if dt is None:
+        return "?"
+    s = (now() - dt).total_seconds()
+    if s < 3600:
+        return f"{max(0, int(s // 60))}m"
+    if s < 48 * 3600:
+        return f"{int(s // 3600)}h"
+    return f"{int(s // 86400)}d"
+
+
+def store_count():
+    try:
+        r = httpx.get(f"{QDRANT}/collections/{COLLECTION}", timeout=8).json()
+        return r["result"]["points_count"]
+    except Exception:
+        return None
+
+
+def lock_alive(name):
+    p = MEM / "data" / f"{name}.lock"
+    try:
+        import os
+        os.kill(int(p.read_text()), 0)
+        return True
+    except Exception:
+        return False
+
+
+def progress(logname, lockname=None):
+    """Return (done, total, running) from a miner log's last [X/Y] line."""
+    f = MEM / "data" / logname
+    try:
+        last = f.read_text(errors="ignore").splitlines()[-1]
+    except Exception:
+        return None
+    m = re.search(r"\[(\d+)/(\d+)\]", last)
+    done, total = (int(m.group(1)), int(m.group(2))) if m else (None, None)
+    running = lock_alive(lockname) if lockname else None
+    if "RUN-END" in last:
+        running = False
+    return {"done": done, "total": total, "running": running}
+
+
+def count_lines(p):
+    try:
+        return sum(1 for _ in open(p, errors="ignore"))
+    except Exception:
+        return 0
+
+
+def glob_recent(d, pat, marker, hours=24):
+    """(marker-files modified within `hours`, newest marker-file mtime) —
+    lifetime totals read as current work, so lines built from this must
+    either scope to the window or date the newest file."""
+    recent, newest = 0, None
+    cutoff = now().timestamp() - hours * 3600
+    for f in (Path(d).glob(pat) if Path(d).exists() else []):
+        try:
+            if marker not in f.read_text(errors="ignore"):
+                continue
+            mt = f.stat().st_mtime
+        except Exception:
+            continue
+        if newest is None or mt > newest:
+            newest = mt
+        if mt >= cutoff:
+            recent += 1
+    return recent, (datetime.fromtimestamp(newest, ZoneInfo("America/Denver")) if newest else None)
+
+
+def pct(p):
+    return f"{100*p['done']//p['total']}%" if p and p.get("done") and p.get("total") else "?"
+
+
+def build():
+    L = []
+    t = now()
+    L.append(f"BORG build status — {t.strftime('%a %-I:%M %p')} MDT")
+
+    st = json.loads(STATE_F.read_text()) if STATE_F.exists() else {}
+    cur = {}
+
+    # Memory store
+    n = store_count()
+    cur["store"] = n
+    if n is not None:
+        prev = st.get("store")
+        delta = f" (+{n-prev})" if isinstance(prev, int) else ""
+        L.append(f"\nMemory: {n:,} facts{delta}")
+
+    # Miners
+    miners = []
+    try:
+        miner_rows = json.loads(os.environ.get("BORG_PROGRAM_MINERS_JSON", "[]"))
+    except json.JSONDecodeError as exc:
+        raise BorgConfigError("BORG_PROGRAM_MINERS_JSON must be valid JSON") from exc
+    for row in miner_rows:
+        label, log, lock = row["label"], row["log"], row.get("lock")
+        p = progress(log, lock)
+        if p and p.get("total"):
+            state = "" if p.get("running") else " (idle)"
+            miners.append(f"{label} {p['done']}/{p['total']}{state}")
+    if miners:
+        L.append("Mining: " + " · ".join(miners))
+
+    # Knowledge graph + training data
+    gb = None
+    bf = GRAPH / "data/backfill.log"
+    if bf.exists():
+        last = bf.read_text(errors="ignore").splitlines()[-1] if bf.read_text(errors="ignore") else ""
+        m = re.search(r"\[(\d+)/(\d+)\]", last)
+        gb = (int(m.group(1)), int(m.group(2))) if m else None
+    pairs = count_lines(GRAPH / "data/training-pairs.jsonl")
+    if gb or pairs:
+        gtxt = f"graph {gb[0]}/{gb[1]} episodes" if gb else "graph idle"
+        L.append(f"Knowledge graph: {gtxt}, {pairs} training pairs banked")
+
+    # Spark lanes — count only the last 24h; when idle, date the newest run
+    spark_bits = []
+    activity_sources = []
+    patrols = optional_path("BORG_PATROL_OUTPUT_DIR")
+    verifications = optional_path("BORG_VERIFICATION_OUTPUT_DIR")
+    if patrols:
+        activity_sources.append(("site patrols", "patrol", (patrols, "*.out", "PATROL-REPORT")))
+    if verifications:
+        activity_sources.append(("verify lanes", "verify", (verifications, "verify-*.out", "VERIFY-REPORT")))
+    for plural, single, d in activity_sources:
+        recent, newest = glob_recent(*d)
+        if recent:
+            spark_bits.append(f"{recent} {plural} (24h)")
+        elif newest:
+            spark_bits.append(f"last {single} {newest.strftime('%m-%d')}")
+    if spark_bits:
+        L.append("Codex Spark: " + ", ".join(spark_bits))
+
+    # Local qwen — report only a measured, recent extraction success
+    ok_at = None
+    try:
+        for line in reversed((GRAPH / "data/backfill.log").read_text(errors="ignore").splitlines()):
+            m = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) \[\d+/\d+\] ok ", line)
+            if m:
+                ok_at = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo("America/Denver"))
+                break
+    except Exception:
+        pass
+    if ok_at and (t - ok_at).total_seconds() <= 6 * 3600:
+        L.append(f"Local qwen: graph extraction live (last ok {ok_at.strftime('%-I:%M %p')})")
+
+    # Follow-up / commitments — LIST the actual open items, not just a count
+    ledger = optional_path("BORG_COMMITMENTS_LEDGER")
+    if ledger and ledger.exists():
+        rows = {}
+        for line in ledger.read_text(errors="ignore").splitlines():
+            try:
+                r = json.loads(line)
+                rows[r["id"]] = r
+            except Exception:
+                pass
+        notdone = [r for r in rows.values() if r.get("verify_status") == "NOT-DONE"]
+        open_items = [r for r in rows.values()
+                      if r.get("verify_status") not in ("DONE",) and r.get("status_claimed") != "done"
+                      and r not in notdone]
+        open_items.sort(key=lambda r: r.get("importance") != "high")
+        def clip(s, n=104):
+            s = " ".join(s.split())
+            return s if len(s) <= n else s[:n].rsplit(" ", 1)[0] + "…"
+        if rows:
+            L.append(f"\nFollow-up (ledger {age_str(mtime_dt(ledger))} old) — {len(rows)} tracked, {len(open_items)+len(notdone)} open:")
+            for r in notdone[:8]:
+                L.append(f"  ⚠ NOT DONE: {clip(r['item'])}")
+            for r in open_items[:12]:
+                star = "★ " if r.get("importance") == "high" else ""
+                L.append(f"  • {star}{clip(r['item'])}")
+            hidden = max(0, len(open_items) - 12)
+            if hidden:
+                L.append(f"  …+{hidden} more — full list: mem0-commitments list --open")
+
+    # What's building — mere existence is not activity; require a fresh mtime
+    emap_at = mtime_dt(optional_path("BORG_ECOSYSTEM_STATUS_FILE"))
+    if emap_at and (t - emap_at).total_seconds() <= 24 * 3600:
+        L.append(f"Building: ecosystem map (updated {age_str(emap_at)} ago)")
+
+    cur["at"] = t.strftime("%Y-%m-%d %H:%M")
+    return "\n".join(L), cur
+
+
+def notify(text):
+    command = os.environ.get("BORG_NOTIFICATION_COMMAND")
+    destination = os.environ.get("BORG_NOTIFICATION_DESTINATION")
+    if not command or not destination:
+        raise BorgConfigError(
+            "--send requires BORG_NOTIFICATION_COMMAND and BORG_NOTIFICATION_DESTINATION"
+        )
+    subprocess.run(
+        [*shlex.split(command), destination, text[:3500]],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+
+
+def main():
+    import sys
+    send = "--send" in sys.argv
+    if send:
+        # Land any pending Spark verify verdicts in the ledger first, so the
+        # message reports verified state, not agents' self-claims. Never let
+        # this block the heartbeat.
+        try:
+            subprocess.run([str(MEM / "bin/mem0-commitments"), "apply-verdicts"],
+                           capture_output=True, timeout=120)
+        except Exception:
+            pass
+    text, cur = build()
+    print(text)
+    if send:
+        try:
+            notify(text)
+            STATE_F.write_text(json.dumps(cur))  # baseline moves only on a real send
+            print("\n[sent to configured destination]")
+        except Exception as e:
+            print(f"\n[send failed: {e}]")
+
+
+if __name__ == "__main__":
+    main()

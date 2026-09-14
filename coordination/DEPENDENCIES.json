@@ -1,0 +1,26 @@
+{
+  "schema": "borg-coordination-dependencies/v1",
+  "python": {
+    "implementation": "CPython",
+    "minimum": "3.10",
+    "third_party_core": [],
+    "lock": "requirements-core.lock"
+  },
+  "beads": {
+    "project": "gastownhall/beads",
+    "repository": "https://github.com/gastownhall/beads",
+    "go_module": "github.com/steveyegge/beads",
+    "cli": "bd",
+    "version": "1.2.2",
+    "commit": "6c124203e771433a3550c348771a5b5e27fd3c21",
+    "role": "upstream project and work store",
+    "vendored": false
+  },
+  "optional_python": {
+    "fleet_desktop": [
+      "vncdotool==1.4.2"
+    ],
+    "resolved_lock": "requirements-optional-fleet.lock",
+    "enabled_by_default": false
+  }
+}

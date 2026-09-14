@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook — per-prompt mem0 recall for Claude Code.
+"""Claude Code memory hook.
 
-Claude Code is the only harness on Studio0 without live per-prompt retrieval.
-This closes that gap using the fast path measured in lane-3-harness-injection.md:
-a direct ollama embed (127.0.0.1:11434) plus a qdrant HTTP search
-(127.0.0.1:6333, collection `studio0`). No mem0 / fastembed / onnx imports —
+Modes:
+  prime  SessionStart compact: release only the disposable seen-ID ledger.
+  start  UserPromptSubmit: inject bounded per-prompt mem0 recall.
+
+This closes the per-prompt retrieval gap using a direct configured Ollama
+embed plus a configured Qdrant HTTP search. No mem0 / fastembed / onnx imports —
 those cost 6-9 s of interpreter start-up, which is the whole defect this
 design avoids. Stdlib urllib only; even httpx costs ~140 ms to import.
 
@@ -23,10 +25,11 @@ Fail-open is mandatory. This runs before every prompt of every future Claude
 session: on a miss, a timeout, a dead service, or any exception at all, it
 prints nothing and exits 0. Self-capped at ~2.5 s wall time.
 
-Kill switch: touch ~/Library/Memory/mem0/HOOK_OFF   (or MEM0_CLAUDE_HOOK_OFF=1)
-Log:         ~/Library/Memory/mem0/data/claude-hook.log  (JSONL, no prompt text)
+Kill switch: touch ``BORG_HOME/mem0/HOOK_OFF`` (or MEM0_CLAUDE_HOOK_OFF=1)
+Log: ``BORG_HOME/mem0/data/claude-hook.log`` (JSONL, no prompt text)
 """
 
+import importlib.machinery
 import json
 import os
 import re
@@ -37,17 +40,20 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent.parent
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_claude_hook", str(Path(__file__).resolve().parent / "borg_config.py")
+).load_module().CONFIG
+BASE = CONFIG.mem0_root
 LOG = BASE / "data/claude-hook.log"
 SESSIONS = BASE / "data/claude-hook-sessions"
 
 # Overridable so the fail-open path can be proved against a dead port without
 # ever touching the live ollama or qdrant services.
 OLLAMA = os.environ.get("MEM0_CLAUDE_OLLAMA",
-                        "http://127.0.0.1:11434/api/embeddings")
+                        str(CONFIG.values["BORG_OLLAMA_URL"]).rstrip("/") + "/api/embeddings")
 QDRANT = os.environ.get("MEM0_CLAUDE_QDRANT",
-                        "http://127.0.0.1:6333/collections/studio0/points/search")
-EMBED_MODEL = "nomic-embed-text:latest"
+                        str(CONFIG.values["BORG_QDRANT_URL"]).rstrip("/") + "/collections/" + str(CONFIG.values["BORG_QDRANT_COLLECTION"]) + "/points/search")
+EMBED_MODEL = str(CONFIG.values["BORG_EMBED_MODEL"])
 
 # --- gate ------------------------------------------------------------------
 # Floor is a per-(model, corpus) calibration constant, not a design choice.
@@ -55,6 +61,7 @@ EMBED_MODEL = "nomic-embed-text:latest"
 # out at 0.63-0.72, so lane-3's suggested 0.75 would inject nothing here.
 SCORE_FLOOR = float(os.environ.get("MEM0_CLAUDE_FLOOR", "0.60"))
 TOP_K = 5              # facts injected, at most
+MAX_GRAPH_K = 2        # derived graph facts injected, at most
 FETCH_K = 20           # over-fetch, then re-rank and de-duplicate
 MIN_PROMPT_CHARS = 15
 FACT_CHARS = 240       # per-fact truncation
@@ -64,8 +71,9 @@ HARD_CHARS = TOKEN_CAP * 4
 DEADLINE_S = 2.5
 
 # Default-closed. `person:` and unmatched `client:` rows never inject.
-BASE_SCOPES = ["personal:james", "team:project", "ops"]
-CLIENT_REGISTRY = Path.home() / "Library/Memory/clients/registry.toml"
+BASE_SCOPES = [str(CONFIG.values["BORG_MEMORY_SCOPE"])]
+_client_registry = os.environ.get("BORG_CLIENT_REGISTRY", "").strip()
+CLIENT_REGISTRY = Path(_client_registry).expanduser().resolve() if _client_registry else None
 
 TAG = "mem0-recall"
 HEADER = (
@@ -83,8 +91,9 @@ DROP_PATTERNS = [
 ]
 
 MEMORY_INDEXES = [
-    Path.home() / ".claude/projects/-Users-YOURUSER/memory/MEMORY.md",
-    Path.home() / ".claude/imported-memory/home/MEMORY.md",
+    Path(value).expanduser().resolve()
+    for value in os.environ.get("BORG_CLAUDE_MEMORY_INDEXES", "").split(os.pathsep)
+    if value.strip()
 ]
 
 STOP_PROMPTS = {
@@ -133,7 +142,7 @@ def allowed_scopes(cwd: str) -> list:
     if not low:
         return scopes
     try:
-        raw = CLIENT_REGISTRY.read_text(errors="ignore")
+        raw = CLIENT_REGISTRY.read_text(errors="ignore") if CLIENT_REGISTRY else ""
     except Exception:
         return scopes
     for slug in re.findall(r"^\[clients\.([A-Za-z0-9._-]+)\]", raw, re.M):
@@ -181,6 +190,23 @@ def ledger_write(session: str, seen: set):
         pass
 
 
+def _grok_harness_active() -> bool:
+    return bool(os.environ.get("GROK_HOOK_EVENT", "").strip())
+
+
+def reset_compact_seen_ledger(payload: dict) -> bool:
+    """Release one session's disposable recall IDs after Claude compaction."""
+    if _grok_harness_active():
+        return False
+    event = str(payload.get("hook_event_name") or "").strip()
+    source = str(payload.get("source") or "").strip().lower()
+    session = str(payload.get("session_id") or "").strip()
+    if event != "SessionStart" or source != "compact" or not session:
+        return False
+    ledger_write(session, set())
+    return True
+
+
 def log(rec: dict):
     try:
         LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -219,7 +245,13 @@ def recall_fast(prompt: str, scopes: list, budget: float):
             ).load_module()
             fn = getattr(m, "recall", None)
             if callable(fn):
-                hits = fn(prompt, scopes=scopes, limit=FETCH_K, timeout=budget)
+                hits = fn(
+                    prompt,
+                    scopes=scopes,
+                    limit=FETCH_K,
+                    timeout=budget,
+                    include_graph=_graph_in_search_enabled(),
+                )
                 if isinstance(hits, list):
                     return hits
         except Exception:
@@ -249,9 +281,54 @@ def recall_fast(prompt: str, scopes: list, budget: float):
     return res.get("result") or []
 
 
-def select(hits: list, seen: set, index: list):
+def _graph_in_search_enabled() -> bool:
+    return os.environ.get("MEM0_GRAPH_IN_SEARCH", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def _is_graph_candidate(row: dict, payload: dict) -> bool:
+    metadata = row.get("metadata") or {}
+    return (
+        row.get("is_graph") is True
+        or payload.get("is_graph") is True
+        or metadata.get("source") == "graphiti"
+    )
+
+
+def _normalized_text(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _pointer(row: dict, payload: dict, graph: bool) -> dict:
+    metadata = row.get("metadata") or {}
+    pointer = {
+        "source": "graphiti" if graph else "mem0",
+        "id": str(row.get("id") or ""),
+    }
+    source = metadata.get("source")
+    if source and source not in {"graphiti", "mem0"}:
+        pointer["source_ref"] = str(source)[:400]
+    for field in ("scope", "source_graph_key", "graph_edge_uuid", "edge_uuid"):
+        value = metadata.get(field, payload.get(field))
+        if value not in (None, ""):
+            pointer[field] = value
+    if metadata.get("episode_uuids"):
+        pointer["episode_uuids"] = metadata["episode_uuids"]
+    return pointer
+
+
+def _row_provenance(row: dict, payload: dict, graph: bool) -> list:
+    metadata = row.get("metadata") or {}
+    value = metadata.get("provenance")
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return [_pointer(row, payload, graph)]
+
+
+def select(hits: list, seen: set, index: list, allowed_scopes: list | None = None):
     """Gate, de-duplicate, re-rank, budget. Returns (lines, chosen_hashes, scores)."""
-    cand = []
+    by_text = {}
     for h in hits:
         score = float(h.get("score") or 0.0)
         if score < SCORE_FLOOR:
@@ -259,7 +336,7 @@ def select(hits: list, seen: set, index: list):
         # D1 adapter (2026-08-21): mem0_recall_fast returns FLAT rows with the
         # payload fields at top level; qdrant-shaped hits nest them under
         # "payload". Accept both, or every candidate reads empty and gets
-        # gated (an internal issue).
+        # gated by the configured private client registry.
         p = h.get("payload") or h
         text = sanitize(p.get("data") or p.get("memory") or p.get("text") or "")
         if len(text) < 20:
@@ -269,17 +346,41 @@ def select(hits: list, seen: set, index: list):
         key = p.get("hash") or str(h.get("id") or "")
         if not key or key in seen:
             continue
+        graph = _is_graph_candidate(h, p)
+        scope = str(
+            p.get("scope") or (h.get("metadata") or {}).get("scope")
+            or CONFIG.values["BORG_MEMORY_SCOPE"]
+        )
+        if allowed_scopes is not None and scope not in allowed_scopes:
+            continue
         tok = words(text)
         # A fact that merely restates a MEMORY.md index row buys nothing.
         if any(jaccard(tok, ix) >= 0.50 or (len(tok) >= 5 and tok <= ix) for ix in index):
             continue
         kind = str(p.get("kind") or "")
-        cand.append({
+        candidate = {
             "score": score, "text": text, "hash": key, "tok": tok, "kind": kind,
-            "scope": str(p.get("scope") or "personal:james"),
-            "date": row_date(p), "agent": str(p.get("agent_id") or ""),
+            "scope": scope, "date": row_date(p), "agent": str(p.get("agent_id") or ""),
             "thread": 1 if kind in THREAD_KINDS else 0,
-        })
+            "graph": graph,
+            "provenance": _row_provenance(h, p, graph),
+        }
+        text_key = _normalized_text(text)
+        existing = by_text.get(text_key)
+        if existing is None:
+            by_text[text_key] = candidate
+            continue
+        for pointer in candidate["provenance"]:
+            if pointer not in existing["provenance"]:
+                existing["provenance"].append(pointer)
+        if candidate["score"] > existing["score"]:
+            candidate["provenance"] = existing["provenance"]
+            candidate["graph"] = bool(candidate["graph"] or existing["graph"])
+            by_text[text_key] = candidate
+        else:
+            existing["graph"] = bool(existing["graph"] or candidate["graph"])
+
+    cand = list(by_text.values())
 
     # Bucket by 0.01 of score, then prefer a settled fact over a raw thread
     # chunk, then the newer row. Newest wins on contradiction (lane-3 s.2b).
@@ -292,17 +393,33 @@ def select(hits: list, seen: set, index: list):
     cand.sort(key=lambda c: (-round(c["score"], 2), c["thread"], -date_num(c["date"])))
 
     lines, chosen, scores, used = [], [], [], 0
+    graph_count = 0
     picked_tok = []
     for c in cand:
         if len(lines) >= TOP_K:
             break
+        if c["graph"] and graph_count >= MAX_GRAPH_K:
+            continue
         if any(jaccard(c["tok"], t) >= 0.85 for t in picked_tok):
             continue  # redundancy suppression, not relevance filtering
         text = c["text"]
         if len(text) > FACT_CHARS:
             text = text[:FACT_CHARS - 1].rstrip() + "…"
+        source_labels = []
+        for pointer in c["provenance"]:
+            label = str(pointer.get("source") or "")
+            if label and label not in source_labels:
+                source_labels.append(label)
+        pointer_bits = []
+        for pointer in c["provenance"]:
+            label = pointer.get("source")
+            pointer_id = pointer.get("graph_edge_uuid") if label == "graphiti" else pointer.get("id")
+            if pointer_id:
+                pointer_bits.append(f"{label}_id={pointer_id}")
         prov = " · ".join(x for x in (
-            c["scope"], c["kind"], c["date"], c["agent"]) if x)
+            c["scope"], c["kind"], c["date"], c["agent"],
+            "+".join(source_labels), *pointer_bits,
+        ) if x)
         line = "%d. [%s · score %.2f] %s" % (
             len(lines) + 1, prov, c["score"], text)
         if used + len(line) + 1 > BUDGET_CHARS and lines:
@@ -312,10 +429,14 @@ def select(hits: list, seen: set, index: list):
         chosen.append(c["hash"])
         scores.append(round(c["score"], 3))
         used += len(line) + 1
+        if c["graph"]:
+            graph_count += 1
     return lines, chosen, scores
 
 
 def run_start():
+    if _grok_harness_active():
+        return
     t_start = time.time()
     m0 = time.monotonic()
     status, hits_n, scores = "ok", 0, []
@@ -349,7 +470,7 @@ def run_start():
             return
 
         seen = ledger_read(session)
-        lines, chosen, scores = select(hits, seen, index_lines())
+        lines, chosen, scores = select(hits, seen, index_lines(), scopes)
         if not lines:
             status = "gated"
             return
@@ -385,7 +506,16 @@ def run_start():
 def main():
     if (BASE / "HOOK_OFF").exists() or os.environ.get("MEM0_CLAUDE_HOOK_OFF"):
         return
-    if len(sys.argv) < 2 or sys.argv[1] != "start":
+    if len(sys.argv) < 2:
+        return
+    if sys.argv[1] == "prime":
+        try:
+            payload = json.load(sys.stdin)
+        except Exception:
+            return
+        reset_compact_seen_ledger(payload if isinstance(payload, dict) else {})
+        return
+    if sys.argv[1] != "start":
         return
     def on_alarm(*_):
         raise Timeout()

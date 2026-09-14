@@ -1,0 +1,10 @@
+#!/bin/bash
+# Automation wrapper. Callers must grant recall and write scopes explicitly.
+set -euo pipefail
+: "${BORG_HOME:?BORG_HOME is required}"
+: "${BORG_OLLAMA_URL:?BORG_OLLAMA_URL is required}"
+: "${MEM0_HOOK_SCOPES:?MEM0_HOOK_SCOPES is required for conductor recall}"
+: "${MEM0_CAPTURE_SCOPE:?MEM0_CAPTURE_SCOPE is required for conductor capture}"
+
+export MEM0_OLLAMA_URL="${MEM0_OLLAMA_URL:-$BORG_OLLAMA_URL}"
+exec "$BORG_HOME/mem0/bin/mem0-codex-hook" "$@"

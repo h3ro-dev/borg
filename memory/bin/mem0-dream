@@ -1,910 +1,764 @@
 #!/usr/bin/env python3
-"""Nightly dream — the memory system's update-and-revise cycle (03:30 MDT).
+"""Bounded memory census and opt-in reversible retention maintenance.
 
-Phases (each logged to data/dream.log, each skippable):
-  1. seed      — refresh the corpus index (new/changed memory files, codex registry)
-  2. threads   — incremental chat-thread ingestion (bounces off lock if backlog run is live)
-  3. email     — incremental mailbox ingestion (same lock behavior)
-  4. consolidate — merge near-duplicates (>=0.90 cosine)
-  5. revise    — the dream proper: review related-but-not-duplicate clusters
-                 (0.75-0.90) for contradictions/supersession; newest wins;
-                 merge or retire with every action logged
-  6. digest    — write data/DREAM-LATEST.md morning report
-
-Optional: --with-luna adds one batched gpt-5.6-luna curation lane (codex exec).
-Kill switch: touch ~/Library/Memory/mem0/DREAM_OFF
+The census requests metadata only. When MEM0_DREAM_RETENTION_ENABLED=1,
+maintenance retrieves full payloads for duplicate or explicitly classified
+candidates and writes only owned retirement markers with a restore journal.
+Original facts, vectors, and source history remain intact. No model calls.
 """
 
-import os
-
-os.environ["MEM0_TELEMETRY"] = "false"
+from __future__ import annotations
 
 import argparse
-import importlib.machinery
+from datetime import date, datetime, timezone
+import fcntl
+import hashlib
 import json
-import re
-import subprocess
-import sys
-import time
-import urllib.error
-import urllib.request
+import importlib.machinery
+import os
 from pathlib import Path
+import re
+import signal
+import time
+import urllib.request
 
-BASE = Path(__file__).resolve().parent.parent
-BIN = BASE / "bin"
-DATA = BASE / "data"
-CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BIN / "mem0ctl")).load_module()
-SAFETY = importlib.machinery.SourceFileLoader(
-    "mem0_dream_safety", str(BIN / "mem0_dream_safety.py")
-).load_module()
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_dream", str(Path(__file__).resolve().parent / "borg_config.py")
+).load_module().CONFIG
 
-LOG_F = Path(os.environ.get("MEM0_DREAM_LOG", str(DATA / "dream.log")))
-STATE_F = DATA / "dream-state.json"
-REPORT_F = DATA / "DREAM-LATEST.md"
+BASE = CONFIG.mem0_root
+SCHEMA = "dream-maintenance-v1"
+MAX_RUNTIME_S = 600.0
+MAX_SCAN_POINTS = 200_000
+DEFAULT_PAGE_SIZE = 1_000
+HTTP_TIMEOUT_S = 30.0
+RETIRED_STATUSES = frozenset({"tombstoned", "decayed"})
+METADATA_FIELDS = (
+    "hash",
+    "scope",
+    "status",
+    "is_canary",
+    "canary",
+    "retention_class",
+    "expiration_date",
+    "expires_at",
+    "valid_until",
+    "updated_at",
+)
+EXPIRY_FIELDS = ("expiration_date", "expires_at", "valid_until")
+DURABLE_RETENTION = "durable"
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}", re.ASCII)
 
 
-def log(msg):
-    with open(LOG_F, "a") as f:
-        f.write(f"{CTL.now_mdt()} {msg}\n")
-    print(msg, flush=True)
+class DeadlineExceeded(RuntimeError):
+    """The bounded maintenance budget ended before the scan completed."""
 
 
-def _qdrant_json(method, path, body=None, timeout_s=20):
-    data = json.dumps(body).encode("utf-8") if body is not None else None
+class RunInterrupted(RuntimeError):
+    """The process received a termination signal during maintenance."""
+
+
+def _canonical(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _sha256(value):
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_file(path):
+    try:
+        return _sha256(path.read_bytes())
+    except OSError:
+        return "UNAVAILABLE"
+
+
+def _now_mdt():
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(timezone.utc).astimezone(ZoneInfo("America/Denver"))
+    except Exception:
+        return datetime.now(timezone.utc)
+
+
+def _log(message, log_path):
+    line = f"{_now_mdt().isoformat(timespec='seconds')} {message}"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+    print(message, flush=True)
+
+
+def _env_float(name, default, maximum):
+    raw = os.environ.get(name)
+    try:
+        value = float(raw) if raw is not None else float(default)
+    except (TypeError, ValueError):
+        value = float(default)
+    return min(maximum, max(0.01, value))
+
+
+def _env_int(name, default, maximum):
+    raw = os.environ.get(name)
+    try:
+        value = int(raw) if raw is not None else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    return min(maximum, max(1, value))
+
+
+class _Budget:
+    def __init__(self, seconds):
+        self.started = time.monotonic()
+        self.deadline = self.started + seconds
+
+    def remaining(self):
+        return self.deadline - time.monotonic()
+
+    def check(self):
+        if self.remaining() <= 0:
+            raise DeadlineExceeded("deadline")
+
+    def timeout(self):
+        self.check()
+        return min(HTTP_TIMEOUT_S, self.remaining())
+
+
+def _http_json(url, body, timeout_s):
     request = urllib.request.Request(
-        os.environ.get("MEM0_QDRANT_URL", "http://127.0.0.1:6333").rstrip("/") + path,
-        data=data,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method=method,
+        url,
+        data=_canonical(body).encode("utf-8"),
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout_s) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-def qdrant_client():
-    """Production remains 127.0.0.1:6333; URL override is isolated-test only."""
-    from qdrant_client import QdrantClient
-
-    url = os.environ.get("MEM0_QDRANT_URL")
-    return QdrantClient(url=url) if url else QdrantClient(host="127.0.0.1", port=6333, timeout=120)
+def _qdrant_url():
+    return str(CONFIG.values["BORG_QDRANT_URL"]).rstrip("/")
 
 
-def qdrant_snapshot_preflight():
-    """Create the required collection snapshot before any destructive stage."""
+def _collection():
+    return str(CONFIG.values["BORG_QDRANT_COLLECTION"])
+
+
+def _path_config(data_dir=None, lock_path=None, receipt_path=None, cache_path=None, log_path=None):
+    root = Path(data_dir) if data_dir is not None else Path(
+        os.environ.get("MEM0_DREAM_DATA_DIR", str(BASE / "data"))
+    )
+    return {
+        "data": root,
+        "lock": Path(lock_path) if lock_path is not None else Path(
+            os.environ.get("MEM0_DREAM_LOCK", str(root / "dream-maintenance.lock"))
+        ),
+        "receipt": Path(receipt_path) if receipt_path is not None else Path(
+            os.environ.get("MEM0_DREAM_RECEIPT", str(root / "dream-maintenance.receipt.json"))
+        ),
+        "cache": Path(cache_path) if cache_path is not None else Path(
+            os.environ.get("MEM0_DREAM_CACHE", str(root / "dream-maintenance.cache.json"))
+        ),
+        "log": Path(log_path) if log_path is not None else Path(
+            os.environ.get("MEM0_DREAM_LOG", str(root / "dream.log"))
+        ),
+    }
+
+
+def _dream_off(_paths):
+    configured = os.environ.get("MEM0_DREAM_OFF")
+    sentinel = Path(configured) if configured else BASE / "DREAM_OFF"
+    return sentinel.exists()
+
+
+def _acquire_lock(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    os.fchmod(fd, 0o600)
     try:
-        payload = _qdrant_json("POST", "/collections/studio0/snapshots", timeout_s=180)  # 508MB snapshot measured ~23s; 20s default timed out 2026-08-28
-        result = payload.get("result") if isinstance(payload, dict) else None
-        name = result.get("name") if isinstance(result, dict) else None
-        if not name:
-            raise RuntimeError("snapshot response carried no result.name")
-        log(f"QDRANT-SNAPSHOT-PASS collection=studio0 snapshot={name}")
-        return str(name)
-    except Exception as exc:
-        log(f"QDRANT-SNAPSHOT-FAILED collection=studio0 destructive=NOT_RUN error={type(exc).__name__}: {str(exc)[:200]}")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        os.close(fd)
         return None
+    return fd
 
 
-def check_canaries():
-    """Verify every seeded canary's immutable lifecycle state at Dream end."""
-    q = qdrant_client()
-    points = []
-    for point in CTL.scroll_all(q, "studio0", with_payload=True, with_vectors=False):
-        payload = point.payload or {}
-        if payload.get("is_canary") is True:
-            points.append({"id": str(point.id), "payload": payload})
-    scopes = sorted({str(point["payload"].get("scope")) for point in points if point["payload"].get("scope")})
-    expected = {row["id"] for row in SAFETY.canary_rows(scopes)} if len(scopes) >= 2 else set()
-    present = {point["id"] for point in points}
-    violations = SAFETY.check_canary_payloads(points)
-    if not expected:
-        violations.append("no complete two-scope canary seed present")
-    else:
-        violations.extend(f"{pid}:missing" for pid in sorted(expected - present))
-    if violations:
-        log(f"CANARY-FAIL count={len(violations)} detail={' | '.join(violations[:12])}")
-        return False, len(points), len(violations)
-    log(f"CANARY-PASS points={len(points)} scopes={len(scopes)}")
-    return True, len(points), 0
-
-
-def run_step(name, cmd, timeout_s):
-    t0 = time.time()
+def _release_lock(fd):
+    if fd is None:
+        return
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
-        tail = (r.stdout or r.stderr or "").strip().splitlines()[-1:] or [""]
-        log(f"STEP {name}: rc={r.returncode} {time.time()-t0:.0f}s :: {tail[0][:160]}")
-    except subprocess.TimeoutExpired:
-        log(f"STEP {name}: TIMEOUT after {timeout_s}s (left running work for tomorrow)")
-    except Exception as e:
-        log(f"STEP {name}: ERROR {e}")
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
-def store_counts():
-    q = qdrant_client()
-    by_agent, organic, total, live = {}, 0, 0, 0
-    statuses = {CTL.TOMBSTONE_STATUS: 0, CTL.DECAY_STATUS: 0}
-    for p in CTL.scroll_all(q, "studio0", with_payload=True, with_vectors=False):
-        total += 1
-        pay = p.payload or {}
-        a = pay.get("agent_id") or "(none)"
-        by_agent[a] = by_agent.get(a, 0) + 1
-        if pay.get("run_id") != "corpus-seed":
-            organic += 1
-        status = pay.get("status")
-        if status in statuses:
-            statuses[status] += 1
-        else:
-            live += 1
-    return total, by_agent, organic, statuses, live
+def _atomic_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
-def novelty_skip_count():
-    path = DATA / "novelty-skipped.jsonl"
+def _read_json(path):
     if not path.exists():
-        return 0
-    with open(path, errors="ignore") as handle:
-        return sum(1 for line in handle if line.strip())
-
-
-def staleness_ratio():
-    audits = sorted(DATA.glob("staleness-audit-*.jsonl"))
-    if not audits:
-        return "UNKNOWN"
-    counts = {"stale": 0, "current": 0, "unverifiable": 0}
-    with open(audits[-1], errors="ignore") as handle:
-        for line in handle:
-            try:
-                verdict = json.loads(line).get("verdict")
-            except Exception:
-                continue
-            if verdict in counts:
-                counts[verdict] += 1
-    judged = sum(counts.values())
-    return f"{counts['stale'] / judged:.1%} ({counts['stale']}/{judged}; {audits[-1].name})" if judged else "UNKNOWN"
-
-
-REVISE_LO, REVISE_HI = 0.75, 0.90  # related-but-not-duplicate band (unchanged)
-
-# The old character listing cap remains a secondary circuit breaker only.  The
-# shared controller tokenizes the FULL serialized prompt first, then splits or
-# quarantines without truncating any row text.
-REVISE_SECONDARY_MAX_LISTING_CHARS = SAFETY.SECONDARY_MAX_SERIALIZED_CHARS
-
-
-def _serialize_revise_prompt(rows):
-    """Return the complete REVISE prompt; this exact string is token-admitted."""
-    listing = "\n".join(
-        f"{k}. ({r['date']}) [{r['id']}] {r['text']}"
-        for k, r in enumerate(rows, 1)
-    )
-    return (
-        "These memory notes are related. Decide if they contradict or supersede each other.\n"
-        "Rules: the newest date wins; an explicit correction wins over the original; distinct facts stay.\n"
-        'Reply ONLY with JSON: {"action":"keep"} OR {"action":"merge","text":"<one merged current fact>","retire_ids":["<id>",...]} '
-        'OR {"action":"retire","retire_ids":["<id>",...]}.\n'
-        + listing
-    )
-
-
-def _serialize_grok_batch_prompt(shards):
-    """Return the complete schema-constrained Grok batch request.
-
-    Every unit is an already admitted REVISE shard.  Numbering is stable for
-    the life of this REVISE run, so a verdict can never be applied to another
-    shard merely because batches were split or re-packed.
-    """
-    listing = []
-    for shard in shards:
-        rows = "\n".join(
-            f"  {k}. ({row['date']}) [{row['id']}] {row['text']}"
-            for k, row in enumerate(shard["rows"], 1)
-        )
-        listing.append(f"SHARD {shard['shard']} (scope={shard['scope']}):\n{rows}")
-    return (
-        "Judge each numbered memory shard independently. Decide whether notes within that shard "
-        "contradict or supersede each other. The newest date wins; an explicit correction wins "
-        "over the original; distinct facts stay. Never compare, merge, or retire across shards.\n"
-        "Reply ONLY with JSON matching the supplied schema. Return exactly one verdict for every "
-        "shard. Each verdict's shard number must be copied exactly. A merge needs text and one or "
-        "more retire_ids. A retire needs one or more retire_ids; do not retire every row.\n\n"
-        + "\n\n".join(listing)
-    )
-
-
-# FINDING A2: payload key that carries the namespace a row belongs to.
-SCOPE_KEY = "scope"
-
-
-def _row_scopes(q, ids):
-    """Map each loaded row id -> its scope namespace; None = legacy unscoped."""
-    want = set(ids)
-    found = {}
-    for p in CTL.scroll_all(q, "studio0", with_payload=True, with_vectors=False):
-        if p.id in want and p.id not in found:
-            found[p.id] = (p.payload or {}).get(SCOPE_KEY)
-            if len(found) == len(want):
-                break
-    return [found.get(i) for i in ids]
-
-
-
-# ------------------------------------------------------------- Legacy Ox judge --
-# Kept for explicit operator use and historical diagnosis. REVISE no longer
-# calls it: its latency profile is incompatible with a first-batch Grok circuit
-# breaker, so affected REVISE shards fall directly to the local qwen judge.
-OX_MODELS = ["opencode/x-preview-f-free", "openrouter/stealth/ox-alpha"]
-OX_MODEL = OX_MODELS[0]          # kept: existing references still resolve
-OX_DIR = BASE / "data" / "ox-judge"
-OX_TIMEOUT = 300          # generous: ~124s measured, and a slow answer is not a failure
-_ANSI = re.compile(r"\x1b\[[0-9;]*m")
-
-
-GROK_BIN = str(Path.home() / ".grok/bin/grok")
-GROK_MODEL = "grok-4.6"
-GROK_JUDGE_TIMEOUT = 700  # 420 timed out 2 nights running in the 03:30-05:00 window; day runs measure 64-135s
-GROK_BATCH_TARGET_SHARDS = 10
-GROK_BATCH_MAX_CALLS = 5
-_BATCH_VERDICT_SCHEMA = json.dumps({
-    "type": "object",
-    "properties": {
-        "verdicts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "shard": {"type": "integer"},
-                    "action": {"type": "string", "enum": ["keep", "merge", "retire"]},
-                    "text": {"type": "string"},
-                    "retire_ids": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["shard", "action"],
-            },
-        },
-    },
-    "required": ["verdicts"],
-})
-CURATION_DIR = BASE / "data" / "curation"
-
-
-def grok_judge(prompt):
-    """Ask Grok for one schema-constrained batch of REVISE shard verdicts.
-
-    This remains explicitly opt-in until a live schema proof can create a CLI
-    session. It is still invoked at most five times per night and always with
-    multiple shards. A failed process returns None;
-    a process that returns malformed JSON is represented by an empty mapping
-    so only its affected shards fall through to the local qwen judge.
-    """
-    if os.environ.get("DREAM_JUDGE_GROK", "1") != "1":
-        return None
+        return None, "MISSING"
     try:
-        env = dict(os.environ, MEM0_CAPTURE_SKIP="1")
-        # --verbatim is load-bearing: without it the CLI offloads any large
-        # -p prompt to a file the schema-constrained single turn never reads,
-        # and the model returns a 1-verdict stub (measured 2026-08-28: 10
-        # shards inline = 64s with all 10 verdicts; offloaded = stub or
-        # 420s timeout). The override strips the CLI's agentic skill
-        # machinery, which otherwise competes with the judging task.
-        r = subprocess.run(
-            [GROK_BIN, "-p", prompt, "--verbatim", "--model", GROK_MODEL,
-             "--json-schema", _BATCH_VERDICT_SCHEMA,
-             "--system-prompt-override",
-             "You are a memory-curation judge. Follow the task instructions "
-             "in the user prompt exactly. Do not use tools. Reply only with "
-             "JSON matching the supplied schema.",
-             "--no-subagents", "--disable-web-search"],
-            capture_output=True, text=True, timeout=GROK_JUDGE_TIMEOUT, env=env, cwd=BASE)
-        if r.returncode != 0:
-            log(f"GROK-BATCH-ERROR rc={r.returncode}: {(r.stderr or '')[:120]}")
-            return None
-        out = _ANSI.sub("", r.stdout or "")
-        mjson = re.search(r"\{.*\}", out, re.S)
-        if not mjson:
-            log("GROK-BATCH-MALFORMED no-json-object")
-            return {}
-        try:
-            parsed = json.loads(mjson.group(0))
-        except json.JSONDecodeError:
-            log("GROK-BATCH-MALFORMED invalid-json")
-            return {}
-        if not isinstance(parsed, dict):
-            log("GROK-BATCH-MALFORMED non-object")
-            return {}
-        # --json-schema output arrives as a CLI envelope whose "text" field
-        # holds the schema-constrained JSON string (measured 2026-08-28).
-        # Accept both shapes so an output-format change never silently
-        # downgrades every shard to the fallback judge.
-        if "verdicts" not in parsed and isinstance(parsed.get("text"), str):
-            try:
-                inner = json.loads(parsed["text"])
-                if isinstance(inner, dict) and "verdicts" in inner:
-                    return inner
-            except json.JSONDecodeError:
-                log("GROK-BATCH-MALFORMED envelope-text-not-json")
-                return {}
-        return parsed
-    except subprocess.TimeoutExpired:
-        log(f"GROK-BATCH-TIMEOUT timeout={GROK_JUDGE_TIMEOUT}s")
-        return None
-    except Exception as e:  # noqa: BLE001 — a dead judge is a fallback, never a crash
-        log(f"GROK-BATCH-ERROR {type(e).__name__}: {str(e)[:100]}")
-        return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None, "CORRUPT"
+    if not isinstance(value, dict):
+        return None, "CORRUPT"
+    if value.get("schema") != SCHEMA or value.get("complete") is not True:
+        return value, "INCOMPLETE"
+    if not isinstance(value.get("fingerprint"), str):
+        return value, "INCOMPLETE"
+    return value, "VALID"
 
 
-def _admit_grok_batches(shards, *, log=log):
-    """Pack admitted REVISE shards into <=10-shard, 48k-token Grok batches.
-
-    The shared controller owns the final boundary: it recursively bisects a
-    target-sized group when its fully serialized batch prompt exceeds Grok's
-    envelope. A resulting singleton is deliberately not sent to Grok because
-    it would reintroduce the per-shard lifecycle cost; it falls back to qwen.
-    """
-    batches = []
-    for start in range(0, len(shards), GROK_BATCH_TARGET_SHARDS):
-        batches.extend(SAFETY.admit_serialized_prompt(
-            phase="REVISE-GROK-BATCH",
-            model=GROK_MODEL,
-            rows=shards[start:start + GROK_BATCH_TARGET_SHARDS],
-            render_prompt=_serialize_grok_batch_prompt,
-            log=log,
-            secondary_max_chars=REVISE_SECONDARY_MAX_LISTING_CHARS,
-        ))
-    return batches
+def _scope_key(payload):
+    if "scope" not in payload:
+        return ("missing", "")
+    value = payload.get("scope")
+    return (type(value).__name__, repr(value))
 
 
-def _map_grok_batch_verdicts(response, shards):
-    """Return valid verdicts keyed by shard and a per-shard malformed reason."""
-    expected = {shard["shard"] for shard in shards}
-    mapped, bad = {}, {}
-    if not isinstance(response, dict) or not isinstance(response.get("verdicts"), list):
-        return mapped, {number: "malformed" for number in expected}
-    for item in response["verdicts"]:
-        if not isinstance(item, dict):
+def _scope_digest(scope_key):
+    return _sha256(_canonical(scope_key).encode("utf-8"))
+
+
+def _mapping_containers(value):
+    """Walk all metadata containers without choosing a preferred one."""
+
+    pending = [value]
+    seen = set()
+    while pending:
+        container = pending.pop(0)
+        if not isinstance(container, dict) or id(container) in seen:
             continue
-        number = item.get("shard")
-        if not isinstance(number, int) or isinstance(number, bool):
-            # A quoted-but-recognizable shard is malformed for that specific
-            # unit, rather than an unexplained omission of the unit.
-            if isinstance(number, str) and number.isdigit() and int(number) in expected:
-                bad[int(number)] = "malformed"
-            continue
-        if number not in expected:
-            continue
-        if number in mapped or number in bad:
-            mapped.pop(number, None)
-            bad[number] = "malformed"
-            continue
-        action = item.get("action")
-        text = item.get("text")
-        retire_ids = item.get("retire_ids")
-        if action not in {"keep", "merge", "retire"} or (text is not None and not isinstance(text, str)) or (
-            retire_ids is not None and (not isinstance(retire_ids, list) or not all(isinstance(row_id, str) for row_id in retire_ids))
-        ):
-            bad[number] = "malformed"
-            continue
-        verdict = {"action": action}
-        if text is not None:
-            verdict["text"] = text
-        if retire_ids is not None:
-            verdict["retire_ids"] = retire_ids
-        mapped[number] = verdict
-    for number in expected - set(mapped) - set(bad):
-        bad[number] = "missing"
-    return mapped, bad
+        seen.add(id(container))
+        yield container
+        for key in ("metadata", "payload"):
+            nested = container.get(key)
+            if isinstance(nested, dict):
+                pending.append(nested)
 
 
-def qwen_judge(client, prompt):
-    """Run the existing local JSON judge path for one affected shard only."""
-    try:
-        response = client.chat(
-            model=CTL.MODELS["qwen"],
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0, "num_predict": 400},
-            format="json",
-        )
-        content = response["message"]["content"]
-        matched = re.search(r"\{.*\}", content, re.S)
-        verdict = json.loads(matched.group(0)) if matched else None
-        return verdict if isinstance(verdict, dict) else None
-    except Exception as exc:  # noqa: BLE001 — preserves the pre-batch skip behavior
-        log(f"QWEN-JUDGE-ERROR {type(exc).__name__}: {str(exc)[:100]}")
-        return None
-
-
-def _resolve_grok_batch(batch, client, *, skip_grok=False, skip_reason="grok-down"):
-    """Map batch verdicts, invoking qwen only for missing or malformed shards."""
-    response = None if skip_grok else grok_judge(batch.prompt)
-    grok_call_failed = not skip_grok and response is None
-    mapped, bad = _map_grok_batch_verdicts(response, batch.rows)
-    decisions = []
-    for shard in batch.rows:
-        number = shard["shard"]
-        verdict = mapped.get(number)
-        via = "grok-batch"
-        if verdict is None:
-            # A failed call (timeout/error -> None) is "grok-failed", not
-            # "malformed": no response existed to be malformed.
-            if skip_grok:
-                reason = skip_reason
-            elif grok_call_failed:
-                reason = "grok-failed"
-            else:
-                reason = bad.get(number, "missing")
-            log(f"JUDGE-FALLBACK shard={number} reason={reason} judge=qwen")
-            verdict = qwen_judge(client, shard["judge_prompt"])
-            via = "qwen"
-        decisions.append({"shard": number, "verdict": verdict, "via": via})
-    return decisions, grok_call_failed
-
-
-def _judge_shard_batches(batches, client):
-    """Run no more than five Grok batches, then resolve qwen fallbacks.
-
-    Once the first unreachable Grok batch reports failure, the rest of the
-    night never starts another expensive CLI session. Each affected shard still
-    has its own fast qwen fallback and normal verdict application downstream.
-    """
-    grok_down = os.environ.get("DREAM_JUDGE_GROK", "1") != "1"
-    if grok_down and batches:
-        log("GROK-BATCH-DISABLED -> qwen fallback")
-    grok_calls = 0
-    grok_cap_logged = False
-    decisions = []
-    for batch in batches:
-        if len(batch.rows) < 2:
-            resolved, _ = _resolve_grok_batch(batch, client, skip_grok=True, skip_reason="unbatchable")
-        elif grok_down:
-            resolved, _ = _resolve_grok_batch(batch, client, skip_grok=True)
-        elif grok_calls >= GROK_BATCH_MAX_CALLS:
-            if not grok_cap_logged:
-                log(f"GROK-BATCH-CAP calls={grok_calls} max={GROK_BATCH_MAX_CALLS} remaining -> qwen")
-                grok_cap_logged = True
-            resolved, _ = _resolve_grok_batch(batch, client, skip_grok=True, skip_reason="batch-cap")
-        else:
-            grok_calls += 1
-            resolved, grok_call_failed = _resolve_grok_batch(batch, client)
-            if grok_call_failed:
-                grok_down = True
-                log(f"GROK-DOWN batch={grok_calls} remaining -> qwen")
-        decisions.extend(resolved)
-    return decisions
-
-
-def _journal_decision(scope, sub, admission, via, verdict, applied, new_id=None):
-    """Append one full-evidence curation record per judged shard — the
-    training corpus for a future specialist memory-curation model (owner
-    order 2026-08-28). Full row text is deliberate: the future model must
-    see exactly what the judge saw. Append-only, never read by the dream."""
-    try:
-        CURATION_DIR.mkdir(parents=True, exist_ok=True)
-        row = {
-            "at": CTL.now_mdt(), "phase": "REVISE", "scope": scope,
-            "rows": [{"id": r["id"], "text": r["text"], "date": r.get("date")} for r in sub],
-            "tokens": getattr(admission.measurement, "tokens", None),
-            "envelope": getattr(admission, "envelope", None),
-            "judge": via, "verdict": verdict,
-            "applied": applied, "new_id": new_id,
-        }
-        with open(CURATION_DIR / f"decisions-{CTL.now_mdt()[:10]}.jsonl", "a") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    except Exception as e:  # noqa: BLE001 — journaling must never fail the dream
-        log(f"  CURATION-JOURNAL-FAIL ({type(e).__name__}: {str(e)[:80]})")
-
-
-def _load_openrouter_key():
-    """launchd does NOT read ~/.zshenv, so a scheduled run would reach the
-    OpenRouter door with no key and fall through as if the door were shut —
-    the failure would look identical to a throttle. Read it from the shell
-    env file when the process env lacks it. The value is never logged."""
-    if os.environ.get("OPENROUTER_API_KEY"):
-        return
-    f = Path.home() / ".zshenv"
-    try:
-        for line in f.read_text().splitlines():
-            if line.startswith("export OPENROUTER_API_KEY="):
-                os.environ["OPENROUTER_API_KEY"] = line.split("=", 1)[1].strip().strip('"\'')
-                return
-    except Exception:
-        pass
-
-
-def ox_judge(prompt):
-    """Ask Ox for a JSON verdict. Returns the parsed dict, or None if it could
-    not answer — never a partial or guessed verdict."""
-    _load_openrouter_key()
-    OX_DIR.mkdir(parents=True, exist_ok=True)
-    guard = OX_DIR / "opencode.json"
-    if not guard.exists():
-        src = Path.home() / "ox-fleet" / "guard-opencode.json"
-        if src.exists():
-            guard.write_text(src.read_text())
-        else:
-            return None                      # no guard, no run: never unguarded
-    for model in OX_MODELS:
-        try:
-            r = subprocess.run(
-                ["opencode", "run", "--pure", "--dir", str(OX_DIR), "-m", model, prompt],
-                capture_output=True, text=True, timeout=OX_TIMEOUT)
-        except Exception:
-            continue                         # this door is shut; try the next
-        out = _ANSI.sub("", r.stdout or "")
-        if "network_error" in out or "finish_reason" in out:
-            continue                         # throttled, not answered — next door
-        m = re.search(r"\{.*\}", out, re.S)
-        if not m:
-            continue
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            continue
-    return None                              # every door tried, none answered
-
-
-def revise(max_clusters, m, *, dry_run=False):
-    """Judge related-but-not-duplicate organic clusters for contradiction/supersession.
-
-    Counts skips. On 2026-08-23 every cluster was skipped because the judge
-    model returned HTTP 500 ("unknown renderer qwen3.8"), and the run still
-    wrote a clean DREAM-END with merged=0 retired=0 — which reads as "nothing
-    needed consolidating" when it meant "nothing COULD be". A failure that ends
-    with a success marker is the one that survives: the crash found the same
-    morning was fixed within hours because it was loud, while this had been
-    silently zeroing consolidation.
-    """
-    _skipped, _judged, _by_judge = [0], [0], {}
-    q = qdrant_client()
-    # Paginated stream (CTL.scroll_all) instead of one scroll(limit=100000):
-    # the offset is chained to exhaustion, and pages are converted to float32 as
-    # they arrive rather than holding ~48k qdrant Records (~1.2 GB) at once.
-    ids, texts, dates, V, scanned = CTL.load_organic(q, "james", date_keys=("thread_date", "added_mdt"))
-    if len(ids) < 2:
-        log(f"REVISE: not enough organic rows (scanned {scanned})")
-        return 0, 0
-    scopes = _row_scopes(q, ids)  # FINDING A2: per-row namespace lookup
-    unscoped = [i for i, s in enumerate(scopes) if s is None]
-    if unscoped:
-        log(f"REVISE guard: refusing {len(unscoped)} legacy row(s) with no '{SCOPE_KEY}' in payload")
-        for i in unscoped:
-            log(f"  REFUSE-UNSCOPED [{ids[i]}] {texts[i][:160]}")
-    # Seed-anchored clusters, not union-find. Single-linkage over this band
-    # chains A~B~C into one blob and produced the 1,073,002-token prompt that
-    # crashed the run on 2026-08-20; every member now has to clear REVISE_LO
-    # against the cluster seed, and no cluster may exceed CTL.CLUSTER_MAX.
-    # FINDING A2: clustering runs once per scope on disjoint vector slices, so
-    # no pair, seed anchor, or cluster can ever span two scope namespaces.
-    agg_stats = {"chain_links_refused": 0, "capped_clusters": 0, "capped_deferred": 0, "seed_check_failures": 0}
-    capped_all = {}
-    groups = []
-    for scope, rows_in_scope in sorted(
-        ((s, [i for i, x in enumerate(scopes) if x == s]) for s in set(scopes) if s is not None),
-        key=lambda kv: str(kv[0]),
+def _valid_expiry(value, today):
+    values = [
+        container[field]
+        for container in _mapping_containers(value)
+        for field in EXPIRY_FIELDS
+        if field in container
+    ]
+    if not values:
+        return "unknown"
+    if any(
+        isinstance(container.get("retention_class"), str)
+        and container["retention_class"].strip().casefold() == DURABLE_RETENTION
+        for container in _mapping_containers(value)
     ):
-        if len(rows_in_scope) < 2:
-            continue
-        # numpy fancy-index, NOT a list comprehension. pair_index() and
-        # cluster_star_anchored() both do `V.shape[0]` and matrix products on this, so
-        # a Python list raises "'list' object has no attribute 'shape'" and
-        # kills the whole run. That is the crash the DREAM-ABORT guard caught on
-        # 2026-08-23 — introduced by the per-scope slicing itself (FINDING A2),
-        # which is why the run had been green before scopes were added.
-        # V[rows_in_scope] returns a contiguous float32 array of the same rows.
-        sub_V = V[rows_in_scope]
-        I, J, W = CTL.pair_index(sub_V, REVISE_LO, REVISE_HI)
-        members, capped, stats = CTL.cluster_star_anchored(
-            sub_V, I, J, W, REVISE_LO,
-            anchor_order=CTL.newest_anchor_order(
-                [dates[i] for i in rows_in_scope], [ids[i] for i in rows_in_scope]
-            ),
-        )
-        del I, J, W
-        for k in agg_stats:
-            agg_stats[k] += int(stats.get(k, 0))
-        capped_all.update({rows_in_scope[seed]: n for seed, n in capped.items()})
-        for mem in members.values():
-            if len(mem) > 1:
-                groups.append(
-                    [{"id": ids[rows_in_scope[x]], "text": texts[rows_in_scope[x]],
-                      "date": dates[rows_in_scope[x]], "scope": scope} for x in mem]
-                )
-    del V
-    groups.sort(key=len, reverse=True)
-    cands = groups[:max_clusters]
-    log(f"REVISE: scanned {scanned} points, {len(ids)} organic rows, {len(unscoped)} unscoped refused, {len(groups)} clusters, judging {len(cands)} (cap {max_clusters})")
-    log(
-        f"REVISE guard: {agg_stats['chain_links_refused']} transitive links refused, "
-        f"{agg_stats['capped_clusters']} star shards hit the {CTL.MAX_ROWS}-row cap "
-        f"({agg_stats['capped_deferred']} rows form later shards), {agg_stats['seed_check_failures']} anchor-threshold failures"
+        return "unknown"
+    parsed_values = []
+    for raw in values:
+        if not isinstance(raw, str) or DATE_RE.fullmatch(raw) is None:
+            return "unknown"
+        try:
+            parsed_values.append(date.fromisoformat(raw))
+        except ValueError:
+            return "unknown"
+    if len(set(parsed_values)) != 1:
+        return "unknown"
+    return "expired" if parsed_values[0] < today else "active"
+
+
+def _is_canary(payload):
+    return payload.get("is_canary") is True or payload.get("canary") is True
+
+
+def _is_active(point):
+    payload = point.get("payload") if isinstance(point, dict) else None
+    return (
+        isinstance(payload, dict)
+        and payload.get("status") not in RETIRED_STATUSES
+        and not _is_canary(payload)
     )
-    for seed_idx, deferred in sorted(capped_all.items(), key=lambda kv: -kv[1])[:20]:
-        log(
-            f"  WARN runaway family: anchor [{ids[seed_idx]}] filled the {CTL.MAX_ROWS}-row cap, "
-            f"{deferred} direct neighbours will form later star shard(s) — {texts[seed_idx][:160]}"
+
+
+def _point_record(point, today):
+    payload = point.get("payload")
+    point_id = point.get("id")
+    if not isinstance(payload, dict) or point_id is None:
+        return None
+    selected = {field: payload.get(field) for field in METADATA_FIELDS if field in payload}
+    selected["id"] = str(point_id)
+    payload_digest = _sha256(_canonical(selected).encode("utf-8"))
+    version = {
+        field: payload.get(field)
+        for field in ("hash", "updated_at")
+        if field in payload
+    }
+    scope_key = _scope_key(payload)
+    return {
+        "id": str(point_id),
+        "hash": payload.get("hash") if isinstance(payload.get("hash"), str) else None,
+        "scope_key": scope_key,
+        "scope_sha256": _scope_digest(scope_key),
+        "payload_sha256": payload_digest,
+        "payload_version": version,
+        "expiry": _valid_expiry(point, today),
+    }
+
+
+def _scroll_source(budget, max_points, page_size, http_fn):
+    url = f"{_qdrant_url()}/collections/{_collection()}/points/scroll"
+    offset = None
+    seen_offsets = set()
+    points = []
+    pages = 0
+    try:
+        while len(points) < max_points:
+            budget.check()
+            request_limit = min(page_size, max_points - len(points))
+            body = {
+                "limit": request_limit,
+                "with_payload": list(METADATA_FIELDS),
+                "with_vector": False,
+                "filter": {
+                    "must_not": [
+                        {"key": "status", "match": {"value": status}}
+                        for status in sorted(RETIRED_STATUSES)
+                    ]
+                    + [
+                        {"key": "is_canary", "match": {"value": True}},
+                        {"key": "canary", "match": {"value": True}},
+                    ],
+                },
+            }
+            if offset is not None:
+                body["offset"] = offset
+            payload = http_fn(url, body, budget.timeout())
+            result = payload.get("result") if isinstance(payload, dict) else None
+            page = result.get("points") if isinstance(result, dict) else None
+            if not isinstance(page, list):
+                raise ValueError("malformed-page")
+            points.extend(point for point in page if isinstance(point, dict))
+            pages += 1
+            next_offset = result.get("next_page_offset") if isinstance(result, dict) else None
+            if next_offset is None and len(page) <= request_limit and len(points) <= max_points:
+                return points[:max_points], pages, "COMPLETE", "complete"
+            if next_offset is None:
+                return points[:max_points], pages, "PARTIAL", "scan-cap"
+            marker = _canonical(next_offset)
+            if marker in seen_offsets:
+                return points[:max_points], pages, "PARTIAL", "offset-loop"
+            seen_offsets.add(marker)
+            offset = next_offset
+    except DeadlineExceeded:
+        return points[:max_points], pages, "PARTIAL", "deadline"
+    return points[:max_points], pages, "PARTIAL", "scan-cap"
+
+
+def _source_policy_hash():
+    policy = {
+        "schema": SCHEMA,
+        "metadata_fields": METADATA_FIELDS,
+        "expiry_fields": EXPIRY_FIELDS,
+        "retired_statuses": sorted(RETIRED_STATUSES),
+        "max_runtime_s": MAX_RUNTIME_S,
+        "max_scan_points": MAX_SCAN_POINTS,
+    }
+    return _sha256(_canonical(policy).encode("utf-8")), policy
+
+
+def _fingerprint(records, source_hash, policy_hash):
+    selected = [
+        {
+            "id": row["id"],
+            "payload_sha256": row["payload_sha256"],
+            "payload_version": row["payload_version"],
+        }
+        for row in records
+    ]
+    selected.sort(key=lambda row: (row["id"], row["payload_sha256"]))
+    material = {
+        "schema": SCHEMA,
+        "source_hash": source_hash,
+        "policy_hash": policy_hash,
+        "selected": selected,
+    }
+    return _sha256(_canonical(material).encode("utf-8"))
+
+
+def _diagnostics(records):
+    groups = {}
+    retention = {"expired": 0, "active": 0, "unknown": 0}
+    for row in records:
+        retention[row["expiry"]] += 1
+        if row["hash"] is None:
+            continue
+        groups.setdefault((row["scope_key"], row["hash"]), []).append(row)
+    duplicate_groups = []
+    for (scope_key, hash_value), members in sorted(groups.items(), key=lambda item: repr(item[0])):
+        if len(members) < 2:
+            continue
+        duplicate_groups.append(
+            {
+                "scope_sha256": _scope_digest(scope_key),
+                "hash": hash_value,
+                "count": len(members),
+                "provenance_ids": sorted(member["id"] for member in members),
+            }
         )
-
-    # Phase A: preserve the existing per-shard admission and safety guards.
-    # It deliberately performs no model calls, so every admitted shard can be
-    # packed before Grok's expensive CLI/session lifecycle begins.
-    shards = []
-    for c in cands:
-        # FINDING A2 defense-in-depth: never judge or rewrite a group whose
-        # members do not share exactly one non-null scope.
-        grp_scopes = {r.get("scope") for r in c}
-        if None in grp_scopes or len(grp_scopes) != 1:
-            log(f"REVISE: REFUSING mixed/unscoped cluster {[r['id'] for r in c]} scopes={sorted(str(s) for s in grp_scopes)}")
-            continue
-        g_scope = next(iter(grp_scopes))
-        # Belt-and-braces row cap.  A breach is a loud refusal, never a slice.
-        if len(c) > CTL.MAX_ROWS:
-            log(f"REVISE: REFUSING impossible shard of {len(c)} rows (MAX_ROWS={CTL.MAX_ROWS})")
-            continue
-        # The single controller serializes every full request, measures it with
-        # the qwen tokenizer (or loudly marked estimate), and recursively
-        # splits it before either the Grok batch or local qwen can receive it.
-        admissions = SAFETY.admit_serialized_prompt(
-            phase="REVISE",
-            models=[GROK_MODEL, CTL.MODELS["qwen"]],
-            rows=c,
-            render_prompt=_serialize_revise_prompt,
-            log=log,
-            secondary_max_chars=REVISE_SECONDARY_MAX_LISTING_CHARS,
-        )
-        if not admissions:
-            log(f"REVISE: cluster of {len(c)} quarantined by TOKEN-ADMISSION — no model call")
-            _skipped[0] += 1
-            continue
-        for admission in admissions:
-            sub = list(admission.rows)
-            shards.append({
-                "shard": len(shards) + 1,
-                "scope": g_scope,
-                "rows": sub,
-                "judge_prompt": admission.prompt,
-                "admission": admission,
-            })
-
-    # Phase B: bounded logical batches target ten shards each (four calls for
-    # the normal 40-cluster run). The shared controller may split a heavy batch
-    # further, but no scheduled run is allowed to exceed five Grok processes.
-    batches = _admit_grok_batches(shards)
-    packed = {shard["shard"] for batch in batches for shard in batch.rows}
-    unpacked = [shard for shard in shards if shard["shard"] not in packed]
-    if unpacked:
-        # A one-shard batch that cannot fit even after Phase A is never sent to
-        # Grok: its per-call lifecycle cost is the exact behavior this wave
-        # removes. It will take the ordinary qwen path below.
-        log(f"GROK-BATCH-UNADMITTED shards={','.join(str(shard['shard']) for shard in unpacked)} -> qwen")
-        batches.extend(
-            SAFETY.PromptAdmission((shard,), "", shard["admission"].measurement, shard["admission"].envelope)
-            for shard in unpacked
-        )
-    log(f"GROK-BATCH-PLAN shards={len(shards)} batches={len(batches)} target={GROK_BATCH_TARGET_SHARDS} max_calls={GROK_BATCH_MAX_CALLS}")
-    if dry_run:
-        for batch in batches:
-            log(f"REVISE-DRY-RUN would batch-judge shards={len(batch.rows)} tokens={batch.measurement.tokens} envelope={batch.envelope}")
-        return 0, 0
-
-    client = None
-    if shards:
-        CTL._patch_ollama_think()
-        import ollama
-        client = ollama.Client(host=CTL.OLLAMA_URL)
-    merged_n = retired_n = 0
-    by_shard = {shard["shard"]: shard for shard in shards}
-    for decision in _judge_shard_batches(batches, client):
-        shard = by_shard[decision["shard"]]
-        sub, g_scope, admission = shard["rows"], shard["scope"], shard["admission"]
-        verdict, via = decision["verdict"], decision["via"]
-        if not isinstance(verdict, dict) or "action" not in verdict:
-            # A malformed verdict is not consent to change memory.
-            log(f"REVISE: cluster of {len(sub)} skipped — {via} returned no usable action")
-            _skipped[0] += 1
-            continue
-        _judged[0] += 1
-        _by_judge[via] = _by_judge.get(via, 0) + 1
-        action = verdict.get("action", "keep")
-        valid_ids = {r["id"] for r in sub}
-        retire = [i for i in verdict.get("retire_ids", []) if i in valid_ids]
-        if action == "merge" and verdict.get("text") and retire:
-            res = m.add([{"role": "user", "content": verdict["text"]}], user_id="james",
-                        agent_id="dream-revise",
-                        metadata={"added_mdt": CTL.now_mdt(), "source": "dream-revise", "merged_from": retire,
-                                  "scope": g_scope}, infer=False)
-            evs = res.get("results", res) if isinstance(res, dict) else res
-            new_id = evs[0].get("id") if isinstance(evs, list) and evs and isinstance(evs[0], dict) else None
-            retired_n += _retire_rows(q, m, sub, retire, kind="merge",
-                                      reason=f"superseded by dream-revise merge {new_id or '(id unknown)'}",
-                                      superseded_by=new_id, expected_scope=g_scope)
-            log(f"  MERGED [{new_id}] -> {verdict['text'][:140]}")
-            merged_n += 1
-            _journal_decision(g_scope, sub, admission, via, verdict, "merge", new_id)
-        elif action == "retire" and retire and len(retire) < len(sub):
-            retired_n += _retire_rows(q, m, sub, retire, kind="retire",
-                                      reason="dream-revise judged the row stale or contradicted",
-                                      expected_scope=g_scope)
-            _journal_decision(g_scope, sub, admission, via, verdict, "retire")
-        else:
-            _journal_decision(g_scope, sub, admission, via, verdict, "keep")
-    if _skipped[0] and not _judged[0]:
-        # Every cluster failed. Not a quiet no-op: the judge is unreachable and
-        # consolidation did nothing at all. Raising routes it through the
-        # DREAM-ABORT path — marker, traceback, non-zero exit — instead of a
-        # clean end that looks like success.
-        raise RuntimeError(
-            f"REVISE-BLOCKED: all {_skipped[0]} cluster(s) skipped, 0 judged — "
-            f"judge model unavailable, so consolidation did NOTHING. "
-            f"Check CTL.MODELS['qwen'] against curl 127.0.0.1:11434/api/tags")
-    if _by_judge:
-        log("REVISE judges: " + ", ".join(f"{k}={v}" for k, v in sorted(_by_judge.items())))
-    if _skipped[0]:
-        log(f"REVISE-DEGRADED: {_skipped[0]} cluster(s) skipped, {_judged[0]} judged "
-            f"— partial consolidation only")
-    return merged_n, retired_n
+    return {
+        "active_points": len(records),
+        "retention": retention,
+        "hash_scope_duplicate_groups": len(duplicate_groups),
+        "hash_scope_duplicate_excess": sum(group["count"] - 1 for group in duplicate_groups),
+        "largest_hash_scope_group": max((group["count"] for group in duplicate_groups), default=0),
+        "duplicate_candidates": duplicate_groups,
+        "missing_hash_points": sum(1 for row in records if row["hash"] is None),
+    }
 
 
-def _retire_rows(q, m, cluster, retire_ids, *, kind, reason, superseded_by=None, expected_scope=None):
-    """Write each row to the undo ledger IN FULL, then tombstone it.
+def _signal_handlers():
+    previous = {}
 
-    The old loop logged `r['text'][:120]` and hard-deleted; qdrant has no
-    undelete, so anything past 120 characters was gone. Order matters: the
-    ledger line is written first and CTL.append_retired raises on failure, so a
-    row that could not be recorded is never deleted.
+    def handle(signum, _frame):
+        if signum == getattr(signal, "SIGALRM", object()):
+            raise DeadlineExceeded("signal")
+        raise RunInterrupted("signal")
 
-    FINDING A2: a row whose recorded scope differs from expected_scope (or that
-    carries no scope at all) is skipped and logged — dream never tombstones
-    across namespaces.
-
-    Returns the number of rows actually tombstoned.
-    """
-    by_id = {r["id"]: r for r in cluster}
-    tag = "RETIRE(merge)" if kind == "merge" else "RETIRE"
-    tombstoned = 0
-    for rid in retire_ids:
-        row = by_id.get(rid, {})
-        r_scope = row.get("scope")
-        if expected_scope is not None and r_scope != expected_scope:
-            log(f"  SKIP-TOMBSTONE [{rid}] scope mismatch ({r_scope!r} != {expected_scope!r}) — row kept")
+    for name in ("SIGALRM", "SIGTERM", "SIGINT"):
+        signum = getattr(signal, name, None)
+        if signum is None:
             continue
         try:
-            changed = CTL.tombstone_point(
-                q,
-                rid,
-                retired_by="dream-revise",
-                reason=reason,
-                superseded_by=superseded_by,
-                fallback_text=row.get("text", ""),
-            )
-        except Exception as e:
-            log(f"  SKIP-TOMBSTONE [{rid}] undo-ledger/payload write failed ({type(e).__name__}: {str(e)[:120]}) — row kept")
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, handle)
+        except (OSError, RuntimeError, ValueError):
             continue
-        if not changed:
-            continue
-        log(f"  {tag} [{rid}] {row.get('text', '')}")  # full text, not [:120]
-        tombstoned += 1
-    return tombstoned
+    return previous
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--skip-seed", action="store_true")
-    ap.add_argument("--skip-threads", action="store_true")
-    ap.add_argument("--skip-email", action="store_true")
-    ap.add_argument("--skip-consolidate", action="store_true")
-    ap.add_argument("--max-clusters", type=int, default=40)
-    ap.add_argument("--with-luna", action="store_true")
-    ap.add_argument("--dry-run", action="store_true", help="read and token-admit only; never mutate the Qdrant store")
-    args = ap.parse_args()
+def _restore_signal_handlers(previous):
+    for signum, handler in previous.items():
+        try:
+            signal.signal(signum, handler)
+        except (OSError, RuntimeError, ValueError):
+            pass
 
-    if (BASE / "DREAM_OFF").exists():
-        return
-    log("DREAM-START")
-    total0, by_agent0, organic0, statuses0, live0 = store_counts()
-    novelty0 = novelty_skip_count()
 
-    # Threads and email only add rows.  The preflight follows those additive
-    # lanes and gates every later lifecycle mutation (including seed refresh).
-    if args.dry_run:
-        log("DREAM-DRY-RUN additive=NOT_RUN snapshot=NOT_CREATED destructive=NOT_RUN")
-    else:
-        if not args.skip_threads:
-            run_step("threads", [str(BIN / "mem0-ingest-threads"), "--limit", "400"], 3 * 3600)
-        if not args.skip_email:
-            run_step("email", [str(BIN / "mem0-ingest-email"), "--limit", "200"], 2 * 3600)
+def _terminal_receipt(paths, value, *, dry_run):
+    if dry_run:
+        return False
+    try:
+        _atomic_json(paths["receipt"], value)
+        return True
+    except OSError:
+        return False
 
-    snapshot_name = "DRY_RUN_NOT_CREATED" if args.dry_run else qdrant_snapshot_preflight()
-    destructive_ok = bool(snapshot_name) and not args.dry_run
-    merged = retired = 0
-    if destructive_ok:
-        # Qdrant is still flushing the ~508MB snapshot it just wrote;
-        # hitting it immediately produced client timeouts (2026-08-28).
-        time.sleep(15)
-        run_step("strip-errors", [str(BIN / "mem0-strip-error-state")], 120)
-        if not args.skip_seed:
-            run_step("seed", ["/opt/homebrew/bin/mem0ctl", "seed"], 900)
-        if not args.skip_consolidate:
-            run_step("consolidate", ["/opt/homebrew/bin/mem0ctl", "consolidate"], 1800)
-        m = CTL.get_memory("llama")
-        merged, retired = revise(args.max_clusters, m)
-        run_step("decay", [str(BIN / "mem0-decay")], 900)
-    elif args.dry_run:
-        merged, retired = revise(args.max_clusters, None, dry_run=True)
-    else:
-        log("DREAM-DESTRUCTIVE-NOT-RUN reason=QDRANT-SNAPSHOT-FAILED")
 
-    if args.with_luna and destructive_ok:
-        brief = (
-            "Nightly memory curation on Studio0. Read ~/Library/Memory/mem0/data/DREAM-LATEST.md and run "
-            "/opt/homebrew/bin/mem0ctl list --limit 60 to review recent memories. Fix ONLY clear problems: "
-            "reword vague facts (retire old via mem0ctl delete ID, re-add via mem0ctl add \"...\" --raw), "
-            "retire obvious junk. Never touch corpus-seed rows or store secrets/contact data. "
-            "Finish with one line: CURATED: N changes."
-        )
-        run_step("luna", ["codex", "exec", "--skip-git-repo-check", "-m", "gpt-5.6-luna",
-                          "--sandbox", "danger-full-access", brief], 1800)
+def _base_result(paths, *, mode, max_seconds, max_points):
+    return {
+        "schema": SCHEMA,
+        "complete": False,
+        "overall": "FAIL",
+        "scan_state": "FAILED",
+        "mode": mode,
+        "model_calls": 0,
+        "store_writes": 0,
+        "cache_written": False,
+        "cache_status": "UNKNOWN",
+        "input_state": "UNKNOWN",
+        "fingerprint": None,
+        "source_hash": _sha256_file(Path(__file__)),
+        "policy_hash": _source_policy_hash()[0],
+        "counts": {
+            "pages": 0,
+            "points_scanned": 0,
+            "active_points": 0,
+            "retention": {"expired": 0, "active": 0, "unknown": 0},
+            "hash_scope_duplicate_groups": 0,
+            "hash_scope_duplicate_excess": 0,
+            "largest_hash_scope_group": 0,
+            "missing_hash_points": 0,
+        },
+        "duplicate_candidates": [],
+        "elapsed_s": 0.0,
+        "reason": "not-run",
+        "started_at": _now_mdt().isoformat(timespec="seconds"),
+        "paths": {"receipt": str(paths["receipt"]), "cache": str(paths["cache"])},
+        "limits": {"max_seconds": max_seconds, "max_points": max_points},
+        "source_policy": {"metadata_fields": list(METADATA_FIELDS), "vectors": False, "text": False},
+    }
 
-    total1, by_agent1, organic1, statuses1, live1 = store_counts()
-    novelty_skipped = novelty_skip_count() - novelty0
-    delta = {a: by_agent1.get(a, 0) - by_agent0.get(a, 0) for a in set(by_agent0) | set(by_agent1)}
-    delta = {a: d for a, d in delta.items() if d}
-    canary_ok, canary_points, canary_violations = check_canaries()
-    if not args.dry_run:
-        REPORT_F.write_text(
-            f"# Dream report — {CTL.now_mdt()}\n\n"
-            f"- Store: {total0} -> {total1} memories ({organic1} organic, {total1-organic1} corpus index)\n"
-            f"- Live rows: {live1}\n"
-            f"- Tombstoned rows: {statuses1[CTL.TOMBSTONE_STATUS]}\n"
-            f"- Decayed rows: {statuses1[CTL.DECAY_STATUS]}\n"
-            f"- Novelty skipped tonight: {novelty_skipped}\n"
-            f"- Staleness ratio: {staleness_ratio()}\n"
-            f"- New tonight by agent: {json.dumps(delta)}\n"
-            f"- Revision: {merged} clusters merged, {retired} stale rows retired\n"
-            f"- Snapshot: {snapshot_name}\n"
-            f"- Canaries: {'PASS' if canary_ok else 'FAIL'} ({canary_points} points, {canary_violations} violations)\n"
-            f"- Logs: dream.log, ingest.log, email-ingest.log, captures.log, consolidate.log\n"
-        )
-        st = {"last_run": CTL.now_mdt(), "total": total1, "snapshot": snapshot_name, "canaries": canary_ok}
-        STATE_F.write_text(json.dumps(st))
-    else:
-        log("DREAM-DRY-RUN report/state=NOT_WRITTEN")
-    log(
-        f"DREAM-END total={total1} (+{total1-total0}) live={live1} "
-        f"tombstoned={statuses1[CTL.TOMBSTONE_STATUS]} decayed={statuses1[CTL.DECAY_STATUS]} "
-        f"novelty_skipped={novelty_skipped} merged={merged} retired={retired} "
-        f"snapshot={snapshot_name} destructive={'PASS' if destructive_ok else 'NOT_RUN'} "
-        f"canaries={'PASS' if canary_ok else 'FAIL'} canary_points={canary_points}"
+
+def _retention_http(method, path, body, timeout_s):
+    request = urllib.request.Request(
+        _qdrant_url() + path, data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method=method,
     )
-    # A normal nightly run without a snapshot is intentionally not green: its
-    # destructive lanes were aborted and an operator must see that fact.
-    return 0 if canary_ok and (args.dry_run or destructive_ok) else 1
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        return json.load(response)
+
+
+def _apply_reversible_retention(raw_points, diagnostics, paths, budget, today):
+    retention = importlib.machinery.SourceFileLoader(
+        "dream_retention", str(Path(__file__).resolve().parent / "retention.py")
+    ).load_module()
+    candidate_ids = set()
+    for group in diagnostics["duplicate_candidates"]:
+        candidate_ids.update(str(value) for value in group.get("provenance_ids", []))
+    for point in raw_points:
+        payload = point.get("payload") or {}
+        if payload.get("retention_class") in {"noise", "unsupported", "transient", "ephemeral"}:
+            candidate_ids.add(str(point["id"]))
+    points = []
+    ordered = sorted(candidate_ids)
+    for start in range(0, len(ordered), 256):
+        budget.check()
+        response = _retention_http("POST", f"/collections/{_collection()}/points",
+            {"ids": ordered[start:start + 256], "with_payload": True, "with_vector": False}, budget.timeout())
+        page = response.get("result")
+        if not isinstance(page, list):
+            raise ValueError("malformed-retention-candidate-page")
+        points.extend(page)
+    plan = retention.plan_retention(points, as_of=today)
+    maximum = _env_int("MEM0_DREAM_MAX_RETIREMENTS", 200, 1000)
+    result = retention.apply_plan(
+        _retention_http, _collection(), plan["entries"],
+        paths["receipt"].parent / "retention-journal.jsonl",
+        lock_path=paths["receipt"].parent / "retention.lock",
+        max_mutations=maximum, max_seconds=max(0.01, budget.remaining()),
+    )
+    result.update(planned=len(plan["entries"]), plan_reasons=plan["reasons"], candidate_points=len(points),
+                  source_changes=0, vector_changes=0, hard_deletes=0)
+    return result
+
+
+def run_maintenance(
+    *,
+    data_dir=None,
+    lock_path=None,
+    receipt_path=None,
+    cache_path=None,
+    log_path=None,
+    dry_run=False,
+    now=None,
+    runtime_s=None,
+    max_points=None,
+    page_size=None,
+    http_fn=None,
+    apply_markers=False,
+):
+    """Run one bounded census and return its metadata-only terminal receipt."""
+
+    paths = _path_config(data_dir, lock_path, receipt_path, cache_path, log_path)
+    requested_runtime = runtime_s if runtime_s is not None else _env_float("MEM0_DREAM_MAX_SECONDS", MAX_RUNTIME_S, MAX_RUNTIME_S)
+    requested_points = max_points if max_points is not None else _env_int("MEM0_DREAM_MAX_POINTS", MAX_SCAN_POINTS, MAX_SCAN_POINTS)
+    requested_page = page_size if page_size is not None else _env_int("MEM0_DREAM_PAGE_SIZE", DEFAULT_PAGE_SIZE, MAX_SCAN_POINTS)
+    max_seconds = min(MAX_RUNTIME_S, max(0.01, float(requested_runtime)))
+    scan_limit = min(MAX_SCAN_POINTS, max(1, int(requested_points)))
+    page_limit = min(scan_limit, max(1, int(requested_page)))
+    started = time.monotonic()
+    result = _base_result(
+        paths,
+        mode="DRY_RUN" if dry_run else "MAINTENANCE",
+        max_seconds=max_seconds,
+        max_points=scan_limit,
+    )
+    log_path_value = paths["log"]
+    _log(
+        f"DREAM-START mode={result['mode']} model_calls=0 store_writes=0 "
+        f"max_seconds={max_seconds:g} max_points={scan_limit}",
+        log_path_value,
+    )
+    if _dream_off(paths):
+        result.update({"overall": "NOT_RUN", "scan_state": "NOT_RUN", "reason": "DREAM_OFF"})
+        _log("DREAM-END overall=NOT_RUN model_calls=0 store_writes=0 reason=DREAM_OFF", log_path_value)
+        return result
+
+    try:
+        lock_fd = _acquire_lock(paths["lock"])
+    except OSError:
+        result.update({"overall": "FAIL", "scan_state": "FAILED", "reason": "lock-error"})
+        _terminal_receipt(paths, result, dry_run=dry_run)
+        _log("DREAM-END overall=FAIL model_calls=0 store_writes=0 reason=lock-error", log_path_value)
+        return result
+    if lock_fd is None:
+        result.update({"overall": "NOT_RUN", "scan_state": "NOT_RUN", "reason": "lock-held"})
+        _log("DREAM-END overall=NOT_RUN model_calls=0 store_writes=0 reason=lock-held", log_path_value)
+        return result
+
+    previous_handlers = _signal_handlers()
+    old_timer = None
+    try:
+        alarm = getattr(signal, "SIGALRM", None)
+        if alarm is not None:
+            try:
+                old_timer = signal.setitimer(signal.ITIMER_REAL, max_seconds)
+            except (OSError, RuntimeError, ValueError):
+                old_timer = None
+        cache, cache_status = _read_json(paths["cache"])
+        result["cache_status"] = cache_status
+        budget = _Budget(max_seconds)
+        scan_now = (
+            now.date()
+            if isinstance(now, datetime)
+            else now
+            if isinstance(now, date)
+            else datetime.now(timezone.utc).date()
+        )
+        fetch = http_fn or _http_json
+        raw_points, pages, scan_state, scan_reason = _scroll_source(
+            budget, scan_limit, page_limit, fetch
+        )
+        records = [_point_record(point, scan_now) for point in raw_points if _is_active(point)]
+        records = [record for record in records if record is not None]
+        diagnostics = _diagnostics(records)
+        result["counts"] = {
+            "pages": pages,
+            "points_scanned": len(raw_points),
+            **{key: value for key, value in diagnostics.items() if key != "duplicate_candidates"},
+        }
+        result["duplicate_candidates"] = diagnostics["duplicate_candidates"]
+        result["scan_state"] = scan_state
+        result["reason"] = scan_reason
+        if scan_state != "COMPLETE":
+            raise DeadlineExceeded(scan_reason)
+        source_hash = result["source_hash"]
+        policy_hash = result["policy_hash"]
+        fingerprint = _fingerprint(records, source_hash, policy_hash)
+        result["fingerprint"] = fingerprint
+        if cache_status == "VALID" and cache.get("fingerprint") == fingerprint:
+            result["input_state"] = "UNCHANGED"
+        elif cache_status == "VALID":
+            result["input_state"] = "CHANGED"
+        elif cache_status == "MISSING":
+            result["input_state"] = "INITIAL"
+        else:
+            result["input_state"] = "CHANGED"
+        result["complete"] = True
+        result["overall"] = "PASS"
+        cache_value = {
+            "schema": SCHEMA,
+            "complete": True,
+            "fingerprint": fingerprint,
+            "source_hash": source_hash,
+            "policy_hash": policy_hash,
+            "counts": result["counts"],
+        }
+        if dry_run:
+            result["reason"] = "dry-run"
+        else:
+            if apply_markers:
+                result["source_policy"]["retention_candidates_full_payload"] = True
+                result["retention_helper_sha256"] = _sha256_file(Path(__file__).resolve().parent / "retention.py")
+                result["retention"] = _apply_reversible_retention(raw_points, diagnostics, paths, budget, scan_now)
+                result["store_writes"] = result["retention"].get("mutations", 0)
+                if result["retention"].get("state") not in {"PASS", "COMPLETE"}:
+                    result["overall"] = result["retention"].get("state", "FAIL")
+                    result["reason"] = "retention-" + str(result["retention"].get("reason", "incomplete"))
+            result["elapsed_s"] = round(time.monotonic() - started, 6)
+            _atomic_json(paths["cache"], cache_value)
+            result["cache_written"] = True
+            _atomic_json(paths["receipt"], result)
+    except BaseException as exc:
+        if isinstance(exc, (DeadlineExceeded, RunInterrupted)):
+            result["scan_state"] = "PARTIAL"
+            result["reason"] = "deadline" if isinstance(exc, DeadlineExceeded) else "interrupted"
+        else:
+            result["scan_state"] = "FAILED"
+            result["reason"] = type(exc).__name__.lower()
+        result["overall"] = "FAIL"
+        result["complete"] = False
+        result["elapsed_s"] = round(time.monotonic() - started, 6)
+        _terminal_receipt(paths, result, dry_run=dry_run)
+    finally:
+        result["elapsed_s"] = round(time.monotonic() - started, 6)
+        if old_timer is not None:
+            try:
+                signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
+            except (OSError, RuntimeError, ValueError):
+                pass
+        _restore_signal_handlers(previous_handlers)
+        _release_lock(lock_fd)
+
+    _log(
+        "DREAM-END overall={overall} model_calls=0 store_writes={writes} pages={pages} "
+        "points={points} active={active} duplicate_groups={groups} expired={expired} "
+        "unknown_expiry={unknown} elapsed_s={elapsed:g} reason={reason}".format(
+            overall=result["overall"],
+            writes=result.get("store_writes", 0),
+            pages=result["counts"].get("pages", 0),
+            points=result["counts"].get("points_scanned", 0),
+            active=result["counts"].get("active_points", 0),
+            groups=result["counts"].get("hash_scope_duplicate_groups", 0),
+            expired=result["counts"].get("retention", {}).get("expired", 0),
+            unknown=result["counts"].get("retention", {}).get("unknown", 0),
+            elapsed=result["elapsed_s"],
+            reason=result["reason"],
+        ),
+        log_path_value,
+    )
+    return result
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true", help="scan without changing receipt or cache")
+    parser.add_argument("--proposal-only", action="store_true", help="compatibility flag; no proposals are emitted")
+    parser.add_argument("--apply", action="store_true", help="removed: source mutation is not supported")
+    parser.add_argument("--skip-seed", action="store_true")
+    parser.add_argument("--skip-threads", action="store_true")
+    parser.add_argument("--skip-email", action="store_true")
+    parser.add_argument("--skip-consolidate", action="store_true")
+    parser.add_argument("--with-luna", action="store_true")
+    parser.add_argument("--max-clusters", type=int, default=None)
+    args = parser.parse_args(argv)
+    paths = _path_config()
+    if args.apply:
+        _log("DREAM-START mode=APPLY model_calls=0 store_writes=0", paths["log"])
+        _log("DREAM-END overall=FAIL model_calls=0 store_writes=0 reason=apply-removed", paths["log"])
+        return 1
+    compatibility = [
+        name
+        for name in (
+            "proposal-only",
+            "skip-seed",
+            "skip-threads",
+            "skip-email",
+            "skip-consolidate",
+            "with-luna",
+            "max-clusters",
+        )
+        if getattr(args, name.replace("-", "_"), None) not in (None, False)
+    ]
+    if compatibility:
+        _log("DREAM-COMPAT ignored=" + ",".join(compatibility), paths["log"])
+    result = run_maintenance(dry_run=args.dry_run, apply_markers=os.environ.get("MEM0_DREAM_RETENTION_ENABLED") == "1" and not args.proposal_only)
+    return 0 if result["overall"] in {"PASS", "NOT_RUN"} else 1
 
 
 if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except SystemExit:
-        raise
-    except BaseException as e:  # noqa: BLE001 — a run must NEVER end marker-less
-        reason = f"{type(e).__name__}: {str(e)[:400]}"
-        line = f"DREAM-ABORT {reason}"
-        # Record WHERE, not just WHAT. The marker alone proved the guard fires
-        # (2026-08-23, first production abort: "AttributeError: 'list' object
-        # has no attribute 'shape'") but gave nowhere to look — `.shape` does
-        # not appear in this file at all, so the failure is inside a callee and
-        # the marker could not say which. An abort that cannot be diagnosed
-        # only converts a silent death into a loud one.
-        import traceback
-        tb = traceback.format_exc()
-        logged = False
-        try:
-            log(line)
-            for tl in tb.strip().splitlines()[-12:]:
-                log(f"DREAM-ABORT-TRACE {tl}")
-            logged = True
-        except Exception:
-            pass
-        # stderr ONLY as the fallback. This job points StandardOutPath and
-        # StandardErrorPath at the SAME file, so printing unconditionally wrote
-        # every abort twice — which reads like two failures instead of one.
-        if not logged:
-            print(line, file=sys.stderr)
-            print(tb, file=sys.stderr)
-        sys.exit(1)
+    raise SystemExit(main())

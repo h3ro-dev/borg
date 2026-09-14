@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""graphiti-mcp-server — the read-only query door to the configured temporal graph.
+
+It uses the same loopback-only, token-gated principals as the memory door, so
+one installation-local conductor badge opens both doors. This door only answers questions;
+every write path stays with the supervised pipeline lanes.
+
+The graph, embedder, dimensions, and model endpoint come only from the
+new owner's validated BORG configuration so queries match pipeline writes.
+
+Run: graphiti-mcp-server --http PORT
+"""
+
+import argparse
+import asyncio
+import hashlib
+import json
+import secrets
+import threading
+import time
+import importlib.machinery
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fastmcp.exceptions import ToolError
+from fastmcp.server.dependencies import get_access_token
+
+SOURCE_BIN = Path(__file__).resolve().parent
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_graph_mcp", str(SOURCE_BIN / "borg_config.py")
+).load_module().CONFIG
+BASE = CONFIG.graph_root
+MEM0_TOKENS_F = CONFIG.mem0_root / "data/mcp-tokens.json"
+DOOR_LOG = BASE / "data/door.log"
+GRAPH_HOST = str(CONFIG.values["BORG_FALKORDB_HOST"])
+GRAPH_PORT = int(CONFIG.values["BORG_FALKORDB_PORT"])
+GRAPH_KEY = str(CONFIG.values["BORG_FALKORDB_GRAPH"])
+SHIM = str(CONFIG.values["BORG_GRAPH_LLM_URL"]).rstrip("/")
+if not SHIM.endswith("/v1"):
+    SHIM += "/v1"
+EMBED_URL = str(CONFIG.values["BORG_OLLAMA_URL"]).rstrip("/") + "/v1"
+GRAPH_MODEL = str(CONFIG.values["BORG_GRAPH_MODEL"])
+
+
+def _log(principal, tool, ms, note=""):
+    try:
+        with open(DOOR_LOG, "a") as f:
+            f.write(json.dumps({
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "principal": principal, "tool": tool, "ms": round(ms), "note": note,
+            }) + "\n")
+    except Exception:
+        pass  # a broken receipt line must never break an answer
+
+
+# ---- auth: the mem0 door's principals file, verbatim semantics ----------
+class TokenStore:
+    def __init__(self, path):
+        self.path = path
+        self.mtime = 0.0
+        self.by_hash = {}
+
+    def _refresh(self):
+        try:
+            m = self.path.stat().st_mtime
+        except FileNotFoundError:
+            self.by_hash = {}
+            return
+        if m == self.mtime:
+            return
+        doc = json.loads(self.path.read_text())
+        self.by_hash = {p["token_sha256"]: p for p in doc.get("principals", [])}
+        self.mtime = m
+
+    def lookup(self, token):
+        # Unlike the mem0 door (startup-load trap, measured 2026-08-29),
+        # this store hot-reloads on mtime so new/revoked badges apply live.
+        self._refresh()
+        want = hashlib.sha256(token.encode()).hexdigest()
+        for h, p in self.by_hash.items():
+            if secrets.compare_digest(h, want):
+                return p
+        return None
+
+
+STORE = TokenStore(MEM0_TOKENS_F)
+
+# ---- lazy graph clients -------------------------------------------------
+_lock = threading.Lock()
+_falkor = {}
+_graphiti = {}
+
+
+def falkor_graph():
+    with _lock:
+        if "g" not in _falkor:
+            from falkordb import FalkorDB
+            _falkor["g"] = FalkorDB(host=GRAPH_HOST, port=GRAPH_PORT).select_graph(GRAPH_KEY)
+        return _falkor["g"]
+
+
+def graphiti():
+    with _lock:
+        if "g" not in _graphiti:
+            from graphiti_core import Graphiti
+            from graphiti_core.driver.falkordb_driver import FalkorDriver
+            from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+            from graphiti_core.llm_client import LLMConfig
+            from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+            from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
+            # Leaving llm/cross_encoder unset makes graphiti_core build
+            # DEFAULT OpenAI clients that demand env API keys at call time
+            # (measured 2026-08-29). Pass the pipeline's shim trio verbatim.
+            llm = OpenAIGenericClient(config=LLMConfig(
+                api_key="ollama", model=GRAPH_MODEL, small_model=GRAPH_MODEL,
+                base_url=SHIM, temperature=0.0))
+            embedder = OpenAIEmbedder(config=OpenAIEmbedderConfig(
+                embedding_model=str(CONFIG.values["BORG_EMBED_MODEL"]), embedding_dim=int(CONFIG.values["BORG_EMBED_DIMS"]),
+                api_key="ollama", base_url=EMBED_URL))
+            reranker = OpenAIRerankerClient(config=LLMConfig(
+                api_key="ollama", model=GRAPH_MODEL, base_url=SHIM,
+                temperature=0.0), client=llm.client)
+            _graphiti["g"] = Graphiti(
+                graph_driver=FalkorDriver(host=GRAPH_HOST, port=GRAPH_PORT, database=GRAPH_KEY),
+                llm_client=llm, embedder=embedder, cross_encoder=reranker)
+        return _graphiti["g"]
+
+
+def _record_from_access_token(access_token):
+    if access_token is None:
+        return None
+    claims = getattr(access_token, "claims", {}) or {}
+    if not isinstance(claims, dict):
+        claims = {}
+    name = claims.get("principal") or getattr(access_token, "client_id", None)
+    scopes = getattr(access_token, "scopes", None)
+    if scopes is None:
+        scopes = claims.get("scopes", [])
+    if not name or not isinstance(scopes, (list, tuple, set)):
+        return None
+    return {"name": str(name), "allowed_scopes": [str(scope) for scope in scopes]}
+
+
+def _principal_record(ctx=None):
+    try:
+        access_token = (
+            ctx.request_context.request.user.access_token
+            if ctx is not None
+            else get_access_token()
+        )
+    except Exception:
+        return None
+    return _record_from_access_token(access_token)
+
+
+def _authorize_legacy(ctx=None):
+    """Require full access or an explicit grant for this configured graph."""
+    principal = _principal_record(ctx)
+    if principal is None:
+        raise ToolError("unauthenticated")
+    allowed = set(principal["allowed_scopes"])
+    if "*" not in allowed and str(CONFIG.values["BORG_MEMORY_SCOPE"]) not in allowed:
+        raise ToolError("graph is unavailable to this principal scope")
+    return principal
+
+
+def _principal(ctx=None) -> str:
+    try:
+        principal = _principal_record(ctx)
+        return principal["name"] if principal else "?"
+    except Exception:
+        return "?"
+
+
+def _portable_context():
+    principal = _principal_record()
+    if principal is None:
+        raise ToolError("unauthenticated")
+    module = importlib.machinery.SourceFileLoader(
+        "borg_graph_door_adapter", str(CONFIG.mem0_root / "bin/mem0_graph.py")
+    ).load_module()
+    try:
+        registry = module.ScopeGraphRegistry.load()
+        allowed = principal["allowed_scopes"]
+        keys = registry.keys_for(allowed, full_access="*" in allowed)
+    except module.GraphScopeError as exc:
+        raise ToolError("scoped graph unavailable: registry not ready or scope not registered") from exc
+    return principal, module.GraphitiAdapter(registry), keys
+
+
+async def _portable_query(method, *args, **kwargs):
+    principal, adapter, keys = _portable_context()
+    try:
+        result = await asyncio.wait_for(
+            getattr(adapter, method)(*args, graph_keys=keys, **kwargs), timeout=6.0
+        )
+        return json.dumps({"graphs": keys, "results": result}, ensure_ascii=False)
+    finally:
+        await adapter.close()
+
+
+# ---- server -------------------------------------------------------------
+from fastmcp.server.auth import AccessToken, TokenVerifier  # noqa: E402
+
+
+class BadgeVerifier(TokenVerifier):
+    async def verify_token(self, token):
+        p = STORE.lookup(token)
+        if p is None:
+            return None
+        return AccessToken(token=token, client_id=p["name"],
+                           scopes=list(p.get("allowed_scopes", [])),
+                           claims={"principal": p["name"]})
+
+
+from fastmcp import FastMCP  # noqa: E402
+
+mcp = FastMCP("graphiti", auth=BadgeVerifier(),
+              instructions="Read-only door to the configured temporal knowledge "
+                           "graph: what is true, what replaced it, and when. "
+                           "No write tools exist here by design.")
+
+
+@mcp.tool()
+async def graph_search(query: str, limit: int = 10) -> str:
+    """Hybrid semantic+keyword search over graph facts. Returns facts with
+    their validity windows (valid_at/invalid_at) — an invalidated fact means
+    something replaced it."""
+    if CONFIG.portable:
+        return await _portable_query("search", query, limit=max(1, min(int(limit), 25)))
+    principal = _authorize_legacy()
+    t0 = time.time()
+    limit = max(1, min(int(limit), 25))
+    results = await graphiti().search(query, group_ids=[GRAPH_KEY], num_results=limit)
+    out = [{
+        "fact": r.fact,
+        "valid_at": str(getattr(r, "valid_at", None) or ""),
+        "invalid_at": str(getattr(r, "invalid_at", None) or ""),
+    } for r in results]
+    _log(principal["name"], "graph_search", (time.time() - t0) * 1000, f"n={len(out)}")
+    return json.dumps({"graph": GRAPH_KEY, "results": out}, ensure_ascii=False)
+
+
+@mcp.tool()
+def entity_timeline(entity: str, limit: int = 20) -> str:
+    """Every recorded fact touching a named entity, newest first — the
+    'what replaced what, when' view for one thing."""
+    if CONFIG.portable:
+        return asyncio.run(_portable_query("entity_timeline", entity, limit=max(1, min(int(limit), 50))))
+    principal = _authorize_legacy()
+    t0 = time.time()
+    limit = max(1, min(int(limit), 50))
+    q = ("MATCH (n:Entity)-[r]-(m) WHERE toLower(n.name) CONTAINS toLower($e) "
+         "AND r.fact IS NOT NULL "
+         "RETURN n.name, type(r), r.fact, r.valid_at, r.invalid_at, m.name "
+         "ORDER BY r.valid_at DESC LIMIT $k")
+    res = falkor_graph().query(q, {"e": entity, "k": limit})
+    rows = [{"entity": a, "relation": b, "fact": c, "valid_at": str(d or ""),
+             "invalid_at": str(e or ""), "other": f}
+            for a, b, c, d, e, f in res.result_set]
+    _log(principal["name"], "entity_timeline", (time.time() - t0) * 1000, f"n={len(rows)}")
+    return json.dumps({"graph": GRAPH_KEY, "entity_query": entity, "facts": rows},
+                      ensure_ascii=False)
+
+
+@mcp.tool()
+def recent_episodes(limit: int = 10) -> str:
+    """The newest source episodes ingested into the graph (name, time,
+    source kind) — freshness check for what the graph has actually seen."""
+    if CONFIG.portable:
+        return asyncio.run(_portable_query("recent_episodes", limit=max(1, min(int(limit), 25))))
+    principal = _authorize_legacy()
+    t0 = time.time()
+    limit = max(1, min(int(limit), 25))
+    q = ("MATCH (e:Episodic) RETURN e.name, e.valid_at, e.source_description "
+         "ORDER BY e.valid_at DESC LIMIT $k")
+    res = falkor_graph().query(q, {"k": limit})
+    rows = [{"name": a, "at": str(b or ""), "source": c} for a, b, c in res.result_set]
+    _log(principal["name"], "recent_episodes", (time.time() - t0) * 1000, f"n={len(rows)}")
+    return json.dumps({"graph": GRAPH_KEY, "episodes": rows}, ensure_ascii=False)
+
+
+@mcp.tool()
+def graph_stats() -> str:
+    """Node/edge/episode counts and newest-episode time. UNKNOWN on failure."""
+    if CONFIG.portable:
+        try:
+            return asyncio.run(_portable_query("stats"))
+        except ToolError:
+            raise
+        except Exception as exc:
+            return json.dumps({"status": "UNKNOWN", "error": type(exc).__name__})
+    principal = _authorize_legacy()
+    t0 = time.time()
+    try:
+        g = falkor_graph()
+        nodes = g.query("MATCH (n) RETURN count(n)").result_set[0][0]
+        edges = g.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0]
+        eps = g.query("MATCH (e:Episodic) RETURN count(e), max(e.valid_at)").result_set[0]
+        out = {"graph": GRAPH_KEY, "nodes": nodes, "edges": edges,
+               "episodes": eps[0], "newest_episode": str(eps[1] or "")}
+    except Exception as e:
+        out = {"graph": GRAPH_KEY, "status": "UNKNOWN", "error": type(e).__name__}
+    _log(principal["name"], "graph_stats", (time.time() - t0) * 1000)
+    return json.dumps(out, ensure_ascii=False)
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--http", type=int, default=8767)
+    args = ap.parse_args()
+    mcp.run(transport="http", host="127.0.0.1", port=args.http)

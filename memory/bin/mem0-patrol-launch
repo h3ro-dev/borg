@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Fan a site patrol across explicitly configured registry clients.
+The worker command is owner-supplied; no provider profiles are inferred.
+
+GET-only patrols; output per lane to clients/patrols/<client>-<date>.out.
+Audit afterwards with mem0-patrol-verify — findings are untrusted until then.
+
+Usage: mem0-patrol-launch [--wait [MINS]]
+  --wait blocks until every lane exits (default cap 45 min); lanes still
+  running at the cap are left running and named. Downstream steps must only
+  read finished files (2026-08-20: ingest ran mid-flight and failed 9/9).
+"""
+
+import os
+import shlex
+import subprocess
+import sys
+import time
+import tomllib
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+from borg_config import CONFIG, BorgConfigError
+
+REG = Path(os.environ["BORG_CLIENT_REGISTRY"]).expanduser() if os.environ.get("BORG_CLIENT_REGISTRY") else None
+OUT = Path(os.environ["BORG_PATROL_OUTPUT_DIR"]).expanduser() if os.environ.get("BORG_PATROL_OUTPUT_DIR") else None
+
+BRIEF = """You are a read-only site patrol worker for {name}. GET requests only — no logins, no forms, no writes to any website, no file modifications except your final printed report.
+
+Site: {site}
+1. GET homepage: HTTP status, response time ms, final URL after redirects.
+2. GET /robots.txt: status; are GPTBot, ClaudeBot, or PerplexityBot fully disallowed?
+3. Find and GET the XML sitemap: status, total <loc> URL count.
+4. From homepage HTML: <title> text, meta description length in characters, canonical URL, first H1 text, JSON-LD @type values present.
+5. Pick 3 internal links from the homepage and GET each: record status codes.
+6. findings: anything the client would want fixed (404s, missing canonical/schema/meta, responses over 3s, sitemap errors, AI-crawler blocks) — or an empty list.
+
+Print a final report: the line PATROL-REPORT then one JSON object:
+{{"sites":[{{"site":"{site}","homepage_status":0,"response_ms":0,"final_url":"","robots_status":0,"ai_crawlers_blocked":[],"sitemap_urls":0,"title":"","meta_description_chars":0,"canonical":"","h1":"","schema_types":[],"sampled_pages":[{{"url":"","status":0}}],"findings":[]}}]}}"""
+
+
+def main():
+    args = sys.argv[1:]
+    wait_mins = None
+    if "--wait" in args:
+        i = args.index("--wait")
+        wait_mins = int(args[i + 1]) if i + 1 < len(args) and args[i + 1].isdigit() else 45
+    command = os.environ.get("BORG_PATROL_WORKER_COMMAND")
+    if REG is None or OUT is None or not command:
+        raise BorgConfigError(
+            "BORG_CLIENT_REGISTRY, BORG_PATROL_OUTPUT_DIR, and BORG_PATROL_WORKER_COMMAND are required"
+        )
+    OUT.mkdir(parents=True, exist_ok=True)
+    reg = tomllib.load(open(REG, "rb"))["clients"]
+    targets = [(k, c) for k, c in reg.items() if c.get("site")]
+    today = datetime.now(ZoneInfo("America/Denver"))
+    date = today.strftime("%Y-%m-%d")
+    launched = []
+    for i, (key, c) in enumerate(targets):
+        outfile = OUT / f"{key}-{date}.out"
+        cmd = [*shlex.split(command), BRIEF.format(name=c["name"], site=c["site"])]
+        # MEM0_INTERNAL marks this as one of mem0's own analysis runs. Once the
+        # conductor CODEX_HOMEs carry mem0 lifecycle hooks, the hook sees this
+        # marker and no-ops, so mem0 never captures its own homework. (P1.1)
+        env = {**os.environ, "MEM0_INTERNAL": "1", "BORG_HOME": str(CONFIG.home)}
+        with open(outfile, "w") as f:
+            p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+        launched.append((key, p))
+        print(f"launched {key:18s} pid={p.pid} -> {outfile.name}", flush=True)
+    print(f"\n{len(launched)} patrol lanes in flight; audit with: mem0-patrol-verify --all", flush=True)
+    if wait_mins:
+        deadline = time.time() + wait_mins * 60
+        stragglers = []
+        for key, p in launched:
+            try:
+                p.wait(timeout=max(1, deadline - time.time()))
+                print(f"done {key} (exit {p.returncode})", flush=True)
+            except subprocess.TimeoutExpired:
+                stragglers.append(key)
+                print(f"STILL RUNNING at {wait_mins}m cap: {key} pid={p.pid} — left running", flush=True)
+        print(f"wait complete: {len(launched) - len(stragglers)}/{len(launched)} lanes finished", flush=True)
+
+
+if __name__ == "__main__":
+    main()

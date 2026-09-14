@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Receive filtered facts from a remote miner (MacBook) on stdin and store them.
+"""Receive filtered facts from an explicitly configured miner on stdin.
 
 Input: one JSON object per line: {"text": "...", "run_id": "thr-x", "kind":
-"macbook-thread", "source": "macbook:/path", "date": "YYYY-MM-DD"}
+"thread", "source": "configured-source:/path", "date": "YYYY-MM-DD"}
 Stores raw (no re-extraction; the miner already distilled). The secrets/PII
 DROP filter is re-applied here — defense in depth against a compromised or
 buggy sender. Prints one summary line for the sender's log.
@@ -22,7 +22,12 @@ CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BASE / "bin/mem0ct
 HOOK = importlib.machinery.SourceFileLoader("mem0hook_mod", str(BASE / "bin/mem0-capture-hook")).load_module()
 
 MAX_LINE = 4000
-ALLOWED_KINDS = {"macbook-thread", "macbook-email", "studio-thread", "luna-thread"}
+ALLOWED_KINDS = {
+    item.strip() for item in os.environ.get(
+        "BORG_FACT_KINDS", "thread,email,repository,event"
+    ).split(",") if item.strip()
+}
+OWNER_ID = str(CTL.CONFIG.values["BORG_OWNER_ID"])
 
 
 def main():
@@ -35,7 +40,7 @@ def main():
         try:
             row = json.loads(line)
             text = str(row["text"])[:MAX_LINE].strip()
-            kind = row.get("kind", "macbook-thread")
+            kind = row.get("kind", "thread")
         except Exception:
             bad += 1
             continue
@@ -47,14 +52,15 @@ def main():
             continue
         res = m.add(
             [{"role": "user", "content": text}],
-            user_id="james",
-            agent_id="macbook-ingest",
-            run_id=str(row.get("run_id", "macbook"))[:64],
+            user_id=OWNER_ID,
+            agent_id="configured-ingest",
+            run_id=str(row.get("run_id", "configured-source"))[:64],
             metadata={
                 "kind": kind,
                 "source": str(row.get("source", ""))[:300],
                 "thread_date": str(row.get("date", ""))[:10],
                 "added_mdt": CTL.now_mdt(),
+                "scope": CTL.DEFAULT_SCOPE,
             },
             infer=False,
         )
@@ -63,17 +69,17 @@ def main():
         # (75 of the 106 regrown copies measured 2026-08-28). Same exact-hash
         # lane gate as the thread/email doors.
         events = res.get("results", res) if isinstance(res, dict) else res
-        kept_events, n_dupes = CTL.novelty_prune_events(m, events or [], user_id="james", agent_id="macbook-ingest")
+        kept_events, n_dupes = CTL.novelty_prune_events(
+            m, events or [], user_id=OWNER_ID, agent_id="configured-ingest"
+        )
         if n_dupes and not kept_events:
             deduped += 1
         else:
             stored += 1
     try:
-        from qdrant_client import QdrantClient
-
-        count = QdrantClient(host="127.0.0.1", port=6333).count("studio0").count
+        count = CTL.qdrant_client().count(CTL.COLLECTION).count
         (BASE / "data/consolidate-state.json").write_text(
-            json.dumps({"count_at_last_run": count, "at": CTL.now_mdt(), "note": "macbook-suppression"})
+            json.dumps({"count_at_last_run": count, "at": CTL.now_mdt(), "note": "ingest-suppression"})
         )
     except Exception:
         pass

@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""Commitment tracker — closes the loop between owner intent and completion.
+
+extract  --file DUMP --source NAME   mine an explicitly supplied dump for owner
+                                     requests, agent promises, and decisions
+extract  --thread PATH               dump a thread jsonl first, then extract
+digest   [--nudge]                   status digest and optional configured notice
+verify   [--limit 15]                use the configured verification command to
+                                     check open items against native evidence
+list     [--open]                    print ledger
+
+Ledger and optional notification/verification commands are owner configured.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import httpx
+from borg_config import CONFIG, BorgConfigError
+
+DIR = Path(os.environ["BORG_COMMITMENTS_DIR"]).expanduser() if os.environ.get("BORG_COMMITMENTS_DIR") else CONFIG.data_root / "commitments"
+LEDGER = DIR / "ledger.jsonl"
+DIGEST_F = DIR / "DIGEST.md"
+VERIF_DIR = DIR / "verifications"
+OLLAMA = CONFIG.ollama_url
+MODEL = str(CONFIG.values["BORG_EXTRACTION_MODEL"])
+OWNER = str(CONFIG.values["BORG_OWNER_ID"])
+WINDOW = 32000
+
+SCHEMA = {
+    "type": "object",
+    "properties": {"commitments": {"type": "array", "items": {
+        "type": "object",
+        "properties": {
+            "item": {"type": "string"},
+            "kind": {"type": "string", "enum": ["build", "fix", "decision", "research", "send", "idea"]},
+            "asked_by": {"type": "string", "enum": ["owner", "agent"]},
+            "status_claimed": {"type": "string", "enum": ["done", "in-progress", "talked-only", "approved"]},
+            "importance": {"type": "string", "enum": ["high", "normal"]},
+        },
+        "required": ["item", "kind", "asked_by", "status_claimed", "importance"],
+    }}},
+    "required": ["commitments"],
+}
+
+PROMPT = f"""Extract every commitment from this AI-agent work-session excerpt. A commitment is: something the configured owner ({OWNER}) asked for or approved; something the agent said it would do or set up; an idea the owner reacted to positively; or a decision that implies follow-up work. For each, write one plain self-contained sentence (the item), classify it, and record the status AS CLAIMED IN THE CONVERSATION — "done" only if the text claims completion, "talked-only" if it was discussed with no action. Skip greetings, questions answered in place, and pure information. Deduplicate within this excerpt."""
+
+
+def now_mdt():
+    return datetime.now(ZoneInfo("America/Denver")).strftime("%Y-%m-%d %H:%M MDT")
+
+
+def qwen(text):
+    r = httpx.post(OLLAMA + "/api/chat", timeout=600, json={
+        "model": MODEL, "stream": False, "think": False, "format": SCHEMA,
+        "options": {"temperature": 0, "num_predict": 3000},
+        "messages": [{"role": "user", "content": PROMPT + "\n\n---\n" + text}],
+    }).json()
+    try:
+        return json.loads(r["message"]["content"]).get("commitments", [])
+    except Exception:
+        return []
+
+
+def load_ledger():
+    if not LEDGER.exists():
+        return []
+    return [json.loads(l) for l in LEDGER.read_text().splitlines() if l.strip()]
+
+
+def cid(item):
+    return hashlib.sha256(re.sub(r"\W+", "", item.lower()).encode()).hexdigest()[:12]
+
+
+def cmd_extract(args):
+    DIR.mkdir(parents=True, exist_ok=True)
+    if args.thread:
+        dump = subprocess.run([str(CONFIG.mem0_root / "bin/mem0-ingest-threads"),
+                               "--dump", args.thread], capture_output=True, text=True, timeout=1800).stdout
+        source = args.source or Path(args.thread).stem[:40]
+    else:
+        dump = Path(args.file).read_text(errors="ignore")
+        source = args.source or Path(args.file).name
+    known = {r["id"] for r in load_ledger()}
+    added = 0
+    windows = [dump[i:i + WINDOW] for i in range(0, len(dump), WINDOW)]
+    print(f"extracting from {source}: {len(dump)} chars, {len(windows)} windows")
+    with open(LEDGER, "a") as f:
+        for w, chunk in enumerate(windows, 1):
+            for c in qwen(chunk):
+                i = cid(c["item"])
+                if i in known:
+                    continue
+                known.add(i)
+                rec = {"id": i, **c, "source": source, "found": now_mdt(), "verify_status": "UNVERIFIED"}
+                f.write(json.dumps(rec) + "\n")
+                added += 1
+            print(f"  window {w}/{len(windows)} -> ledger {added} new", flush=True)
+    print(f"done: {added} new commitments from {source}")
+
+
+def cmd_digest(args):
+    rows = load_ledger()
+    if not rows:
+        print("ledger empty")
+        return
+    latest = {}
+    for r in rows:
+        latest[r["id"]] = r
+    rows = list(latest.values())
+    open_items = [r for r in rows if r.get("verify_status") not in ("DONE",) and r.get("status_claimed") != "done"]
+    claimed_done = [r for r in rows if r.get("status_claimed") == "done" and r.get("verify_status") == "UNVERIFIED"]
+    verified_done = [r for r in rows if r.get("verify_status") == "DONE"]
+    not_done = [r for r in rows if r.get("verify_status") == "NOT-DONE"]
+    lines = [f"# Commitments digest — {now_mdt()}", "",
+             f"Ledger: {len(rows)} items | open: {len(open_items)} | claimed-done awaiting verification: {len(claimed_done)} | verified done: {len(verified_done)} | **caught NOT done: {len(not_done)}**", ""]
+    if not_done:
+        lines.append("## ⚠ Claimed/assumed but NOT actually done")
+        for r in not_done[:15]:
+            lines.append(f"- [{r['id']}] {r['item']}  ({r.get('source','')}, {r.get('found','')})")
+        lines.append("")
+    lines.append("## Open (talked about / approved, not verified done)")
+    for r in sorted(open_items, key=lambda x: (x.get("importance") != "high"))[:40]:
+        mark = "★" if r.get("importance") == "high" else "·"
+        lines.append(f"- {mark} [{r['kind']}] {r['item']}  ({r.get('status_claimed')})")
+    DIGEST_F.write_text("\n".join(lines))
+    print("\n".join(lines[:30]))
+    if args.nudge and (open_items or not_done):
+        top = not_done[:3] + sorted(open_items, key=lambda x: (x.get("importance") != "high"))[:4]
+        msg = f"Commitments: {len(open_items)} open, {len(not_done)} caught not-done.\n" + \
+              "\n".join(f"• {r['item'][:90]}" for r in top) + \
+              f"\nFull: {DIGEST_F}"
+        command = os.environ.get("BORG_NOTIFICATION_COMMAND")
+        destination = os.environ.get("BORG_NOTIFICATION_DESTINATION")
+        if not command or not destination:
+            raise BorgConfigError("--nudge requires BORG_NOTIFICATION_COMMAND and BORG_NOTIFICATION_DESTINATION")
+        try:
+            subprocess.run([*shlex.split(command), destination, msg[:1400]], check=True, capture_output=True, timeout=60)
+            print("nudge sent")
+        except Exception as e:
+            print(f"nudge failed: {e}")
+
+
+def cmd_verify(args):
+    rows = list({r["id"]: r for r in load_ledger()}.values())
+    todo = [r for r in rows if r.get("verify_status") == "UNVERIFIED"][: args.limit]
+    if not todo:
+        print("nothing unverified")
+        return
+    VERIF_DIR.mkdir(parents=True, exist_ok=True)
+    date = datetime.now(ZoneInfo("America/Denver")).strftime("%Y%m%d-%H%M")
+    batches = [todo[i:i + 5] for i in range(0, len(todo), 5)]
+    command = os.environ.get("BORG_VERIFICATION_COMMAND")
+    if not command:
+        raise BorgConfigError("verification requires BORG_VERIFICATION_COMMAND")
+    for b, batch in enumerate(batches):
+        items = "\n".join(f'- id={r["id"]} :: {r["item"]} (claimed: {r.get("status_claimed")})' for r in batch)
+        brief = f"""You are a read-only verification worker in the configured BORG environment. For each commitment below, find NATIVE EVIDENCE of whether it was ACTUALLY done. Run read-only commands only; modify nothing.
+
+{items}
+
+For each: verdict DONE (name the exact evidence: file path, process, commit), IN-PROGRESS, NOT-DONE, or UNVERIFIABLE (say what access you lacked). Be skeptical: a conversation claiming something is not evidence; only system state counts.
+Be efficient: run the fewest targeted read-only commands that prove each verdict, never open the verification output directory, and never dump large files or directory trees.
+Print final line VERIFY-REPORT then JSON: {{"verdicts":[{{"id":"","verdict":"","evidence":""}}]}}"""
+        out = VERIF_DIR / f"verify-{date}-b{b}.out"
+        # MEM0_INTERNAL marks this as one of mem0's own analysis runs. Once the
+        # conductor CODEX_HOMEs carry mem0 lifecycle hooks, the hook sees this
+        # marker and no-ops, so mem0 never captures its own homework. (P1.1)
+        env = {**os.environ, "MEM0_INTERNAL": "1", "BORG_HOME": str(CONFIG.home)}
+        with open(out, "w") as f:
+            subprocess.Popen([*shlex.split(command), brief],
+                             stdout=f, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+        print(f"verify batch {b}: {len(batch)} items -> {out.name}")
+    print(f"{len(batches)} Spark verify lanes launched; results land via the heartbeat's auto apply-verdicts (or run: mem0-commitments apply-verdicts)")
+
+
+def cmd_apply(args):
+    """Harvest VERIFY-REPORT verdicts from lane transcripts into the ledger.
+
+    Every transcript echoes the briefing — which itself contains the literal
+    string VERIFY-REPORT plus an empty JSON template — and lanes that die on
+    usage/context limits never print a real report. So: parse EVERY occurrence
+    with a balanced decoder (greedy regex fails on multi-MB transcripts), keep
+    only verdicts with a real id and a known value, and let later files win.
+    """
+    valid = {"DONE", "IN-PROGRESS", "NOT-DONE", "UNVERIFIABLE"}
+    dec = json.JSONDecoder()
+    verdicts = {}
+    files = sorted(VERIF_DIR.glob("verify-*.out")) if VERIF_DIR.exists() else []
+    for f in files:
+        try:
+            text = f.read_text(errors="ignore")
+            stamp = datetime.fromtimestamp(f.stat().st_mtime, ZoneInfo("America/Denver")).strftime("%Y-%m-%d %H:%M MDT")
+        except Exception:
+            continue
+        for m in re.finditer(r"VERIFY-REPORT", text):
+            seg = text[m.end():m.end() + 300_000]
+            j = seg.find("{")
+            if j < 0:
+                continue
+            try:
+                obj, _ = dec.raw_decode(seg[j:])
+            except Exception:
+                continue
+            for v in (obj.get("verdicts", []) if isinstance(obj, dict) else []):
+                if not isinstance(v, dict):
+                    continue
+                vid = str(v.get("id", "")).strip()
+                verdict = str(v.get("verdict", "")).strip().upper()
+                if vid and verdict in valid:
+                    verdicts[vid] = {"verdict": verdict, "evidence": str(v.get("evidence", ""))[:300],
+                                     "src": f.name, "at": stamp}
+    rows = {r["id"]: r for r in load_ledger()}  # latest row per id, so applied verdicts aren't re-applied
+    out = []
+    for rid, r in rows.items():
+        if rid in verdicts and r.get("verify_status") == "UNVERIFIED":
+            v = verdicts[rid]
+            out.append({**r, "verify_status": v["verdict"], "evidence": v["evidence"],
+                        "verified": v["at"], "verify_src": v["src"]})
+    if out:
+        with open(LEDGER, "a") as f:
+            for nr in out:
+                f.write(json.dumps(nr) + "\n")
+    print(f"applied {len(out)} verdicts ({len(verdicts)} parseable across {len(files)} lane files)")
+
+
+def cmd_list(args):
+    rows = list({r["id"]: r for r in load_ledger()}.values())
+    for r in rows:
+        if args.open and r.get("verify_status") == "DONE":
+            continue
+        print(f"[{r['id']}] {r.get('verify_status','?'):12s} {r.get('status_claimed',''):11s} {r['item'][:110]}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    e = sub.add_parser("extract"); e.add_argument("--file"); e.add_argument("--thread"); e.add_argument("--source"); e.set_defaults(fn=cmd_extract)
+    d = sub.add_parser("digest"); d.add_argument("--nudge", action="store_true"); d.set_defaults(fn=cmd_digest)
+    v = sub.add_parser("verify"); v.add_argument("--limit", type=int, default=15); v.set_defaults(fn=cmd_verify)
+    a = sub.add_parser("apply-verdicts"); a.set_defaults(fn=cmd_apply)
+    l = sub.add_parser("list"); l.add_argument("--open", action="store_true"); l.set_defaults(fn=cmd_list)
+    args = ap.parse_args()
+    args.fn(args)
+
+
+if __name__ == "__main__":
+    main()

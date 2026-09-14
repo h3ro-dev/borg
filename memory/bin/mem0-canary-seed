@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""Idempotently seed the Dream v2 lifecycle canary cases into Qdrant.
+
+Each named canary is a pair, therefore all five required cases occupy ten
+deterministic Qdrant points per scope.  Existing deterministic ids are read
+and verified, never overwritten; a second successful invocation reports zero
+inserts.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.machinery
+import json
+import sys
+import urllib.request
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_canary_seed", str(BASE / "bin" / "borg_config.py")
+).load_module().CONFIG
+SAFETY = importlib.machinery.SourceFileLoader(
+    "mem0_dream_safety", str(BASE / "bin" / "mem0_dream_safety.py")
+).load_module()
+
+
+def request_json(url, body=None, timeout=12, method=None):
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method=method or ("POST" if body is not None else "GET"),
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def discover_scopes(qdrant_url, collection):
+    scopes, offset = set(), None
+    while True:
+        body = {"limit": 256, "with_payload": True, "with_vector": False}
+        if offset is not None:
+            body["offset"] = offset
+        result = request_json(f"{qdrant_url}/collections/{collection}/points/scroll", body).get("result", {})
+        for point in result.get("points") or []:
+            payload = point.get("payload") or {}
+            scope = payload.get("scope")
+            if scope and not payload.get("is_canary"):
+                scopes.add(str(scope))
+        offset = result.get("next_page_offset")
+        if offset is None:
+            return sorted(scopes)
+
+
+def existing_rows(qdrant_url, collection, ids):
+    result = request_json(
+        f"{qdrant_url}/collections/{collection}/points",
+        {"ids": ids, "with_payload": True, "with_vector": False},
+    ).get("result", [])
+    return {str(point.get("id")): point.get("payload") or {} for point in result}
+
+
+def embed(ollama_url, texts):
+    result = request_json(
+        f"{ollama_url}/api/embed",
+        {"model": "nomic-embed-text:latest", "input": texts},
+        timeout=45,
+    )
+    vectors = result.get("embeddings") if isinstance(result, dict) else None
+    if not isinstance(vectors, list) or len(vectors) != len(texts):
+        raise RuntimeError("OLLAMA-EMBED-INVALID")
+    return vectors
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--qdrant-url", default=str(CONFIG.values["BORG_QDRANT_URL"]))
+    parser.add_argument("--ollama-url", default=str(CONFIG.values["BORG_OLLAMA_URL"]))
+    parser.add_argument("--collection", default=str(CONFIG.values["BORG_QDRANT_COLLECTION"]))
+    parser.add_argument("--scopes", default="", help="comma-separated test/repair scope set; otherwise discover live scopes")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+    qdrant_url = args.qdrant_url.rstrip("/")
+    ollama_url = args.ollama_url.rstrip("/")
+    scopes = sorted({item.strip() for item in args.scopes.split(",") if item.strip()}) if args.scopes else discover_scopes(qdrant_url, args.collection)
+    if len(scopes) < 2:
+        raise RuntimeError("CANARY-SEED-BLOCKED requires at least two scopes for the cross-scope pair")
+    wanted = SAFETY.canary_rows(scopes)
+    by_id = {row["id"]: row["payload"] for row in wanted}
+    existing = existing_rows(qdrant_url, args.collection, list(by_id))
+    conflicts = []
+    for pid, payload in existing.items():
+        expected = by_id.get(pid, {})
+        if not payload.get("is_canary") or payload.get("canary_id") != pid or payload.get("canary_expected_status") != expected.get("canary_expected_status"):
+            conflicts.append(pid)
+    if conflicts:
+        raise RuntimeError("CANARY-SEED-CONFLICT ids=" + ",".join(sorted(conflicts)))
+    missing = [row for row in wanted if row["id"] not in existing]
+    if args.dry_run:
+        print(f"CANARY-SEED-DRY-RUN scopes={len(scopes)} expected={len(wanted)} missing={len(missing)} existing={len(existing)}")
+        return
+    if missing:
+        vectors = embed(ollama_url, [row["payload"]["data"] for row in missing])
+        points = [
+            {"id": row["id"], "vector": vector, "payload": row["payload"]}
+            for row, vector in zip(missing, vectors)
+        ]
+        # this qdrant: POST /points = retrieve-by-ids; upsert must be PUT
+        request_json(
+            f"{qdrant_url}/collections/{args.collection}/points?wait=true",
+            {"points": points},
+            timeout=45,
+            method="PUT",
+        )
+    print(
+        f"CANARY-SEED scopes={len(scopes)} expected={len(wanted)} inserted={len(missing)} "
+        f"existing={len(existing)} status=PASS"
+    )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(f"CANARY-SEED-FAIL {type(exc).__name__}: {exc}", file=sys.stderr)
+        raise SystemExit(1)

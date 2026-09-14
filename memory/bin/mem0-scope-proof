@@ -1,0 +1,119 @@
+#!/bin/bash
+# mem0-scope-proof — prove scoped isolation over the real MCP HTTP interface.
+#
+#   mem0-scope-proof [port] [scoped-token-file]
+#     port                defaults to BORG_MEMORY_PORT
+#     scoped-token-file   must be supplied explicitly
+#
+# Pass a throwaway token file so the proof never depends on a token that has
+# been handed to a person, and so the principal can be revoked immediately
+# afterwards.
+#
+# Runs the same queries with the owner's token and a scoped test token, and
+# reports what each principal got back, grouped by scope. The pass condition is
+# absolute: the scoped principal must receive ZERO rows outside its grant, and
+# in particular zero rows in the configured personal scope.
+#
+# Output is sanitized. Memory text is never printed — only scopes, counts, and
+# row ids. Tokens are read from 0600 files and never echoed.
+set -uo pipefail
+: "${BORG_HOME:?BORG_HOME is required}"
+: "${BORG_MEMORY_SCOPE:?BORG_MEMORY_SCOPE is required}"
+
+PORT="${1:-${BORG_MEMORY_PORT:?BORG_MEMORY_PORT is required}}"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+BASE="$(dirname "$HERE")"
+CURL="$HERE/mem0-mcp-curl"
+OWNER_TOKEN="$BASE/data/owner-token"
+SCOPED_TOKEN="${2:?scoped token file is required}"
+SCOPED_NAME="$(basename "$SCOPED_TOKEN" .token)"
+
+for f in "$OWNER_TOKEN" "$SCOPED_TOKEN"; do
+  [ -r "$f" ] || { echo "missing token file: $f" >&2; exit 1; }
+done
+
+hr() { printf '%s\n' "----------------------------------------------------------------"; }
+
+# Queries chosen to pull hard at the private material: company money, ownership,
+# partner/commission terms, and separation. If scoping leaks anywhere, it leaks
+# here.
+QUERIES=(
+  "commission schedule and partner agreement percentages"
+  "equity vesting and profit allocation on separation"
+  "monthly revenue and gross receipts"
+  "per-client campaign cost sheet"
+  "client website report status"
+  "project merge queue and CI"
+)
+
+echo "SCOPED ACCESS PROOF — port $PORT — $(date '+%Y-%m-%d %H:%M %Z')"
+hr
+echo "## 1. Who each token is"
+hr
+for who in owner "$SCOPED_NAME"; do
+  tf=$OWNER_TOKEN; [ "$who" != owner ] && tf=$SCOPED_TOKEN
+  echo "### $who"
+  "$CURL" "$tf" "$PORT" memory_whoami '{}'
+  echo
+done
+
+hr
+echo "## 2. What each token can even count"
+hr
+for who in owner "$SCOPED_NAME"; do
+  tf=$OWNER_TOKEN; [ "$who" != owner ] && tf=$SCOPED_TOKEN
+  echo "### $who"
+  "$CURL" "$tf" "$PORT" memory_stats '{}'
+  echo
+done
+
+hr
+echo "## 3. Same queries, both tokens — scopes returned"
+hr
+FAIL=0
+for q in "${QUERIES[@]}"; do
+  echo "QUERY: $q"
+  for who in owner "$SCOPED_NAME"; do
+    tf=$OWNER_TOKEN; [ "$who" != owner ] && tf=$SCOPED_TOKEN
+    esc=$(printf '%s' "$q" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+    out=$("$CURL" "$tf" "$PORT" memory_search "{\"query\":$esc,\"limit\":25}")
+    printf '  %-6s %s\n' "$who" "$(printf '%s' "$out" | python3 -c '
+import json,sys,collections
+try: rows=json.load(sys.stdin)
+except Exception: print("(no rows / error)"); raise SystemExit
+c=collections.Counter(r.get("scope") or "(unscoped)" for r in rows)
+print(f"{len(rows):3d} rows  " + ("  ".join(f"{k}={v}" for k,v in sorted(c.items())) or "-"))')"
+    if [ "$who" != owner ]; then
+      bad=$(printf '%s' "$out" | python3 -c '
+import json,sys
+try: rows=json.load(sys.stdin)
+except Exception: rows=[]
+personal=sys.argv[1]
+bad=[r for r in rows if (r.get("scope") or "(unscoped)") in (personal,"ops","(unscoped)")]
+print(len(bad))
+for r in bad[:5]: print("   LEAK", r.get("scope"), r.get("id"))' "$BORG_MEMORY_SCOPE")
+      n=$(printf '%s' "$bad" | head -1)
+      if [ "$n" != "0" ]; then FAIL=1; echo "  !! LEAK: $bad"; fi
+    fi
+  done
+done
+
+hr
+echo "## 4. Write scope is enforced"
+hr
+echo "$SCOPED_NAME attempting to write into the personal scope (must be refused):"
+payload=$(python3 - "$BORG_MEMORY_SCOPE" <<'PY'
+import json,sys
+print(json.dumps({"text":"scope proof probe - must not be stored","scope":sys.argv[1]}))
+PY
+)
+"$CURL" "$SCOPED_TOKEN" "$PORT" memory_add "$payload" 2>&1 | head -4
+
+hr
+if [ "$FAIL" = 0 ]; then
+  echo "RESULT: PASS — the scoped token returned zero personal, ops, or unscoped rows."
+else
+  echo "RESULT: FAIL — see LEAK lines above."
+fi
+hr
+exit $FAIL

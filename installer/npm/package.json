@@ -1,0 +1,8 @@
+{
+  "name": "borg-conductor-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@openai/codex": "0.146.0"
+  }
+}

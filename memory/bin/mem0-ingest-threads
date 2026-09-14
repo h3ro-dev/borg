@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Bulk thread ingestion — mine every Claude/Codex chat thread on Studio0
-into mem0 via local qwen extraction. Free, resumable, background-safe.
+"""Opt-in thread ingestion from explicitly configured provider history roots.
 
-- Sources: ~/.claude/projects/**/*.jsonl and ~/.codex/sessions/**/rollout-*.jsonl
-  (Codex sessions that already have a rollout summary are skipped — the summary
+- Sources: ``BORG_CLAUDE_HISTORY_ROOT`` and ``BORG_CODEX_HISTORY_ROOT``.
+  Sessions with a summary in ``BORG_CODEX_ROLLOUT_SUMMARIES`` are skipped — the summary
   is already seeded; CI battery/reviewer-case sessions are excluded as noise).
 - Extraction: qwen3.8:27b-mlx (think off) with the same charter as the session
   hook; llama fallback. Regex post-filter deletes secret/PII/money rows.
@@ -29,13 +28,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent.parent
-CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BASE / "bin/mem0ctl")).load_module()
-HOOK = importlib.machinery.SourceFileLoader("mem0hook_mod", str(BASE / "bin/mem0-capture-hook")).load_module()
+SOURCE_BIN = Path(__file__).resolve().parent
+CONFIG = importlib.machinery.SourceFileLoader("borg_config_ingest_threads", str(SOURCE_BIN / "borg_config.py")).load_module().CONFIG
+BASE = CONFIG.mem0_root
+CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(SOURCE_BIN / "mem0ctl")).load_module()
+HOOK = importlib.machinery.SourceFileLoader("mem0hook_mod", str(SOURCE_BIN / "mem0-capture-hook")).load_module()
 
 STATE_F = BASE / "data/ingest-state.json"
 LOG_F = BASE / "data/ingest.log"
-EXCLUDE_PROJECT = re.compile(r"nros-reviewer-sealed|private-tmp-pr-|-T-nros-")
+EXCLUDE_PROJECT = re.compile(os.environ.get("BORG_HISTORY_EXCLUDE_REGEX", r"(?!)"))
 MAX_MSGS = 60
 MAX_CHARS = 12000
 LIVE_GRACE_S = 1800  # skip files modified in the last 30 min (live sessions)
@@ -62,9 +63,7 @@ def save_state(st):
 
 def suppress_consolidate_trigger():
     try:
-        from qdrant_client import QdrantClient
-
-        count = QdrantClient(host="127.0.0.1", port=6333).count("studio0").count
+        count = CTL.qdrant_client(timeout=20).count(CTL.COLLECTION).count
         (BASE / "data/consolidate-state.json").write_text(
             json.dumps({"count_at_last_run": count, "at": CTL.now_mdt(), "note": "ingest-suppression"})
         )
@@ -73,7 +72,10 @@ def suppress_consolidate_trigger():
 
 
 def claude_files():
-    root = Path.home() / ".claude/projects"
+    value = os.environ.get("BORG_CLAUDE_HISTORY_ROOT", "").strip()
+    if not value:
+        return
+    root = Path(value).expanduser().resolve()
     for f in root.glob("*/*.jsonl"):
         if EXCLUDE_PROJECT.search(f.parent.name):
             continue
@@ -82,12 +84,16 @@ def claude_files():
 
 def codex_files():
     summarized = set()
-    ro = Path.home() / ".codex/memories/rollout_summaries"
-    for s in ro.glob("*.md"):
+    summary_value = os.environ.get("BORG_CODEX_ROLLOUT_SUMMARIES", "").strip()
+    ro = Path(summary_value).expanduser().resolve() if summary_value else None
+    for s in ro.glob("*.md") if ro else ():
         for line in s.read_text(errors="ignore").splitlines()[:6]:
             if line.startswith("rollout_path:"):
                 summarized.add(Path(line.split(":", 1)[1].strip()).name)
-    root = Path.home() / ".codex/sessions"
+    value = os.environ.get("BORG_CODEX_HISTORY_ROOT", "").strip()
+    if not value:
+        return
+    root = Path(value).expanduser().resolve()
     for f in root.rglob("rollout-*.jsonl"):
         if f.name in summarized:
             continue
@@ -166,10 +172,10 @@ def process(path: Path, kind: str, args, m_qwen):
             m,
             [{"role": "user", "content": digest}],
             threshold=0.92,
-            user_id="james",
+            user_id=CONFIG.owner_id,
             agent_id="thread-ingest",
             run_id=run_id,
-            metadata={"source": str(path), "kind": kind, "thread_date": date, "added_mdt": CTL.now_mdt()},
+            metadata={"source": str(path), "kind": kind, "thread_date": date, "added_mdt": CTL.now_mdt(), "scope": CTL.DEFAULT_SCOPE},
             prompt=HOOK.SAFE_PROMPT + INGEST_SUFFIX,
         )
 
@@ -191,7 +197,7 @@ def process(path: Path, kind: str, args, m_qwen):
             dropped += 1
         else:
             survivors.append(ev)
-    survivors, deduped = CTL.novelty_prune_events(m, survivors, user_id="james", agent_id="thread-ingest")
+    survivors, deduped = CTL.novelty_prune_events(m, survivors, user_id=CONFIG.owner_id, agent_id="thread-ingest")
     return "ok", len(survivors), dropped + deduped
 
 
@@ -231,6 +237,11 @@ def main():
         files += list(claude_files())
     if args.source in ("all", "codex"):
         files += list(codex_files())
+    if not files:
+        raise SystemExit(
+            "no history source configured; set BORG_CLAUDE_HISTORY_ROOT and/or "
+            "BORG_CODEX_HISTORY_ROOT explicitly"
+        )
     now = time.time()
     files = [(f, k) for f, k in files if now - f.stat().st_mtime > LIVE_GRACE_S]
     files.sort(key=lambda t: t[0].stat().st_mtime, reverse=not args.oldest_first)

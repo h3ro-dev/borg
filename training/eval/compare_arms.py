@@ -1,39 +1,35 @@
 #!/usr/bin/env python3
-"""Structural comparison of the two canary groups + the promotion evidence pack.
+"""Structural comparison of two explicitly configured canary groups.
 
 ox-pilot/compare_quality.py compares a pilot group against backfill-v1. This
 canary has TWO fresh isolated groups, so the same idea is re-pointed: per
 episode, the Entity names each arm's group holds via MENTIONS, plus the graph
 totals, duplicate-name rate and per-call-type LLM outcomes.
 
-READ-ONLY on FalkorDB. Writes only training/eval/CANARY-2026-08-28.{md,json}.
+The graph names, local port, result inputs, logs, optional probe, and output
+are required caller configuration. Running with no arguments accesses no data.
 """
+import argparse
 import json
 import subprocess
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
-PORT = "6383"
-A = "canary-27b-20260828"
-B = "canary-student-20260828"
-
-
-def rq(graph, cypher):
-    out = subprocess.run(["redis-cli", "-p", PORT, "GRAPH.RO_QUERY", graph, cypher],
+def rq(port, graph, cypher):
+    out = subprocess.run(["redis-cli", "-p", str(port), "GRAPH.RO_QUERY", graph, cypher],
                          capture_output=True, text=True).stdout.splitlines()
     return [l.strip() for l in out[1:-2] if l.strip()]
 
 
-def ep_nodes(graph, rid):
+def ep_nodes(port, graph, rid):
     safe = rid.replace("'", "\\'")
-    return rq(graph, f"MATCH (e:Episodic)-[:MENTIONS]->(n:Entity) "
+    return rq(port, graph, f"MATCH (e:Episodic)-[:MENTIONS]->(n:Entity) "
                      f"WHERE e.name = '{safe}' RETURN n.name")
 
 
-def load(stem):
-    return json.loads((BASE / f"{stem}.json").read_text())
+def load(source):
+    return json.loads(source.read_text(encoding="utf-8"))
 
 
 # Every place graphiti_core 0.29.3 accepts the JSON but THROWS PART OF IT AWAY.
@@ -51,16 +47,15 @@ REJECTIONS = {
 }
 
 
-def rejections(nohup_name):
-    p = BASE / nohup_name
+def rejections(p):
     text = p.read_text(errors="ignore") if p.exists() else ""
     out = {k: text.count(v) for k, v in REJECTIONS.items()}
     out["total"] = sum(out.values())
     return out
 
 
-def dup_stats(graph):
-    names = [n.strip() for n in rq(graph, "MATCH (n:Entity) RETURN n.name") if n.strip()]
+def dup_stats(port, graph):
+    names = [n.strip() for n in rq(port, graph, "MATCH (n:Entity) RETURN n.name") if n.strip()]
     low = Counter(n.lower() for n in names)
     dupes = {k: v for k, v in low.items() if v > 1}
     return {"total_nodes": len(names), "distinct_names": len(low),
@@ -70,17 +65,33 @@ def dup_stats(graph):
             "top_dupes": dict(sorted(dupes.items(), key=lambda kv: -kv[1])[:15])}
 
 
-def main():
-    ra = load(f"canary-arm-a-{A}")
-    rb = load(f"canary-arm-b-{B}")
-    da, db = dup_stats(A), dup_stats(B)
-    ja, jb = rejections("arm-a-nohup.out"), rejections("arm-b-nohup.out")
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--arm-a-graph", required=True)
+    parser.add_argument("--arm-b-graph", required=True)
+    parser.add_argument("--arm-a-result", type=Path, required=True)
+    parser.add_argument("--arm-b-result", type=Path, required=True)
+    parser.add_argument("--arm-a-log", type=Path, required=True)
+    parser.add_argument("--arm-b-log", type=Path, required=True)
+    parser.add_argument("--probe", type=Path)
+    parser.add_argument("--out", type=Path, required=True)
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    ra = load(args.arm_a_result)
+    rb = load(args.arm_b_result)
+    da = dup_stats(args.port, args.arm_a_graph)
+    db = dup_stats(args.port, args.arm_b_graph)
+    ja, jb = rejections(args.arm_a_log), rejections(args.arm_b_log)
 
     per_ep = []
     for x, y in zip(ra["results"], rb["results"]):
         assert x["run_id"] == y["run_id"], "episode sets diverged"
-        na = {n.lower() for n in ep_nodes(A, x["run_id"])}
-        nb = {n.lower() for n in ep_nodes(B, y["run_id"])}
+        na = {n.lower() for n in ep_nodes(args.port, args.arm_a_graph, x["run_id"])}
+        nb = {n.lower() for n in ep_nodes(args.port, args.arm_b_graph, y["run_id"])}
         inter = len(na & nb)
         union = len(na | nb)
         per_ep.append({"run_id": x["run_id"], "chars": x["chars"], "kind": x["kind"],
@@ -97,15 +108,15 @@ def main():
             "arm_a": ra, "arm_b": rb, "dup_a": da, "dup_b": db, "per_episode": per_ep,
             "call_types": call_types, "graphiti_rejections_a": ja,
             "graphiti_rejections_b": jb}
-    probe = BASE / "probe-resolve-edge.json"
-    if probe.exists():
-        pack["disproof_probe_resolve_edge"] = json.loads(probe.read_text())
-    (BASE / "CANARY-2026-08-28.json").write_text(json.dumps(pack, indent=1))
+    if args.probe is not None:
+        pack["disproof_probe_resolve_edge"] = json.loads(args.probe.read_text(encoding="utf-8"))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(pack, indent=1) + "\n", encoding="utf-8")
 
     def row(label, va, vb):
         print(f"{label:34} {str(va):>22} {str(vb):>22}")
 
-    print(f"\n{'metric':34} {'A: qwen3.8:27b (shim)':>22} {'B: 4B student':>22}")
+    print(f"\n{'metric':34} {'arm A':>22} {'arm B':>22}")
     print("-" * 80)
     row("episodes ok / total", f"{ra['ok']}/{ra['episodes']}", f"{rb['ok']}/{rb['episodes']}")
     row("failed (llm / graph)", f"{ra['fail_llm']} / {ra['fail_graph']}",
@@ -146,7 +157,7 @@ def main():
               f"{str(p['a_nodes'])+'/'+str(p['a_edges']):>8} "
               f"{str(p['b_nodes'])+'/'+str(p['b_edges']):>8} "
               f"{p['a_sec']:>7} {p['b_sec']:>7} {str(p['jaccard']):>5}")
-    print("\nwrote CANARY-2026-08-28.json")
+    print(f"\nwrote {args.out}")
 
 
 if __name__ == "__main__":

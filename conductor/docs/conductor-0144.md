@@ -1,5 +1,9 @@
 # Conductor compatibility with Codex CLI 0.144.x
 
+Historical protocol note only. The distributable product runtime is pinned to
+Node `24.21.0` and Codex `0.146.0`; see `../INTEGRATION.md` for the current
+installation and canary contract.
+
 Schema source: `codex-cli 0.144.3 app-server generate-json-schema
 --experimental`, inspected on 2026-07-13. This is source/test readiness, not a
 live app-server canary.

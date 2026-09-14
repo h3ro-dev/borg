@@ -6,13 +6,19 @@ import importlib.machinery
 import json
 import tempfile
 import unittest
+from borg_test_support import activate
+
+activate()
 from pathlib import Path
 
+_BIN = Path(__file__).resolve().parents[1] / "bin"
+_isolated_base = tempfile.mkdtemp(prefix="borg-ingest-test-")
+os.environ["MEM0_CODEX_BASE"] = _isolated_base
 CTL = importlib.machinery.SourceFileLoader(
-    "mem0ctl_dedup_test", os.path.expanduser("~/Library/Memory/mem0/bin/mem0ctl")
+    "mem0ctl_dedup_test", str(_BIN / "mem0ctl")
 ).load_module()
 INGEST = importlib.machinery.SourceFileLoader(
-    "mem0_ingest_threads_test", os.path.expanduser("~/Library/Memory/mem0/bin/mem0-ingest-threads")
+    "mem0_ingest_threads_test", str(_BIN / "mem0-ingest-threads")
 ).load_module()
 
 
@@ -68,7 +74,7 @@ class NoveltyPruneEventsTests(unittest.TestCase):
         m = FakeMemory()
         q = FakeQdrant(dup_count=3)
         kept, deduped = CTL.novelty_prune_events(
-            m, self.events(), user_id="james", agent_id="thread-ingest", q=q, log_path=self.log
+            m, self.events(), user_id="example-owner", agent_id="thread-ingest", q=q, log_path=self.log
         )
         # every event matched the fake's duplicate count, so all are deleted
         self.assertEqual(deduped, 2)
@@ -85,7 +91,7 @@ class NoveltyPruneEventsTests(unittest.TestCase):
         m = FakeMemory()
         q = FakeQdrant(dup_count=0)
         kept, deduped = CTL.novelty_prune_events(
-            m, self.events(), user_id="james", agent_id="thread-ingest", q=q, log_path=self.log
+            m, self.events(), user_id="example-owner", agent_id="thread-ingest", q=q, log_path=self.log
         )
         self.assertEqual(deduped, 0)
         self.assertEqual(len(kept), 2)
@@ -96,7 +102,7 @@ class NoveltyPruneEventsTests(unittest.TestCase):
         m = FakeMemory()
         q = FakeQdrant(raise_on_count=True)
         kept, deduped = CTL.novelty_prune_events(
-            m, self.events(), user_id="james", agent_id="thread-ingest", q=q, log_path=self.log
+            m, self.events(), user_id="example-owner", agent_id="thread-ingest", q=q, log_path=self.log
         )
         self.assertEqual(deduped, 0)
         self.assertEqual(len(kept), 2)
@@ -106,7 +112,7 @@ class NoveltyPruneEventsTests(unittest.TestCase):
         m = FakeMemory(raise_on_delete=True)
         q = FakeQdrant(dup_count=1)
         kept, deduped = CTL.novelty_prune_events(
-            m, self.events(), user_id="james", agent_id="thread-ingest", q=q, log_path=self.log
+            m, self.events(), user_id="example-owner", agent_id="thread-ingest", q=q, log_path=self.log
         )
         self.assertEqual(deduped, 0)
         self.assertEqual(len(kept), 2)
@@ -116,7 +122,7 @@ class NoveltyPruneEventsTests(unittest.TestCase):
         q = FakeQdrant(dup_count=5)
         odd = [{"id": None, "memory": "text but no id"}, {"id": self.EV1, "memory": ""}]
         kept, deduped = CTL.novelty_prune_events(
-            m, odd, user_id="james", agent_id="thread-ingest", q=q, log_path=self.log
+            m, odd, user_id="example-owner", agent_id="thread-ingest", q=q, log_path=self.log
         )
         self.assertEqual(deduped, 0)
         self.assertEqual(len(kept), 2)
@@ -128,7 +134,7 @@ class NoveltyPruneEventsTests(unittest.TestCase):
         q = FakeQdrant(dup_count=5)
         kept, deduped = CTL.novelty_prune_events(
             m, [{"id": "not-a-uuid", "memory": "some fact"}],
-            user_id="james", agent_id="thread-ingest", q=q, log_path=self.log
+            user_id="example-owner", agent_id="thread-ingest", q=q, log_path=self.log
         )
         self.assertEqual(deduped, 0)
         self.assertEqual(len(kept), 1)
@@ -154,7 +160,7 @@ class ThreadBoilerplateSkipTests(unittest.TestCase):
 
     def test_injected_policy_prefixes_are_skipped(self):
         rows = [
-            self.codex_msg("user", "# AGENTS.md instructions\nTalk to me in ASD-STE100. My name is James."),
+            self.codex_msg("user", "# AGENTS.md instructions\nUse the configured owner preferences."),
             self.codex_msg("user", "<recommended_plugins>stuff</recommended_plugins>"),
             self.codex_msg("user", "<skills_instructions>x</skills_instructions>"),
             self.codex_msg("user", "Please fix the parity gate on issue 954."),

@@ -1,0 +1,2 @@
+# The native Inbox Hub and portable bootstrap use only Python's standard library.
+# Supported interpreter: CPython 3.10 or newer.

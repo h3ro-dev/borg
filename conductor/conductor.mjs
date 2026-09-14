@@ -5,20 +5,22 @@
 // full notification stream.
 //
 //   node conductor.mjs                      # starts app-server + HTTP on 127.0.0.1:4747
-//   CONDUCTOR_PORT=5050 CODEX_HOME=~/.codex-acct2 node conductor.mjs   # account sharding
+//   BORG_HOME=/opt/borg CODEX_HOME=/opt/borg/conductors/primary/profile node conductor.mjs
 //
 // HTTP API (all JSON):
-//   GET  /status                         conductor + child health, known threads
+//   GET  /status                         conductor + child health, known threads, supported roles
 //   GET  /threads?limit=20               thread/list passthrough
 //   GET  /events?threadId=&afterSeq=     buffered notification stream (per thread)
 //   POST /rpc        {method, params, timeoutMs?}            raw JSON-RPC passthrough
-//   POST /thread/start  {cwd, model?, instructions?, sandbox?, personality?}
-//   POST /thread/resume {threadId, cwd?}
+//   POST /thread/start  {cwd, model?, instructions?, role?, sandbox?, personality?}
+//   POST /lead/thread/start  {cwd, model?, instructions?, sandbox?, personality?}
+//   POST /thread/resume {threadId, cwd?, role?, model?, predecessor?}
 //   POST /turn/start    {threadId, text}  returns {turnId} as soon as the turn starts
 //   POST /turn/steer    {threadId, expectedTurnId, text}
 //   POST /turn/interrupt {threadId, turnId}
 //
-// Safety posture: threads default to sandbox=workspace-write and
+// Safety posture (owner ruling 2026-08-29, re-ruled 2026-09-01): threads default to
+// sandbox=danger-full-access — callers may pass a narrower sandbox explicitly — and
 // approvalPolicy=never. If the server ever asks for an approval anyway, the
 // conductor DENIES it and logs loudly — it never silently grants.
 
@@ -27,9 +29,116 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+export function ownerPolicyPaths(borgHome) {
+  if (typeof borgHome !== 'string' || !path.isAbsolute(borgHome)
+      || path.normalize(borgHome) !== borgHome || path.resolve(borgHome) !== borgHome) {
+    throw new Error('BORG_HOME must be a canonical absolute path');
+  }
+  return {
+    seat: path.join(borgHome, 'policies', 'SEAT-RULES.md'),
+    lead: path.join(borgHome, 'policies', 'LEAD-RULES.md'),
+  };
+}
+
+function readRequiredPolicy(file, role) {
+  try {
+    const rules = fs.readFileSync(file, 'utf8').trim();
+    if (!rules) throw new Error(`missing or empty owner policy for ${role}: ${file}`);
+    return rules;
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error(`missing or empty owner policy for ${role}: ${file}`);
+    }
+    throw error;
+  }
+}
+
+export function loadOwnerPolicies(borgHome) {
+  const files = ownerPolicyPaths(borgHome);
+  return {
+    seat: readRequiredPolicy(files.seat, 'seat'),
+    lead: readRequiredPolicy(files.lead, 'lead'),
+    files,
+  };
+}
+
+class BadRequestError extends Error {
+  constructor(message) {
+    super(message);
+    this.statusCode = 400;
+  }
+}
+
+function normalizeRole(role) {
+  if (role === undefined) return 'leaf';
+  if (role !== 'lead' && role !== 'leaf') {
+    throw new BadRequestError('invalid role: expected lead or leaf');
+  }
+  return role;
+}
+
+function seatDeveloperInstructions(extra, role, policies) {
+  const rules = role === 'lead' ? policies?.lead : policies?.seat;
+  if (!rules) throw new BadRequestError(`owner ${role} policy missing`);
+  const local = typeof extra === 'string' ? extra.trim() : '';
+  return [rules, local].filter(Boolean).join('\n\n');
+}
+
+export function buildThreadStartParams(body = {}, policies = {}) {
+  const role = normalizeRole(body.role);
+  return {
+    cwd: body.cwd,
+    sandbox: body.sandbox || 'danger-full-access',
+    approvalPolicy: body.approvalPolicy || 'never',
+    ...(body.model ? { model: body.model } : {}),
+    developerInstructions: seatDeveloperInstructions(body.instructions, role, policies),
+    ...(body.personality ? { personality: body.personality } : {}),
+    ...(body.config ? { config: body.config } : {}),
+  };
+}
 
 export const LOG_DIRECTORY_MODE = 0o700;
 export const LOG_FILE_MODE = 0o600;
+export const MAX_BODY_BYTES = 64 * 1024;
+export const MAX_EVENT_PAGE = 200;
+
+export async function readBody(req) {
+  const declared = Number(req.headers?.['content-length'] || 0);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    throw Object.assign(new Error('request body exceeds 65536 bytes'), { statusCode: 413 });
+  }
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of req) {
+    const value = Buffer.from(chunk);
+    bytes += value.length;
+    if (bytes > MAX_BODY_BYTES) {
+      throw Object.assign(new Error('request body exceeds 65536 bytes'), { statusCode: 413 });
+    }
+    chunks.push(value);
+  }
+  const data = Buffer.concat(chunks).toString('utf8');
+  return data ? JSON.parse(data) : {};
+}
+
+export function paginateEvents(events, options = {}, lastSeq = 0) {
+  const afterSeq = Number.isInteger(options.afterSeq) && options.afterSeq >= 0 ? options.afterSeq : 0;
+  const requested = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : MAX_EVENT_PAGE;
+  const limit = Math.min(requested, MAX_EVENT_PAGE);
+  const matching = events.filter((event) => {
+    const params = event.params || {};
+    const eventThreadId = params.threadId || params.thread?.id || null;
+    return event.seq > afterSeq && (!options.threadId || eventThreadId === options.threadId);
+  });
+  const page = matching.slice(0, limit);
+  const nextAfterSeq = page.length ? page[page.length - 1].seq : afterSeq;
+  return {
+    events: page,
+    lastSeq,
+    nextAfterSeq,
+    hasMore: matching.length > page.length,
+  };
+}
 
 const INITIALIZE_PARAMS = {
   clientInfo: { name: 'codex-conductor', title: 'Codex Conductor', version: '0.1.0' },
@@ -133,14 +242,14 @@ export function childStderrLogMetadata(data) {
   };
 }
 
-export function buildThreadResumeParams(body = {}) {
+export function buildThreadResumeParams(body = {}, policies = {}) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     throw new Error('thread resume body must be an object');
   }
   if (typeof body.threadId !== 'string' || !body.threadId.trim()) {
     throw new Error('threadId is required');
   }
-  const sandbox = body.sandbox || 'read-only';
+  const sandbox = body.sandbox || 'danger-full-access';
   if (!['read-only', 'workspace-write', 'danger-full-access'].includes(sandbox)) {
     throw new Error('unsupported resume sandbox');
   }
@@ -148,6 +257,7 @@ export function buildThreadResumeParams(body = {}) {
   if (!['never', 'on-request', 'untrusted'].includes(approvalPolicy)) {
     throw new Error('unsupported resume approval policy');
   }
+  const role = normalizeRole(body.role);
   return {
     threadId: body.threadId,
     ...(body.cwd ? { cwd: body.cwd } : {}),
@@ -155,9 +265,66 @@ export function buildThreadResumeParams(body = {}) {
     approvalPolicy,
     ...(body.runtimeWorkspaceRoots ? { runtimeWorkspaceRoots: body.runtimeWorkspaceRoots } : {}),
     ...(body.model ? { model: body.model } : {}),
-    ...(body.instructions ? { developerInstructions: body.instructions } : {}),
+    developerInstructions: seatDeveloperInstructions(body.instructions, role, policies),
     ...(body.personality ? { personality: body.personality } : {}),
     ...(body.config ? { config: body.config } : {}),
+  };
+}
+
+function protocolError(message) {
+  return Object.assign(new Error(message), { statusCode: 502 });
+}
+
+function predecessorForResume(body, previous) {
+  if (!Object.hasOwn(body, 'predecessor')) return previous?.predecessor ?? null;
+  if (body.predecessor === null
+      || (typeof body.predecessor === 'object' && !Array.isArray(body.predecessor))) {
+    return body.predecessor;
+  }
+  throw new BadRequestError('predecessor must be an object or null');
+}
+
+export function resumedThreadRecord(body, resumeResponse, readResponse, previous = null, now = new Date()) {
+  const resumed = resumeResponse?.thread;
+  const read = readResponse?.thread;
+  if (!resumed || !read) throw protocolError('resume requires native thread response and complete readback');
+  const ids = [body?.threadId, resumed.id, read.id];
+  if (ids.some((id) => typeof id !== 'string' || !id.trim()) || new Set(ids).size !== 1) {
+    throw protocolError('resume thread identity mismatch');
+  }
+  if (typeof resumeResponse.cwd !== 'string' || !path.isAbsolute(resumeResponse.cwd)) {
+    throw protocolError('resume response missing effective absolute cwd');
+  }
+  if (!Array.isArray(read.turns)) throw protocolError('thread/read did not include complete turns');
+
+  const latestTurn = read.turns.at(-1) || null;
+  const threadStatus = read.status ?? resumed.status ?? null;
+  const threadStatusName = statusLabel(threadStatus);
+  const resumedAt = now.toISOString();
+  const role = normalizeRole(body.role ?? previous?.role);
+  const responseHasEffort = Object.hasOwn(resumeResponse, 'reasoningEffort');
+  return {
+    cwd: resumeResponse.cwd,
+    persistedCwd: read.cwd ?? resumed.cwd ?? null,
+    startedAt: previous?.startedAt ?? resumedAt,
+    resumedAt,
+    role,
+    model: resumeResponse.model ?? previous?.model ?? body.model ?? null,
+    effort: responseHasEffort ? resumeResponse.reasoningEffort : (previous?.effort ?? null),
+    predecessor: predecessorForResume(body, previous),
+    status: threadStatus,
+    lastTurnId: latestTurn?.id ?? null,
+    lastTurnStatus: statusLabel(latestTurn?.status)
+      ?? (threadStatusName === 'active' ? 'running' : 'idle'),
+    parentThreadId: read.parentThreadId ?? null,
+    forkedFromId: read.forkedFromId ?? null,
+    sessionId: read.sessionId ?? null,
+    createdAt: read.createdAt ?? null,
+    updatedAt: read.updatedAt ?? null,
+    modelProvider: resumeResponse.modelProvider ?? read.modelProvider ?? null,
+    approvalPolicy: resumeResponse.approvalPolicy ?? null,
+    sandbox: resumeResponse.sandbox ?? null,
+    runtimeWorkspaceRoots: resumeResponse.runtimeWorkspaceRoots ?? null,
   };
 }
 
@@ -213,13 +380,23 @@ export function pathsReferToSameFile(left, right) {
   }
 }
 
-function startConductor() {
+export function startConductor(options = {}) {
 
-const PORT = parseInt(process.env.CONDUCTOR_PORT || '4747', 10);
+const PORT = Number(options.port ?? process.env.CONDUCTOR_PORT ?? 4747);
 const HOST = '127.0.0.1';
-const CODEX_BIN = process.env.CODEX_BIN || 'codex';
-const LOG_DIR = process.env.CONDUCTOR_LOGS || path.join(process.cwd(), 'logs');
+const CODEX_BIN = options.codexBin || process.env.CODEX_BIN || 'codex';
+const CODEX_HOME = options.codexHome || process.env.CODEX_HOME || null;
+const BORG_HOME = options.borgHome || process.env.BORG_HOME;
+const LOG_DIR = options.logsPath || process.env.CONDUCTOR_LOGS || path.join(process.cwd(), 'logs');
+const POLICIES = options.policies || loadOwnerPolicies(BORG_HOME);
 const EVENT_RING_MAX = 5000;
+
+if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) {
+  throw new Error('CONDUCTOR_PORT must be an integer from 1024 to 65535');
+}
+if (!CODEX_HOME || !path.isAbsolute(CODEX_HOME)) {
+  throw new Error('CODEX_HOME must be an absolute dedicated profile path');
+}
 
 ensurePrivateLogDirectory(LOG_DIR);
 ensurePrivateLogDirectory(path.join(LOG_DIR, 'threads'));
@@ -235,9 +412,16 @@ function log(kind, data) {
 }
 
 // ---------- app-server child ----------
-const child = spawn(CODEX_BIN, ['app-server'], { stdio: ['pipe', 'pipe', 'pipe'] });
+const child = spawn(CODEX_BIN, ['app-server'], {
+  stdio: ['pipe', 'pipe', 'pipe'],
+  env: { ...process.env, CODEX_HOME },
+});
+let closing = false;
 child.stderr.on('data', (d) => log('child-stderr', childStderrLogMetadata(d)));
-child.on('exit', (code, sig) => { log('child-exit', { code, sig }); process.exit(1); });
+child.on('exit', (code, sig) => {
+  log('child-exit', { code, sig });
+  if (!closing && options.exitOnChildExit !== false) process.exit(1);
+});
 
 let nextId = 1;
 const pending = new Map();
@@ -319,7 +503,7 @@ child.stdout.on('data', (chunk) => {
 });
 
 // ---------- thread bookkeeping ----------
-const threads = new Map(); // threadId -> {cwd, startedAt, lastTurnId, lastTurnStatus}
+const threads = new Map(); // threadId -> effective settings plus native lifecycle readback
 
 function trackFromEvent(e) {
   const tid = threadIdOf(e.params);
@@ -364,12 +548,6 @@ function json(res, code, obj) {
   res.end(body);
 }
 
-async function readBody(req) {
-  let data = '';
-  for await (const c of req) data += c;
-  return data ? JSON.parse(data) : {};
-}
-
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${HOST}:${PORT}`);
   try {
@@ -377,7 +555,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/status') {
       return json(res, 200, {
         ok: true, childPid: child.pid, port: PORT,
-        codexHome: process.env.CODEX_HOME || null,
+        codexHome: CODEX_HOME,
+        supportedRoles: POLICIES.lead ? ['leaf', 'lead'] : ['leaf'],
         threads: Object.fromEntries(threads), eventSeq: seq,
       });
     }
@@ -389,32 +568,54 @@ const server = http.createServer(async (req, res) => {
       const tid = url.searchParams.get('threadId');
       const after = parseInt(url.searchParams.get('afterSeq') || '0', 10);
       const limit = parseInt(url.searchParams.get('limit') || '200', 10);
-      const out = events.filter((e) => e.seq > after && (!tid || threadIdOf(e.params) === tid)).slice(0, limit);
-      return json(res, 200, { events: out, lastSeq: seq });
+      return json(res, 200, paginateEvents(events, {
+        threadId: tid,
+        afterSeq: Number.isInteger(after) && after >= 0 ? after : 0,
+        limit: Number.isInteger(limit) && limit > 0 ? limit : MAX_EVENT_PAGE,
+      }, seq));
     }
     if (req.method === 'POST' && url.pathname === '/rpc') {
       const b = await readBody(req);
       return json(res, 200, await rpc(b.method, b.params || {}, b.timeoutMs || 120000));
     }
-    if (req.method === 'POST' && url.pathname === '/thread/start') {
-      const b = await readBody(req);
-      const params = {
-        cwd: b.cwd,
-        sandbox: b.sandbox || 'workspace-write',
-        approvalPolicy: b.approvalPolicy || 'never',
-        ...(b.model ? { model: b.model } : {}),
-        ...(b.instructions ? { developerInstructions: b.instructions } : {}),
-        ...(b.personality ? { personality: b.personality } : {}),
-        ...(b.config ? { config: b.config } : {}),
-      };
+    if (req.method === 'POST'
+      && (url.pathname === '/thread/start' || url.pathname === '/lead/thread/start')) {
+      let b = await readBody(req);
+      const leadOnly = url.pathname === '/lead/thread/start';
+      if (leadOnly) {
+        if (!b || typeof b !== 'object' || Array.isArray(b)) {
+          throw new BadRequestError('lead thread start body must be an object');
+        }
+        if (b.role !== undefined) {
+          const requestedRole = normalizeRole(b.role);
+          if (requestedRole !== 'lead') throw new BadRequestError('lead endpoint requires role lead');
+        }
+        if (!POLICIES.lead) throw new BadRequestError('lead rules missing');
+        b = { ...b, role: 'lead' };
+      }
+      const role = normalizeRole(b.role);
+      const params = buildThreadStartParams(b, POLICIES);
       const r = await rpc('thread/start', params, 60000);
       const tid = r.thread?.id;
-      if (tid) threads.set(tid, { cwd: b.cwd, startedAt: new Date().toISOString() });
+      if (tid) {
+        threads.set(tid, { cwd: b.cwd, startedAt: new Date().toISOString(), role });
+        log('thread-start', { threadId: tid, role });
+      }
       return json(res, 200, { threadId: tid, raw: r });
     }
     if (req.method === 'POST' && url.pathname === '/thread/resume') {
       const b = await readBody(req);
-      const r = await rpc('thread/resume', buildThreadResumeParams(b), 60000);
+      const previous = threads.get(b.threadId) || null;
+      const effectiveBody = { ...b, role: b.role ?? previous?.role };
+      const r = await rpc('thread/resume', buildThreadResumeParams(effectiveBody, POLICIES), 60000);
+      const tid = r.thread?.id;
+      if (typeof tid !== 'string' || !tid.trim() || tid !== b.threadId) {
+        throw protocolError('resume thread identity mismatch');
+      }
+      const readback = await rpc('thread/read', { threadId: tid, includeTurns: true }, 60000);
+      const record = resumedThreadRecord(effectiveBody, r, readback, previous);
+      threads.set(tid, record);
+      log('thread-resume', { threadId: tid, role: record.role });
       return json(res, 200, r);
     }
     if (req.method === 'POST' && url.pathname === '/turn/start') {
@@ -448,16 +649,25 @@ const server = http.createServer(async (req, res) => {
     }
     return json(res, 404, { error: 'unknown endpoint' });
   } catch (e) {
-    return json(res, 500, { error: e.message, rpc: e.rpc || null });
+    return json(res, e.statusCode || 500, { error: e.message, rpc: e.rpc || null });
   }
 });
 
 server.listen(PORT, HOST, () => {
   console.log(`[conductor] listening on http://${HOST}:${PORT} (app-server pid ${child.pid}, logs in ${LOG_DIR})`);
+  options.onListening?.({ host: HOST, port: PORT, childPid: child.pid });
 });
 
-process.on('SIGINT', () => { child.kill(); process.exit(0); });
-process.on('SIGTERM', () => { child.kill(); process.exit(0); });
+const close = () => {
+  closing = true;
+  child.kill();
+  server.close();
+};
+if (options.installSignalHandlers !== false) {
+  process.once('SIGINT', close);
+  process.once('SIGTERM', close);
+}
+return { child, server, initialized, close };
 }
 
 if (pathsReferToSameFile(process.argv[1], fileURLToPath(import.meta.url))) startConductor();

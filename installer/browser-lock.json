@@ -1,0 +1,33 @@
+{
+  "schema": "borg-browser/v1",
+  "playwright": "1.62.0",
+  "revision": "1234",
+  "browser_version": "151.0.7922.34",
+  "provenance": "URLs from pinned Playwright 1.62.0 registry; byte counts and SHA-256 measured from official artifacts on 2026-09-14. Project-maintained hashes, not publisher checksum claims.",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://cdn.playwright.dev/builds/cft/151.0.7922.34/mac-arm64/chrome-mac-arm64.zip",
+      "bytes": 187406357,
+      "sha256": "01a23ef9501b2745e0c2944c2e583207e6f6132d8d91c3a87ff65b5079e438ef",
+      "executable": "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+    },
+    "darwin-x86_64": {
+      "url": "https://cdn.playwright.dev/builds/cft/151.0.7922.34/mac-x64/chrome-mac-x64.zip",
+      "bytes": 196858455,
+      "sha256": "69bcc853db975a2380767e9ff36da17f1d7b782fbbe191a210f676d2d5967d3e",
+      "executable": "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+    },
+    "linux-x86_64": {
+      "url": "https://cdn.playwright.dev/builds/cft/151.0.7922.34/linux64/chrome-linux64.zip",
+      "bytes": 193282658,
+      "sha256": "ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8",
+      "executable": "chrome-linux64/chrome"
+    },
+    "linux-aarch64": {
+      "url": "https://cdn.playwright.dev/builds/chromium/1234/chromium-linux-arm64.zip",
+      "bytes": 204732694,
+      "sha256": "b5ad7d8fe70f230b34198ddb5626d717c016db2f627cb44b922babbcaf3479b9",
+      "executable": "chrome-linux/chrome"
+    }
+  }
+}

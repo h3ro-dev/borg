@@ -5,11 +5,23 @@ from __future__ import annotations
 import importlib.machinery
 import os
 import unittest
+from borg_test_support import activate
+
+activate()
 from pathlib import Path
 
 
 BASE = Path(__file__).resolve().parents[1]
 BIN = BASE / "bin"
+
+# The revision-2 supplied native mem0-dream is the bounded retention census;
+# these tests target the superseded dream-v2 judge surface and are not
+# applicable until that exact native hardening source is supplied.
+_probe = importlib.machinery.SourceFileLoader(
+    "mem0_dream_batch_judge_probe", str(BIN / "mem0-dream")
+).load_module()
+if not hasattr(_probe, "_serialize_revise_prompt"):
+    raise unittest.SkipTest("native supplied mem0-dream has no dream-v2 judge API")
 
 
 def load_dream():

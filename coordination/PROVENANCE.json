@@ -1,0 +1,292 @@
+{
+  "files": [
+    {
+      "packaged_sha256": "3ea81eb762283ece9761361b01ead199aceb6c2c1b6a65d4c7f2dea7a75722be",
+      "path": "comms/__init__.py",
+      "status": "byte_exact",
+      "upstream_sha256": "3ea81eb762283ece9761361b01ead199aceb6c2c1b6a65d4c7f2dea7a75722be"
+    },
+    {
+      "change": "discover installation-local owner policy config",
+      "packaged_sha256": "39bd5b7ddfc327db1c5d2f23a5daf1d3849282dc0be5567d2cec07177a6a8876",
+      "path": "comms/bin/inbox",
+      "status": "portable_patch",
+      "upstream_sha256": "a34101f9ec77728d04f83dd061837f43a35601a084da2f01a2b0cf186117a0c7"
+    },
+    {
+      "change": "discover installation-local owner policy config",
+      "packaged_sha256": "434f7750a7d6c8b19dde3f441fe48ae58ef863531d301af4587669a271b972ea",
+      "path": "comms/bin/inbox-native",
+      "status": "portable_patch",
+      "upstream_sha256": "93e436f59c14850e542de8afc76d0789e3c3eceed1621631942d272f2714c049"
+    },
+    {
+      "packaged_sha256": "f48c93f69536450734ef91e000f735831f11662f7270bd24300828dd59555648",
+      "path": "comms/hub/__init__.py",
+      "status": "byte_exact",
+      "upstream_sha256": "f48c93f69536450734ef91e000f735831f11662f7270bd24300828dd59555648"
+    },
+    {
+      "change": "generic product naming",
+      "packaged_sha256": "470eca9ee5f8c35492df2b4463c22f095758e3963c417a98b7a5e664e6a39769",
+      "path": "comms/hub/adapters.py",
+      "status": "portable_patch",
+      "upstream_sha256": "ffe3fe04d22a669717a42f1be889b9ce1daf44e9ea85c9abd1ab3d877dc9dbc2"
+    },
+    {
+      "change": "generic product naming and policy reference",
+      "packaged_sha256": "be0d0925f66b47d544cb6368526c48630de1117149ee0c9532375b9e0c704826",
+      "path": "comms/hub/cli.py",
+      "status": "portable_patch",
+      "upstream_sha256": "fab204be0abfc3c8b9f81aa5123148c6c7c09bd6ec9527d9793bf9f2f8c13333"
+    },
+    {
+      "packaged_sha256": "ffef68d4a298a69021a520e7ccd7cf9cd3612d614cb506503c45b26285132fe7",
+      "path": "comms/hub/client.py",
+      "status": "byte_exact",
+      "upstream_sha256": "ffef68d4a298a69021a520e7ccd7cf9cd3612d614cb506503c45b26285132fe7"
+    },
+    {
+      "change": "estate provider is explicit and disabled by default",
+      "packaged_sha256": "5593135e010d44e707b76b79c33f6d00d84515fe53df563f5f0dc2a24f8eca5a",
+      "path": "comms/hub/estate.py",
+      "status": "portable_patch",
+      "upstream_sha256": "93a5e4d2ee587e66cc501e10872a498b3b49632b37ac10e2b25eb8d2e739ff18"
+    },
+    {
+      "change": "deployment source paths removed",
+      "packaged_sha256": "0c156a70ea9d3217e694641dd517db67079318585fbb38d11dff1a5dcda68137",
+      "path": "comms/hub/fleet_context.py",
+      "status": "portable_patch",
+      "upstream_sha256": "6d93c19913966e78aeef2734b3ccb7a422f6f39e4eba6df27f1cf3838436d9b3"
+    },
+    {
+      "packaged_sha256": "8ba8eb69b243a272f7796793cea26bdce0e00a8b8bc3f0aee01ca69794d81b60",
+      "path": "comms/hub/install.py",
+      "status": "byte_exact",
+      "upstream_sha256": "8ba8eb69b243a272f7796793cea26bdce0e00a8b8bc3f0aee01ca69794d81b60"
+    },
+    {
+      "packaged_sha256": "ccba77b062c4faf6b5669fcb1c42917681fd68db2665ae80b024f8833d0c7430",
+      "path": "comms/hub/legacy.py",
+      "status": "byte_exact",
+      "upstream_sha256": "ccba77b062c4faf6b5669fcb1c42917681fd68db2665ae80b024f8833d0c7430"
+    },
+    {
+      "packaged_sha256": "e9a438be8189d9f34421ba981c6b2a9461adae418e9302c3f513984bd6aa134d",
+      "path": "comms/hub/native.py",
+      "status": "byte_exact",
+      "upstream_sha256": "e9a438be8189d9f34421ba981c6b2a9461adae418e9302c3f513984bd6aa134d"
+    },
+    {
+      "packaged_sha256": "c3053eab3f4d99684115e03fcc39fda62ab37f2292e98b1d71419188ef140f59",
+      "path": "comms/hub/native_active.py",
+      "status": "byte_exact",
+      "upstream_sha256": "c3053eab3f4d99684115e03fcc39fda62ab37f2292e98b1d71419188ef140f59"
+    },
+    {
+      "change": "deployment-specific implicit runtime removed",
+      "packaged_sha256": "de991f4a806ed11b146a7ec215e1e951c099006eb0b7ea9486c4b990fc1fdaf9",
+      "path": "comms/hub/native_config.py",
+      "status": "portable_patch",
+      "upstream_sha256": "17bf0778a276029dd2a58f8cef5008c652ef683e9fe109ba2f36de83f2af2f55"
+    },
+    {
+      "packaged_sha256": "8387e50d32001964d117479407016b25b1495f820c96cac398a31f5b81f56a20",
+      "path": "comms/hub/owner_console.py",
+      "status": "byte_exact",
+      "upstream_sha256": "8387e50d32001964d117479407016b25b1495f820c96cac398a31f5b81f56a20"
+    },
+    {
+      "change": "installation-local owner policy pin",
+      "packaged_sha256": "8f6adb7ad7e385baf69a310f9f7662b64b1ab4f70e9078623db9800a8f93bf4a",
+      "path": "comms/hub/policy.py",
+      "status": "portable_patch",
+      "upstream_sha256": "7c93fffa867b03e763baa7558952a5d08f57004cc1c266899b5d961f18c9fc37"
+    },
+    {
+      "packaged_sha256": "a375c117058ef52be2f2274745620fcc1a99566ac25a7b25444e68263cf81557",
+      "path": "comms/hub/projection.py",
+      "status": "byte_exact",
+      "upstream_sha256": "a375c117058ef52be2f2274745620fcc1a99566ac25a7b25444e68263cf81557"
+    },
+    {
+      "change": "portable enrollment grants and optional integrations",
+      "packaged_sha256": "9d72808aff4d06bb37b0b33484d4ac1d12463ad28ad662c4643e1e32c75a219b",
+      "path": "comms/hub/service.py",
+      "status": "portable_patch",
+      "upstream_sha256": "691de3363927af994e8488794af84cdcec80699bdb3f6ef008632306c78fa62b"
+    },
+    {
+      "packaged_sha256": "17b556e0cbd1f10858696626b0969d319c2dd32b7a24bd90b4c03fd4b9baafc8",
+      "path": "comms/hub/stage_native.py",
+      "status": "byte_exact",
+      "upstream_sha256": "17b556e0cbd1f10858696626b0969d319c2dd32b7a24bd90b4c03fd4b9baafc8"
+    },
+    {
+      "change": "generic owner documentation",
+      "packaged_sha256": "94f13404ae69ef68d853bacad983dc105eeda63a03e1848e97818b52b0b98483",
+      "path": "comms/hub/store.py",
+      "status": "portable_patch",
+      "upstream_sha256": "bcbfb20d2865cddc61ab4bcb53da743a5bf8a94b2916a1a3f0c3007822551895"
+    },
+    {
+      "packaged_sha256": "3213d3040e6632ecac65f0d359b9b3662318f875d6db605ec16d2b8fa2ce4b0e",
+      "path": "comms/hub/tests/test_browser_transport.py",
+      "status": "byte_exact",
+      "upstream_sha256": "3213d3040e6632ecac65f0d359b9b3662318f875d6db605ec16d2b8fa2ce4b0e"
+    },
+    {
+      "change": "private work and estate fixture names removed",
+      "packaged_sha256": "6b1ebaa8fe75dce6420aa856e4e0e074962bfabc95bcf402665750ce4ae6f28c",
+      "path": "comms/hub/tests/test_agents_list_boundaries.py",
+      "status": "portable_patch",
+      "upstream_sha256": "059677ea218c6cd33cae8438c5da4a2609175a0ba11dc6bd475b127ddf6f5467"
+    },
+    {
+      "change": "private work reference removed from test documentation",
+      "packaged_sha256": "33471c5b8f196cfcf1db99dc6498f7bb5bf77808de38b1b183e2802238460a4a",
+      "path": "comms/hub/tests/test_inbox_estate.py",
+      "status": "portable_patch",
+      "upstream_sha256": "a6f959c905fea0a79782a66d01b11c0ac0d11f230661e74e40a66041718e9422"
+    },
+    {
+      "packaged_sha256": "11fd847581f0082f61312c666543b1f57c2eb5e2fbce23a8ad05f85159e76d5f",
+      "path": "comms/hub/web/index.html",
+      "status": "byte_exact",
+      "upstream_sha256": "11fd847581f0082f61312c666543b1f57c2eb5e2fbce23a8ad05f85159e76d5f"
+    },
+    {
+      "packaged_sha256": "76f30aee53f2b7d981aa18383d77fa43c8bba7ead03fc03b0dd907de55b5a59a",
+      "path": "comms/hub/web/js/api.js",
+      "status": "byte_exact",
+      "upstream_sha256": "76f30aee53f2b7d981aa18383d77fa43c8bba7ead03fc03b0dd907de55b5a59a"
+    },
+    {
+      "packaged_sha256": "6d861604cbcbf7def8b928fe73760864ac43896528e21e610c5c0089b89659ed",
+      "path": "comms/hub/web/js/app.js",
+      "status": "byte_exact",
+      "upstream_sha256": "6d861604cbcbf7def8b928fe73760864ac43896528e21e610c5c0089b89659ed"
+    },
+    {
+      "packaged_sha256": "39005aebe863f0b8534957a8cb97f78607f16ff02ddd2cba62c1ed4d8969b6ae",
+      "path": "comms/hub/web/js/core.js",
+      "status": "byte_exact",
+      "upstream_sha256": "39005aebe863f0b8534957a8cb97f78607f16ff02ddd2cba62c1ed4d8969b6ae"
+    },
+    {
+      "packaged_sha256": "5f087893e3e5d2862478ceba4b12e4519e50b18133167469a38235d57343f11f",
+      "path": "comms/hub/web/js/dom.js",
+      "status": "byte_exact",
+      "upstream_sha256": "5f087893e3e5d2862478ceba4b12e4519e50b18133167469a38235d57343f11f"
+    },
+    {
+      "packaged_sha256": "2f6ec4f9cdd95ed25146c437c8c408d3340a810594d9fd993f896d95ca72f2dd",
+      "path": "comms/hub/web/js/views.js",
+      "status": "byte_exact",
+      "upstream_sha256": "2f6ec4f9cdd95ed25146c437c8c408d3340a810594d9fd993f896d95ca72f2dd"
+    },
+    {
+      "packaged_sha256": "1321ddd63f05b290e36aae89311f294fff64aea2ca14c4243eab831b27acec54",
+      "path": "comms/hub/web/styles.css",
+      "status": "byte_exact",
+      "upstream_sha256": "1321ddd63f05b290e36aae89311f294fff64aea2ca14c4243eab831b27acec54"
+    },
+    {
+      "packaged_sha256": "4d0b573577c2d9b9eb347eeb8225a56182605730a7de162488210423a1658c6c",
+      "path": "fleet_browser/__init__.py",
+      "status": "byte_exact",
+      "upstream_sha256": "4d0b573577c2d9b9eb347eeb8225a56182605730a7de162488210423a1658c6c"
+    },
+    {
+      "packaged_sha256": "f7c9b1a1039fe52b0cc0724a2b4dafc2e2a12173b142b8a452aac42c80ef18b5",
+      "path": "fleet_browser/boot_retirement.py",
+      "status": "byte_exact",
+      "upstream_sha256": "f7c9b1a1039fe52b0cc0724a2b4dafc2e2a12173b142b8a452aac42c80ef18b5"
+    },
+    {
+      "packaged_sha256": "798a1c197c6cf33a8bb4e5a9c2295cfc9bf642bff4cff23279904366f3d14eb1",
+      "path": "fleet_browser/gateway.py",
+      "status": "byte_exact",
+      "upstream_sha256": "798a1c197c6cf33a8bb4e5a9c2295cfc9bf642bff4cff23279904366f3d14eb1"
+    },
+    {
+      "packaged_sha256": "8b9f223e945775bf717902c07ce14cd16e010f3cbd8615398a8b1964b3007588",
+      "path": "fleet_browser/integration.py",
+      "status": "byte_exact",
+      "upstream_sha256": "8b9f223e945775bf717902c07ce14cd16e010f3cbd8615398a8b1964b3007588"
+    },
+    {
+      "packaged_sha256": "1e97b5e2664e29e9061043bfb8d03712e455ba8a01cdb2546b4e7c1e801a8a7d",
+      "path": "fleet_browser/remote.py",
+      "status": "byte_exact",
+      "upstream_sha256": "1e97b5e2664e29e9061043bfb8d03712e455ba8a01cdb2546b4e7c1e801a8a7d"
+    },
+    {
+      "packaged_sha256": "03e58fa3b16b45e16f69a4030b50edbff1587e6b29977041eac5d938cd6b7453",
+      "path": "fleet_browser/routing.py",
+      "status": "byte_exact",
+      "upstream_sha256": "03e58fa3b16b45e16f69a4030b50edbff1587e6b29977041eac5d938cd6b7453"
+    },
+    {
+      "packaged_sha256": "e6bf9a02d8f94438826d2cdd54cbff78b7b0955e7cf57bfb23ddeef2692ba335",
+      "path": "fleet_browser/store.py",
+      "status": "byte_exact",
+      "upstream_sha256": "e6bf9a02d8f94438826d2cdd54cbff78b7b0955e7cf57bfb23ddeef2692ba335"
+    },
+    {
+      "packaged_sha256": "e8675e40bce8448ba69e52ed2825e5fe7d1694baffc6619df5e57633e786c086",
+      "path": "fleet_browser/supervisor.py",
+      "status": "byte_exact",
+      "upstream_sha256": "e8675e40bce8448ba69e52ed2825e5fe7d1694baffc6619df5e57633e786c086"
+    },
+    {
+      "packaged_sha256": "1c78cd0003ac707a738a0815448177c6c4e15d12253a319d5b8bc1c067a6ce0d",
+      "path": "fleet_desktop/__init__.py",
+      "status": "byte_exact",
+      "upstream_sha256": "1c78cd0003ac707a738a0815448177c6c4e15d12253a319d5b8bc1c067a6ce0d"
+    },
+    {
+      "packaged_sha256": "f8e5f0e5d0105f7ce11385819f7f259e14afa09a337dbf1b026895b7d72368f7",
+      "path": "fleet_desktop/fencing.py",
+      "status": "byte_exact",
+      "upstream_sha256": "f8e5f0e5d0105f7ce11385819f7f259e14afa09a337dbf1b026895b7d72368f7"
+    },
+    {
+      "packaged_sha256": "da8a4d176a017524eeca729223e8d639d74fb15e23a6add0384b1ba877bd9802",
+      "path": "fleet_desktop/gateway.py",
+      "status": "byte_exact",
+      "upstream_sha256": "da8a4d176a017524eeca729223e8d639d74fb15e23a6add0384b1ba877bd9802"
+    },
+    {
+      "packaged_sha256": "7a5d53c06c53c646c7c3b3a6f42eb705389b9420ef5bc291ee5125fed2fb861d",
+      "path": "fleet_desktop/integration.py",
+      "status": "byte_exact",
+      "upstream_sha256": "7a5d53c06c53c646c7c3b3a6f42eb705389b9420ef5bc291ee5125fed2fb861d"
+    },
+    {
+      "packaged_sha256": "24e34db6fad18ab8abe1537384073a474b9681a6f1b2e44acad0ef54afad7e60",
+      "path": "fleet_desktop/remote.py",
+      "status": "byte_exact",
+      "upstream_sha256": "24e34db6fad18ab8abe1537384073a474b9681a6f1b2e44acad0ef54afad7e60"
+    },
+    {
+      "change": "private integration guest prefix replaced",
+      "packaged_sha256": "3bae04f5cf060eecb1ad8f8c899bb46b6739e95c7ece77ec3519c2075ae1d6be",
+      "path": "fleet_desktop/tart.py",
+      "status": "portable_patch",
+      "upstream_sha256": "61b9d4afab5b8a784ef7424f4c784425a441edf358c522a6b9a59543782e64c6"
+    },
+    {
+      "packaged_sha256": "b9c5aa26878ce969daee6ccae2db49e60c265ea56ea7984053f43db8beed6996",
+      "path": "fleet_desktop/vnc.py",
+      "status": "byte_exact",
+      "upstream_sha256": "b9c5aa26878ce969daee6ccae2db49e60c265ea56ea7984053f43db8beed6996"
+    }
+  ],
+  "private_origin_paths_included": false,
+  "schema": "borg-coordination-provenance/v1",
+  "upstream_file_count": 45,
+  "upstream_release": "owner-supplied-native-inbox-source",
+  "upstream_verification": "root supplied source verified from active service metadata"
+}

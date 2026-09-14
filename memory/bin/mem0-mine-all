@@ -1,0 +1,145 @@
+#!/bin/bash
+# mem0-mine-all — scheduled memory maintenance, serial and lock-aware.
+# Automatic assistant-transcript mining is retired.  The same launch schedule
+# can replay frozen lifecycle-capture envelopes on explicitly configured hosts.
+# Optional acquisition helpers are off unless individually enabled.
+
+# Extraction and embedding routes are configured separately by mem0ctl.
+# Do not send extraction models to the dedicated embedding service.
+
+: "${BORG_HOME:?BORG_HOME is required}"
+: "${BORG_MEMORY_ENDPOINT:?BORG_MEMORY_ENDPOINT is required}"
+BASE="$BORG_HOME/mem0"
+BIN="$BASE/bin"
+DATA="$BASE/data"
+LOG="$DATA/mine-all.log"
+CAP_S=7200
+REPLAY_CAP_S=90
+REPLAY_ITEM_CAP=16
+REPLAY_WALL_SECONDS=30
+REPLAY_SSH="${MEM0_REPLAY_SSH_BIN:-/usr/bin/ssh}"
+POLL_S="${MEM0_MINE_POLL_S:-15}"
+MODE="${1:-all}"
+case "$MODE" in all|replay) ;; *) echo "Usage: mem0-mine-all [all|replay]" >&2; exit 64 ;; esac
+REPLAY_RC=0
+
+ts() { date "+%Y-%m-%d %H:%M:%S %Z"; }
+log() { echo "$(ts) $*" >> "$LOG"; }
+
+# run_capped <label> <lockfile-or-"-"> <cmd...>
+# Backgrounds the command, writes its PID to the lockfile when we own locking,
+# waits up to CAP_S, kills the whole process group on breach.
+run_capped() {
+  local label="$1" lockf="$2"; shift 2
+  local out="$DATA/mine-all-$label.out"
+  local cap_s="${RUN_CAP_S:-$CAP_S}"
+  "$@" >> "$out" 2>&1 &
+  local pid=$!
+  [ "$lockf" != "-" ] && echo "$pid" > "$lockf"
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$cap_s" ]; then
+      log "$label: CAP ${cap_s}s hit — killing pid $pid"
+      kill -TERM -- -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+      sleep "$POLL_S"
+      kill -KILL -- -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+      break
+    fi
+    sleep "$POLL_S"
+    waited=$((waited + POLL_S))
+  done
+  wait "$pid" 2>/dev/null
+  local rc=$?
+  [ "$lockf" != "-" ] && rm -f "$lockf"
+  log "$label: exit=$rc after ${waited}s"
+  return "$rc"
+}
+
+# Replay reads every harness request directory under the selected machine tag.
+# Each retained envelope freezes its own harness, endpoint, and token-file
+# reference.  No token value is placed in argv or read by this wrapper.
+run_local_replay() {
+  local label="$1" machine="$2"
+  RUN_CAP_S="$REPLAY_CAP_S" run_capped "$label" - env \
+    MEM0_FLEET_BASE="$BASE" \
+    MEM0_MACHINE="$machine" \
+    MEM0_HARNESS=codex \
+    MEM0_FLEET_TOKEN_FILE="$DATA/mcp-token" \
+    MEM0_FLEET_ENDPOINT="$BORG_MEMORY_ENDPOINT" \
+    MEM0_REPLAY_ITEM_CAP="$REPLAY_ITEM_CAP" \
+    MEM0_REPLAY_WALL_SECONDS="$REPLAY_WALL_SECONDS" \
+    "$BIN/mem0-fleet-hook" replay
+}
+
+run_remote_replay() {
+  local label="$1" ssh_host="$2" remote_home="$3" machine="$4"
+  local remote_base="$remote_home/mem0"
+  RUN_CAP_S="$REPLAY_CAP_S" run_capped "$label" - \
+    "$REPLAY_SSH" -o BatchMode=yes -o ConnectTimeout=8 "$ssh_host" env \
+      MEM0_FLEET_BASE="$remote_base" \
+      MEM0_MACHINE="$machine" \
+      MEM0_HARNESS=codex \
+      MEM0_FLEET_TOKEN_FILE="$remote_base/data/fleet-token" \
+      MEM0_FLEET_ENDPOINT_FILE="$remote_base/data/fleet-endpoint" \
+      MEM0_REPLAY_ITEM_CAP="$REPLAY_ITEM_CAP" \
+      MEM0_REPLAY_WALL_SECONDS="$REPLAY_WALL_SECONDS" \
+      "$remote_base/bin/mem0-fleet-hook" replay
+}
+
+log "KICK-START pid=$$"
+
+# Each nonblank route is label|host-or-local|remote-borg-home|machine-id.
+# This inventory is owner data and therefore must be supplied explicitly.
+: "${BORG_REPLAY_ROUTES_FILE:?BORG_REPLAY_ROUTES_FILE is required}"
+[ -r "$BORG_REPLAY_ROUTES_FILE" ] || { echo "configured replay route file is unreadable" >&2; exit 66; }
+REPLAY_ROUTES=()
+while IFS= read -r route; do
+  [ -z "$route" ] || REPLAY_ROUTES+=("$route")
+done < "$BORG_REPLAY_ROUTES_FILE"
+[ "${#REPLAY_ROUTES[@]}" -gt 0 ] || { echo "configured replay route file is empty" >&2; exit 66; }
+REPLAY_START=$(python3 - "$DATA/replay-route-state.json" "${#REPLAY_ROUTES[@]}" <<'PY'
+import fcntl, json, os, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+count = int(sys.argv[2])
+with p.with_suffix('.lock').open('a') as guard:
+    os.chmod(guard.name, 0o600)
+    fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    saved = json.loads(p.read_text()) if p.exists() else {'next_route': 0}
+    start = saved['next_route']
+    if type(start) is not int or not 0 <= start < count:
+        raise ValueError('invalid replay route cursor')
+    tmp = p.with_name(p.name + '.' + str(os.getpid()) + '.next')
+    with tmp.open('x') as out:
+        os.chmod(tmp, 0o600)
+        json.dump({'next_route': (start + 1) % count}, out)
+        out.flush(); os.fsync(out.fileno())
+    os.replace(tmp, p)
+    fd = os.open(p.parent, os.O_RDONLY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
+    print(start)
+PY
+) || { log "REPLAY-ORDER unavailable"; REPLAY_RC=1; REPLAY_START=-1; }
+log "REPLAY-ORDER first=$REPLAY_START routes=${#REPLAY_ROUTES[@]}"
+for ((i=0; REPLAY_START>=0 && i<${#REPLAY_ROUTES[@]}; i++)); do
+  route_index=$(((REPLAY_START + i) % ${#REPLAY_ROUTES[@]}))
+  IFS='|' read -r route_label route_host route_home route_machine <<< "${REPLAY_ROUTES[$route_index]}"
+  if [ "$route_host" = local ]; then
+    run_local_replay "$route_label" "$route_machine" || REPLAY_RC=1
+  else
+    run_remote_replay "$route_label" "$route_host" "$route_home" "$route_machine" || REPLAY_RC=1
+  fi
+done
+
+if [ "$MODE" = replay ]; then
+  log "REPLAY-END status=$REPLAY_RC"
+  exit "$REPLAY_RC"
+fi
+
+# Optional sources require both this explicit switch and their own explicit
+# source configuration.
+[ "${BORG_ENABLE_EMAIL_INGEST:-0}" = 1 ] && run_capped email - "$BIN/mem0-ingest-email"
+[ "${BORG_ENABLE_REPOSITORY_ACTIVITY:-0}" = 1 ] && run_capped repo-activity - "$BIN/mem0-repo-activity"
+[ "${BORG_ENABLE_PATROL_INGEST:-0}" = 1 ] && run_capped patrol-ingest - "$BIN/mem0-patrol-ingest"
+
+log "KICK-END"

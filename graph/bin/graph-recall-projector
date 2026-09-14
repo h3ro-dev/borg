@@ -1,0 +1,1125 @@
+#!/usr/bin/env python3
+"""Project active Graphiti facts into the derived prompt-recall collection.
+
+The Graphiti graphs remain the source of truth. This process only reads the
+scoped FalkorDB graphs and writes the configured rebuildable graph-recall Qdrant
+projection. Prompt hooks query that projection; they never call the semantic
+Graphiti search path.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import hashlib
+import json
+import math
+import os
+import re
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+import uuid
+import importlib.machinery
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+from zoneinfo import ZoneInfo
+
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_graph_projector", str(Path(__file__).resolve().parent / "borg_config.py")
+).load_module().CONFIG
+GRAPHITI_ROOT = CONFIG.graph_root
+if str(GRAPHITI_ROOT) not in sys.path:
+    sys.path.insert(0, str(GRAPHITI_ROOT))
+
+from graph_scope import (  # noqa: E402
+    ScopeMappingError,
+    ScopeRegistry,
+    group_key_for_scope,
+    is_valid_group_key,
+)
+
+
+PROJECTION_COLLECTION = str(CONFIG.values["BORG_QDRANT_COLLECTION"]) + "_graph_recall" if CONFIG.portable else os.environ.get("MEM0_GRAPH_RECALL_COLLECTION", str(CONFIG.values["BORG_QDRANT_COLLECTION"]) + "_graph_recall")
+PROJECTION_DIMENSION = int(CONFIG.values["BORG_EMBED_DIMS"])
+PROJECTION_DISTANCE = "Cosine"
+PROJECTION_NAMESPACE = uuid.UUID("b981c4af-aec4-4f9a-9bd9-6ef1af4c46a9")
+PROJECTION_COLLECTION_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+PRODUCTION_COLLECTION = PROJECTION_COLLECTION
+PROJECTOR_LIVE_ENV = "MEM0_GRAPH_PROJECTOR_LIVE"
+DEFAULT_QDRANT_URL = str(CONFIG.values["BORG_QDRANT_URL"]).rstrip("/")
+DEFAULT_GRAPH_HOST = str(CONFIG.values["BORG_FALKORDB_HOST"])
+DEFAULT_GRAPH_PORT = int(CONFIG.values["BORG_FALKORDB_PORT"])
+DEFAULT_STATE_PATH = GRAPHITI_ROOT / "data" / "backfill-state.json"
+DEFAULT_SCOPE_MAP_PATH = GRAPHITI_ROOT / "data" / "scope-graphs.json"
+DEFAULT_LOG_PATH = GRAPHITI_ROOT / "data" / "graph-recall-projector.log"
+DEFAULT_LEDGER_PATH = GRAPHITI_ROOT / "data" / "graph-recall-projector-ledger.json"
+EMBEDDING_DIMENSION = PROJECTION_DIMENSION
+SOURCE_BINDING_SCHEMA = "mem0-graph-source-bindings-v1"
+MAX_SOURCE_BINDING_EPISODES = 25
+MAX_SOURCE_BINDING_POINTS = 100
+# Rejections that can never succeed on retry; drain() resolves them once.
+TERMINAL_REJECTIONS = frozenset({
+    "source identity does not cover every graph episode",
+    "source identity episode limit exceeded",
+    "source identity point limit exceeded",
+})
+# Graphiti often yields entities with no RELATES_TO edge. project() retries
+# those until NO_EDGE_RESOLVE_AFTER_S, then resolves no_edges. drain() must
+# not treat the wait as FAIL: the live feed adds young pending every tick, so
+# counting them as failed makes a healthy incremental pass exit nonzero forever.
+NO_EDGE_YET = "no active edge for pending episode"
+NO_EDGE_RESOLVE_AFTER_S = 600.0
+WAITING_REJECTIONS = frozenset({NO_EDGE_YET})
+# Save the ledger every N attempted identities (and once at the end) instead
+# of rewriting the multi-megabyte file after every identity.
+LEDGER_SAVE_EVERY = 25
+_PAYLOAD_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_MDT = ZoneInfo("America/Denver")
+
+
+class ProjectionRejected(ValueError):
+    """An edge is unsafe or incomplete for automatic prompt recall."""
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def new_ledger() -> dict[str, Any]:
+    return {
+        "schema": 1,
+        "delivered": {},
+        "resolved": {},
+        "failures": {},
+    }
+
+
+def load_ledger(path: str | Path) -> dict[str, Any]:
+    target = Path(path)
+    if not target.exists():
+        return new_ledger()
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot read projector ledger {target}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError("projector ledger must be a JSON object")
+    ledger = dict(raw)
+    ledger["schema"] = 1
+    for field in ("delivered", "resolved", "failures"):
+        value = ledger.setdefault(field, {})
+        if not isinstance(value, dict):
+            raise ValueError(f"projector ledger field {field!r} must be an object")
+    return ledger
+
+
+def save_ledger_atomic(path: str | Path, ledger: dict[str, Any]) -> None:
+    """Persist only projector-owned delivery state through atomic replace."""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(ledger, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, target)
+    except Exception:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp_name)
+        raise
+
+
+class ProjectionLedger:
+    """The projector's own append/resolve ledger; never feed state."""
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.data = load_ledger(self.path)
+        self.dirty = False
+
+    def done(self, identity: str) -> bool:
+        return identity in self.data["delivered"] or identity in self.data["resolved"]
+
+    def record_failure(
+        self, identity: str, error_type: str, error: str | None = None
+    ) -> None:
+        previous = self.data["failures"].get(identity) or {}
+        entry = {
+            "attempts": int(previous.get("attempts") or 0) + 1,
+            "error_type": str(error_type),
+            "last_attempt_mdt": now_mdt(),
+        }
+        if error:
+            entry["error"] = str(error)[:200]
+        self.data["failures"][identity] = entry
+        self.dirty = True
+
+    def record_delivery(self, identity: str, result: dict[str, Any]) -> None:
+        self.data["delivered"][identity] = {
+            "delivered_at_mdt": now_mdt(),
+            "upserted": int(result.get("upserted") or 0),
+        }
+        self.data["failures"].pop(identity, None)
+        self.dirty = True
+
+    def record_resolution(self, identity: str, result: dict[str, Any]) -> None:
+        self.data["resolved"][identity] = {
+            "resolved_at_mdt": now_mdt(),
+            "reason": str(result.get("resolved") or "resolved"),
+        }
+        self.data["failures"].pop(identity, None)
+        self.dirty = True
+
+    def save(self) -> None:
+        if self.dirty:
+            save_ledger_atomic(self.path, self.data)
+            self.dirty = False
+
+
+def now_mdt() -> str:
+    return datetime.now(_MDT).strftime("%Y-%m-%dT%H:%M:%S MDT")
+
+
+async def maybe_await(value: Any) -> Any:
+    if hasattr(value, "__await__"):
+        return await value
+    return value
+
+
+def _value(edge: dict[str, Any], field: str, default: Any = None) -> Any:
+    if field in edge:
+        return edge[field]
+    for container_name in ("properties", "attributes", "payload"):
+        container = edge.get(container_name)
+        if isinstance(container, dict) and field in container:
+            return container[field]
+    return default
+
+
+def _nonempty(value: Any) -> bool:
+    return value not in (None, "", False)
+
+
+def _truthy(value: Any) -> bool:
+    if value is True:
+        return True
+    return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _as_text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _as_time(value: Any) -> str | None:
+    if value in (None, "", False):
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _episodes(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if item not in (None, "")]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed if item not in (None, "")]
+        return [item.strip() for item in text.split(",") if item.strip()]
+    return []
+
+
+def _source_bindings(
+    episodes: Iterable[str],
+    *,
+    scope: str,
+    source_graph_key: str,
+    processed: Mapping[str, Any] | None,
+) -> list[dict[str, str]]:
+    """Bind every edge episode to its complete processed source identity."""
+
+    if not isinstance(processed, Mapping):
+        raise ProjectionRejected("source identity map is unavailable")
+    episode_uuids = list(dict.fromkeys(str(value).strip() for value in episodes))
+    if not episode_uuids or any(not value for value in episode_uuids):
+        raise ProjectionRejected("source identity has no graph episode")
+    if len(episode_uuids) > MAX_SOURCE_BINDING_EPISODES:
+        raise ProjectionRejected("source identity episode limit exceeded")
+
+    expected = set(episode_uuids)
+    by_episode: dict[str, list[dict[str, str]]] = {
+        episode_uuid: [] for episode_uuid in episode_uuids
+    }
+    for raw_point_id, raw_entry in processed.items():
+        if not isinstance(raw_entry, Mapping):
+            continue
+        episode_uuid = str(raw_entry.get("episode_id") or "").strip()
+        if episode_uuid not in expected:
+            continue
+        point_id = str(raw_point_id).strip()
+        recorded_point_id = str(raw_entry.get("point_id") or "").strip()
+        digest = str(
+            raw_entry.get("payload_digest") or raw_entry.get("digest") or ""
+        ).strip()
+        entry_scope = str(raw_entry.get("scope") or "").strip()
+        entry_graph_key = str(raw_entry.get("group_id") or "").strip()
+        if (
+            not point_id
+            or recorded_point_id != point_id
+            or entry_scope != scope
+            or entry_graph_key != source_graph_key
+            or _PAYLOAD_DIGEST_RE.fullmatch(digest) is None
+        ):
+            raise ProjectionRejected("source identity entry is incomplete or mismatched")
+        by_episode[episode_uuid].append(
+            {
+                "graph_key": source_graph_key,
+                "scope": scope,
+                "episode_uuid": episode_uuid,
+                "point_id": point_id,
+                "payload_digest": digest,
+            }
+        )
+
+    if any(not bindings for bindings in by_episode.values()):
+        raise ProjectionRejected("source identity does not cover every graph episode")
+    bindings = sorted(
+        (binding for values in by_episode.values() for binding in values),
+        key=lambda value: (
+            value["episode_uuid"],
+            value["point_id"],
+            value["payload_digest"],
+        ),
+    )
+    identities = {
+        (value["episode_uuid"], value["point_id"], value["payload_digest"])
+        for value in bindings
+    }
+    if len(bindings) != len(identities):
+        raise ProjectionRejected("source identity contains duplicate bindings")
+    if len(bindings) > MAX_SOURCE_BINDING_POINTS:
+        raise ProjectionRejected("source identity point limit exceeded")
+    return bindings
+
+
+def _validate_pending_source(
+    pending: Mapping[str, Any],
+    processed: Mapping[str, Any] | None,
+    *,
+    scope: str,
+    source_graph_key: str,
+) -> None:
+    if not isinstance(processed, Mapping):
+        raise ProjectionRejected("source identity map is unavailable")
+    episode_id = str(pending.get("episode_id") or "").strip()
+    point_id = str(pending.get("point_id") or "").strip()
+    digest = str(pending.get("payload_digest") or "").strip()
+    identity = str(pending.get("identity") or "").strip()
+    if (
+        not episode_id
+        or not point_id
+        or _PAYLOAD_DIGEST_RE.fullmatch(digest) is None
+        or identity != f"{episode_id}:{point_id}:{digest}"
+    ):
+        raise ProjectionRejected("pending source identity is incomplete")
+    entry = processed.get(point_id)
+    if not isinstance(entry, Mapping):
+        raise ProjectionRejected("pending source identity is not processed")
+    if (
+        str(entry.get("point_id") or "").strip() != point_id
+        or str(entry.get("episode_id") or "").strip() != episode_id
+        or str(entry.get("payload_digest") or entry.get("digest") or "").strip()
+        != digest
+        or str(entry.get("scope") or "").strip() != scope
+        or str(entry.get("group_id") or "").strip() != source_graph_key
+    ):
+        raise ProjectionRejected("pending source identity changed before projection")
+
+
+def _embedding(value: Any) -> list[float]:
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            value = json.loads(text) if text.startswith("[") else text.split(",")
+        except (TypeError, ValueError):
+            raise ProjectionRejected("malformed fact embedding") from None
+    if not isinstance(value, (list, tuple)) or len(value) != PROJECTION_DIMENSION:
+        raise ProjectionRejected(f"fact embedding dimension is not {PROJECTION_DIMENSION}")
+    vector: list[float] = []
+    for item in value:
+        if isinstance(item, bool):
+            raise ProjectionRejected("fact embedding contains a boolean")
+        try:
+            number = float(item)
+        except (TypeError, ValueError):
+            raise ProjectionRejected("fact embedding contains a non-number") from None
+        if not math.isfinite(number):
+            raise ProjectionRejected("fact embedding contains a non-finite number")
+        vector.append(number)
+    return vector
+
+
+def _is_retired(edge: dict[str, Any]) -> bool:
+    status = str(_value(edge, "status", "") or "").strip().lower()
+    if status in {"tombstoned", "decayed", "retired", "invalidated"}:
+        return True
+    if _nonempty(_value(edge, "invalid_at")) or _nonempty(_value(edge, "expired_at")):
+        return True
+    attributes = _value(edge, "attributes", {})
+    if isinstance(attributes, dict) and (
+        _truthy(attributes.get("is_canary")) or _truthy(attributes.get("canary"))
+    ):
+        return True
+    return _truthy(_value(edge, "is_canary")) or _truthy(_value(edge, "canary"))
+
+
+def validate_scope_key(scope: Any, source_graph_key: Any) -> tuple[str, str]:
+    """Validate the GF-02 scope-to-Graphiti key contract without defaults."""
+
+    if not isinstance(scope, str) or not scope.strip():
+        raise ProjectionRejected("missing source scope")
+    if not isinstance(source_graph_key, str) or not source_graph_key.strip():
+        raise ProjectionRejected("missing source graph key")
+    normalized = scope.strip()
+    key = source_graph_key.strip()
+    if not is_valid_group_key(key) or key != group_key_for_scope(normalized):
+        raise ProjectionRejected("unknown source graph key")
+    return normalized, key
+
+
+def projection_id(edge_uuid: Any, scope: str, source_graph_key: str) -> str:
+    """Return the stable Qdrant point ID for one scoped Graphiti edge."""
+
+    normalized_scope, key = validate_scope_key(scope, source_graph_key)
+    edge_id = str(edge_uuid or "").strip()
+    if not edge_id:
+        raise ProjectionRejected("missing graph edge UUID")
+    name = json.dumps(
+        {"edge_uuid": edge_id, "scope": normalized_scope, "source_graph_key": key},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return str(uuid.uuid5(PROJECTION_NAMESPACE, name))
+
+
+deterministic_projection_id = projection_id
+
+
+def edge_to_point(
+    edge: dict[str, Any],
+    *,
+    scope: str,
+    source_graph_key: str,
+    pending: dict[str, Any] | None = None,
+    processed: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Convert a Graphiti RELATES_TO record into one derived Qdrant point."""
+
+    if not isinstance(edge, dict):
+        raise ProjectionRejected("edge record is not an object")
+    normalized_scope, key = validate_scope_key(scope, source_graph_key)
+    edge_group = _value(edge, "group_id")
+    if edge_group != key:
+        raise ProjectionRejected("edge group key is missing or mismatched")
+    edge_scope = _value(edge, "scope")
+    if edge_scope not in (None, normalized_scope):
+        raise ProjectionRejected("edge scope is mismatched")
+    if _is_retired(edge):
+        raise ProjectionRejected("edge is retired, invalidated, or canary")
+
+    fact = _as_text(_value(edge, "fact"))
+    if not fact:
+        raise ProjectionRejected("missing graph fact")
+    edge_uuid = str(_value(edge, "uuid") or _value(edge, "edge_uuid") or "").strip()
+    if not edge_uuid:
+        raise ProjectionRejected("missing graph edge UUID")
+    vector = _embedding(_value(edge, "fact_embedding"))
+    episode_uuids = list(dict.fromkeys(_episodes(_value(edge, "episodes"))))
+    source_bindings = _source_bindings(
+        episode_uuids,
+        scope=normalized_scope,
+        source_graph_key=key,
+        processed=processed,
+    )
+    valid_at = _as_time(_value(edge, "valid_at"))
+    invalid_at = _as_time(_value(edge, "invalid_at"))
+    if invalid_at is not None:
+        raise ProjectionRejected("edge is invalidated")
+    expired_at = _as_time(_value(edge, "expired_at"))
+    if expired_at is not None:
+        raise ProjectionRejected("edge is expired")
+
+    payload: dict[str, Any] = {
+        "data": fact,
+        "scope": normalized_scope,
+        "source": "graphiti",
+        "source_graph_key": key,
+        "graph_edge_uuid": edge_uuid,
+        "edge_uuid": edge_uuid,
+        "episode_uuids": episode_uuids,
+        "source_binding_schema": SOURCE_BINDING_SCHEMA,
+        "source_bindings": source_bindings,
+        "valid_at": valid_at,
+        "invalid_at": None,
+        "expired_at": None,
+        "kind": "graph-fact",
+        "status": "active",
+        "is_graph": True,
+        "is_canary": False,
+        "provenance": {
+            "source": "graphiti",
+            "graph_edge_uuid": edge_uuid,
+            "source_graph_key": key,
+            "episode_uuids": episode_uuids,
+        },
+    }
+    if pending:
+        pending_episode = pending.get("episode_id")
+        if pending_episode not in (None, "") and str(pending_episode) not in episode_uuids:
+            raise ProjectionRejected("edge does not belong to pending episode")
+        _validate_pending_source(
+            pending,
+            processed,
+            scope=normalized_scope,
+            source_graph_key=key,
+        )
+
+    return {
+        "id": projection_id(edge_uuid, normalized_scope, key),
+        "vector": vector,
+        "payload": payload,
+    }
+
+
+build_projection_point = edge_to_point
+
+
+def _records_from_graph_result(result: Any) -> list[dict[str, Any]]:
+    if isinstance(result, tuple) and result:
+        result = result[0]
+    if isinstance(result, dict):
+        result = result.get("result", result.get("records", []))
+    if isinstance(result, list) and result and all(isinstance(item, dict) for item in result):
+        return result
+    header = getattr(result, "header", None)
+    rows = getattr(result, "result_set", None)
+    if not isinstance(header, list) or not isinstance(rows, list):
+        return []
+    names = []
+    for item in header:
+        if isinstance(item, (list, tuple)) and len(item) >= 2:
+            # falkordb returns [column_type, column_name]; the name is item[1]
+            # (measured live 2026-09-03: using item[0] collapsed every row to {"1": ...}).
+            names.append(str(item[1]))
+        elif isinstance(item, (list, tuple)) and item:
+            names.append(str(item[0]))
+        else:
+            names.append(str(item))
+    return [dict(zip(names, row)) for row in rows if isinstance(row, (list, tuple))]
+
+
+GRAPH_EDGE_QUERY = """
+MATCH (n:Entity)-[r:RELATES_TO]->(m:Entity)
+WHERE r.group_id = $group_id
+RETURN
+    r.uuid AS uuid,
+    r.group_id AS group_id,
+    r.fact AS fact,
+    r.fact_embedding AS fact_embedding,
+    r.episodes AS episodes,
+    r.created_at AS created_at,
+    r.valid_at AS valid_at,
+    r.invalid_at AS invalid_at,
+    r.expired_at AS expired_at,
+    properties(r) AS attributes
+ORDER BY r.uuid
+"""
+
+
+class GraphEdgeSource:
+    """Read-only Graphiti edge source backed by FalkorDB ro_query."""
+
+    def __init__(
+        self,
+        *,
+        host: str = DEFAULT_GRAPH_HOST,
+        port: int = DEFAULT_GRAPH_PORT,
+        timeout_ms: int = 250,
+        database_factory: Any | None = None,
+        reader: Any | None = None,
+    ):
+        self.host = host
+        self.port = int(port)
+        self.timeout_ms = int(timeout_ms)
+        self._database_factory = database_factory
+        self._reader = reader
+        self._database: Any = None
+
+    async def _database_client(self) -> Any:
+        if self._database is not None:
+            return self._database
+        factory = self._database_factory
+        if factory is None:
+            from falkordb.asyncio import FalkorDB
+
+            factory = FalkorDB
+        self._database = factory(host=self.host, port=self.port)
+        return self._database
+
+    async def edges(self, source_graph_key: str) -> list[dict[str, Any]]:
+        if self._reader is not None:
+            return _records_from_graph_result(await maybe_await(self._reader(source_graph_key)))
+        database = await self._database_client()
+        graph = database.select_graph(source_graph_key)
+        try:
+            result = await graph.ro_query(
+                GRAPH_EDGE_QUERY,
+                {"group_id": source_graph_key},
+                timeout=self.timeout_ms,
+            )
+        except Exception as exc:
+            # A registered scope can precede its first successful graph write.
+            if type(exc).__name__ == "ResponseError" and str(exc) == "Invalid graph operation on empty key":
+                return []
+            raise
+        return _records_from_graph_result(result)
+
+    async def close(self) -> None:
+        if self._database is not None and hasattr(self._database, "aclose"):
+            await maybe_await(self._database.aclose())
+        self._database = None
+
+
+class QdrantProjectionStore:
+    """Small HTTP-only Qdrant client for the derived collection."""
+
+    def __init__(
+        self,
+        *,
+        collection: str = PROJECTION_COLLECTION,
+        base_url: str = DEFAULT_QDRANT_URL,
+        timeout_s: float = 5.0,
+    ):
+        if not PROJECTION_COLLECTION_RE.fullmatch(collection):
+            raise ValueError("invalid Qdrant collection name")
+        self.collection = collection
+        self.base_url = base_url.rstrip("/")
+        self.timeout_s = float(timeout_s)
+
+    def _url(self, suffix: str = "") -> str:
+        return f"{self.base_url}/collections/{self.collection}{suffix}"
+
+    def _request(self, method: str, suffix: str = "", body: dict[str, Any] | None = None) -> Any:
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        request = urllib.request.Request(
+            self._url(suffix),
+            data=data,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method=method,
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+            raw = response.read().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+    def collection_exists(self) -> bool:
+        try:
+            self._request("GET")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return False
+            raise
+        return True
+
+    def ensure_collection(self) -> None:
+        if self.collection_exists():
+            return
+        try:
+            result = self._request(
+                "PUT",
+                body={"vectors": {"size": PROJECTION_DIMENSION, "distance": PROJECTION_DISTANCE}},
+            )
+        except urllib.error.HTTPError as exc:
+            if exc.code != 409:
+                raise
+            return
+        if isinstance(result, dict) and result.get("status") == "error":
+            raise RuntimeError("Qdrant rejected projection collection creation")
+
+    def upsert(self, points: list[dict[str, Any]]) -> None:
+        if not points:
+            return
+        result = self._request(
+            "PUT",
+            "/points?wait=true",
+            body={"points": points},
+        )
+        if isinstance(result, dict) and result.get("status") == "error":
+            raise RuntimeError("Qdrant rejected projection upsert")
+
+    def point_ids(self) -> set[str]:
+        ids: set[str] = set()
+        offset: Any = None
+        while True:
+            body: dict[str, Any] = {
+                "limit": 256,
+                "with_payload": False,
+                "with_vector": False,
+            }
+            if offset is not None:
+                body["offset"] = offset
+            result = self._request("POST", "/points/scroll", body=body)
+            page = result.get("result") if isinstance(result, dict) else None
+            if not isinstance(page, dict):
+                raise RuntimeError("Qdrant projection scroll response is malformed")
+            points = page.get("points") or []
+            if not isinstance(points, list):
+                raise RuntimeError("Qdrant projection points are malformed")
+            ids.update(
+                str(point["id"])
+                for point in points
+                if isinstance(point, dict) and "id" in point
+            )
+            offset = page.get("next_page_offset")
+            if offset is None:
+                return ids
+
+    def delete_ids(self, point_ids: Iterable[str]) -> int:
+        ids = sorted({str(point_id) for point_id in point_ids if point_id})
+        if not ids:
+            return 0
+        result = self._request(
+            "POST",
+            "/points/delete?wait=true",
+            body={"points": ids},
+        )
+        if isinstance(result, dict) and result.get("status") == "error":
+            raise RuntimeError("Qdrant rejected stale projection deletion")
+        return len(ids)
+
+    def close(self) -> None:
+        return None
+
+
+async def _source_edges(source: Any, source_graph_key: str) -> list[dict[str, Any]]:
+    for method_name in ("edges", "read_edges", "edges_for_group"):
+        method = getattr(source, method_name, None)
+        if callable(method):
+            result = await maybe_await(method(source_graph_key))
+            records = _records_from_graph_result(result)
+            return [record for record in records if isinstance(record, dict)]
+    raise TypeError("graph source must provide edges(group_id)")
+
+
+async def _store_call(store: Any, method_name: str, *args: Any) -> Any:
+    method = getattr(store, method_name, None)
+    if not callable(method):
+        raise TypeError(f"projection store must provide {method_name}")
+    return await maybe_await(method(*args))
+
+
+def _validated_registry(path: str | Path) -> dict[str, str]:
+    registry_path = Path(path)
+    if not registry_path.is_file():
+        raise ProjectionRejected("scope registry unavailable: missing")
+    try:
+        registered = ScopeRegistry(registry_path).registered()
+    except (OSError, ValueError, ScopeMappingError) as exc:
+        raise ProjectionRejected(f"scope registry unavailable: {type(exc).__name__}") from exc
+    if not registered:
+        raise ProjectionRejected("scope registry unavailable: no registered scopes")
+    for scope, key in registered.items():
+        validate_scope_key(scope, key)
+    return registered
+
+
+class GraphRecallProjector:
+    """Idempotent pending delivery and full scoped-graph rebuild."""
+
+    def __init__(
+        self,
+        source: Any,
+        store: Any,
+        *,
+        scope_map_path: str | Path = DEFAULT_SCOPE_MAP_PATH,
+        batch_size: int = 128,
+        ledger_path: str | Path | None = None,
+        state_path: str | Path = DEFAULT_STATE_PATH,
+    ):
+        self.source = source
+        self.store = store
+        self.scope_map_path = Path(scope_map_path)
+        self.batch_size = max(1, int(batch_size))
+        self.ledger_path = Path(ledger_path) if ledger_path is not None else None
+        self.state_path = Path(state_path)
+        self.last_drain_stats: dict[str, int] = {
+            "attempted": 0,
+            "delivered": 0,
+            "resolved": 0,
+            "failed": 0,
+            "skipped": 0,
+            "waiting": 0,
+        }
+        self.last_fail_class: str | None = None
+
+    async def project(
+        self,
+        identity: str,
+        pending: dict[str, Any],
+        *,
+        processed: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(pending, dict):
+            raise ProjectionRejected("pending projection is not an object")
+        if str(pending.get("identity") or identity) != str(identity):
+            raise ProjectionRejected("pending identity mismatch")
+        scope, key = validate_scope_key(pending.get("scope"), pending.get("group_id"))
+        episode_id = str(pending.get("episode_id") or "").strip()
+        if not episode_id:
+            raise ProjectionRejected("pending episode is missing")
+        if processed is None:
+            from backfill import load_state
+
+            processed = load_state(self.state_path).get("graph_processed")
+        _validate_pending_source(
+            pending,
+            processed,
+            scope=scope,
+            source_graph_key=key,
+        )
+        cache = getattr(self, "_edge_cache", None)
+        if cache is not None and key in cache:
+            records = cache[key]
+        else:
+            records = await _source_edges(self.source, key)
+            if cache is not None:
+                cache[key] = records
+        matching = [
+            edge
+            for edge in records
+            if episode_id in _episodes(_value(edge, "episodes"))
+            and not _is_retired(edge)
+        ]
+        if not matching:
+            # An episode can legitimately yield entities but no RELATES_TO edge.
+            # Once the feed has certainly finished it (10 min), resolve the
+            # pending item as "nothing to project" instead of failing every
+            # tick (2026-09-03: 47 of 68 pending were such episodes).
+            created = str(pending.get("created_at_mdt") or "")
+            try:
+                age_s = (datetime.now(timezone.utc) - datetime.fromisoformat(created)).total_seconds()
+            except (TypeError, ValueError):
+                age_s = 0.0
+            if age_s >= NO_EDGE_RESOLVE_AFTER_S:
+                return {"identity": str(identity), "upserted": 0, "resolved": "no_edges"}
+            return {"identity": str(identity), "upserted": 0, "waiting": "no_edges_yet"}
+        points = [
+            edge_to_point(
+                edge,
+                scope=scope,
+                source_graph_key=key,
+                pending=pending,
+                processed=processed,
+            )
+            for edge in matching
+        ]
+        await _store_call(self.store, "ensure_collection")
+        result = await _store_call(self.store, "upsert", points)
+        if result is False:
+            raise RuntimeError("projection upsert was not acknowledged")
+        return {"identity": str(identity), "upserted": len(points)}
+
+    async def drain(self, state_path: str | Path) -> dict[str, int]:
+        """Deliver new pending identities without writing feed state."""
+
+        from backfill import load_state
+
+        state = load_state(state_path)
+        processed = state.get("graph_processed")
+        ledger_path = self.ledger_path or Path(state_path).with_name(
+            "graph-recall-projector-ledger.json"
+        )
+        ledger = ProjectionLedger(ledger_path)
+        stats = {
+            "attempted": 0,
+            "delivered": 0,
+            "resolved": 0,
+            "failed": 0,
+            "skipped": 0,
+            "waiting": 0,
+        }
+        fail_reasons: dict[str, int] = {}
+        self._edge_cache = {}
+        for identity, pending in sorted(state["projection_pending"].items()):
+            if ledger.done(identity):
+                stats["skipped"] += 1
+                continue
+            stats["attempted"] += 1
+            try:
+                result = await self.project(identity, pending, processed=processed)
+            except ProjectionRejected as exc:
+                message = str(exc)
+                if message in TERMINAL_REJECTIONS:
+                    # 2026-09-09: these rejections are structural (the pending
+                    # source identity can never cover episodes the graph edge
+                    # gained later); retrying every tick burned a core for
+                    # days (277 identities x ~300 attempts). Resolve once.
+                    ledger.record_resolution(
+                        identity, {"resolved": "terminal_rejection:" + message}
+                    )
+                    stats["resolved"] += 1
+                elif message in WAITING_REJECTIONS:
+                    stats["waiting"] += 1
+                else:
+                    ledger.record_failure(identity, type(exc).__name__, message)
+                    stats["failed"] += 1
+                    fail_reasons[message] = fail_reasons.get(message, 0) + 1
+            except Exception as exc:  # noqa: BLE001 - leave pending for retry
+                ledger.record_failure(identity, type(exc).__name__, str(exc))
+                stats["failed"] += 1
+                name = type(exc).__name__
+                fail_reasons[name] = fail_reasons.get(name, 0) + 1
+            else:
+                if result.get("waiting"):
+                    stats["waiting"] += 1
+                elif result.get("resolved"):
+                    ledger.record_resolution(identity, result)
+                    stats["resolved"] += 1
+                else:
+                    ledger.record_delivery(identity, result)
+                    stats["delivered"] += 1
+            if stats["attempted"] % LEDGER_SAVE_EVERY == 0:
+                ledger.save()
+        ledger.save()
+        self._edge_cache = None
+        self.last_drain_stats = stats
+        self.last_fail_class = (
+            max(fail_reasons, key=fail_reasons.get) if fail_reasons else None
+        )
+        # Keep the original compact return contract for existing callers; the
+        # richer O(new) counters are available to the CLI receipt and tests.
+        return {
+            "attempted": stats["attempted"],
+            "delivered": stats["delivered"],
+            "failed": stats["failed"],
+        }
+
+    async def rebuild(self) -> dict[str, Any]:
+        from backfill import load_state
+
+        registered = _validated_registry(self.scope_map_path)
+        processed = load_state(self.state_path).get("graph_processed")
+        if not isinstance(processed, Mapping):
+            raise ProjectionRejected("source identity map is unavailable")
+        await _store_call(self.store, "ensure_collection")
+        desired: dict[str, dict[str, Any]] = {}
+        skipped = 0
+        scopes = 0
+        edges_seen = 0
+        for scope, key in sorted(registered.items()):
+            scopes += 1
+            records = await _source_edges(self.source, key)
+            edges_seen += len(records)
+            for edge in records:
+                try:
+                    point = edge_to_point(
+                        edge,
+                        scope=scope,
+                        source_graph_key=key,
+                        processed=processed,
+                    )
+                except ProjectionRejected:
+                    skipped += 1
+                    continue
+                point_id = str(point["id"])
+                previous = desired.get(point_id)
+                if previous is not None and previous != point:
+                    raise ProjectionRejected("projection ID collision")
+                desired[point_id] = point
+
+        points = list(desired.values())
+        for start in range(0, len(points), self.batch_size):
+            result = await _store_call(self.store, "upsert", points[start : start + self.batch_size])
+            if result is False:
+                raise RuntimeError("projection upsert was not acknowledged")
+
+        existing = await _store_call(self.store, "point_ids")
+        stale = set(existing) - set(desired)
+        deleted = await _store_call(self.store, "delete_ids", stale)
+        return {
+            "scopes": scopes,
+            "edges_seen": edges_seen,
+            "projected": len(points),
+            "skipped": skipped,
+            "deleted": int(deleted or 0),
+            "pending": 0,
+            "outcome": "PASS",
+        }
+
+    full_rebuild = rebuild
+
+
+def safe_receipt(
+    *,
+    operation: str,
+    status: str,
+    elapsed_ms: int,
+    counts: dict[str, Any] | None = None,
+    error_type: str | None = None,
+) -> dict[str, Any]:
+    """Build a credential- and content-free projector receipt."""
+
+    receipt: dict[str, Any] = {
+        "schema": "graph-recall-projector/1",
+        "at_mdt": now_mdt(),
+        "operation": operation,
+        "status": status,
+        "elapsed_ms": max(0, int(elapsed_ms)),
+    }
+    if counts:
+        receipt.update(
+            {
+                key: int(value)
+                for key, value in counts.items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            }
+        )
+    if error_type:
+        receipt["error_type"] = str(error_type)
+    return receipt
+
+
+def append_receipt(path: str | Path, receipt: dict[str, Any]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(receipt, sort_keys=True) + "\n")
+
+
+def _test_collection_allowed(collection: str) -> bool:
+    return collection.startswith("test_") or collection.startswith("memory_one_door_")
+
+
+async def async_main(args: argparse.Namespace) -> int:
+    collection = args.collection
+    operation = "rebuild" if args.rebuild else "pending"
+    if collection == PRODUCTION_COLLECTION and not env_flag(PROJECTOR_LIVE_ENV):
+        receipt = safe_receipt(
+            operation=operation,
+            status="NOT_RUN",
+            elapsed_ms=0,
+            counts={"attempted": 0, "projected": 0, "skipped": 0, "deleted": 0},
+        )
+        receipt["reason"] = "default-off-production-collection"
+        print(json.dumps(receipt, sort_keys=True))
+        return 0
+    if collection != PRODUCTION_COLLECTION and not (args.test or _test_collection_allowed(collection)):
+        receipt = safe_receipt(
+            operation=operation,
+            status="NOT_RUN",
+            elapsed_ms=0,
+            counts={"attempted": 0, "projected": 0, "skipped": 0, "deleted": 0},
+        )
+        receipt["reason"] = "explicit-test-collection-required"
+        print(json.dumps(receipt, sort_keys=True))
+        return 0
+
+    started = time.monotonic()
+    source = GraphEdgeSource(host=args.graph_host, port=args.graph_port)
+    store = QdrantProjectionStore(collection=collection, base_url=args.qdrant_url)
+    projector = GraphRecallProjector(
+        source,
+        store,
+        scope_map_path=args.scope_map,
+        ledger_path=args.ledger,
+        state_path=args.state,
+    )
+    try:
+        result = await (projector.rebuild() if args.rebuild else projector.drain(args.state))
+        if operation == "pending":
+            drain_stats = projector.last_drain_stats
+            result = {
+                "attempted": result.get("attempted", 0),
+                "projected": result.get("delivered", 0),
+                "skipped": drain_stats.get("skipped", 0),
+                "deleted": 0,
+                "resolved": drain_stats.get("resolved", 0),
+                "failed": drain_stats.get("failed", 0),
+                "waiting": drain_stats.get("waiting", 0),
+                **result,
+            }
+        failed = int(result.get("failed", 0) or 0)
+        receipt = safe_receipt(
+            operation=operation,
+            status="FAIL" if operation == "pending" and failed > 0 else "PASS",
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            counts=result,
+            error_type=projector.last_fail_class if failed else None,
+        )
+        if projector.last_fail_class and failed:
+            receipt["fail_class"] = projector.last_fail_class
+            print(
+                f"graph-recall-projector FAIL class={projector.last_fail_class} failed={failed}",
+                file=sys.stderr,
+            )
+        print(json.dumps(receipt, sort_keys=True))
+        append_receipt(args.log, receipt)
+        return 1 if receipt["status"] == "FAIL" else 0
+    except Exception as exc:  # noqa: BLE001 - CLI reports a safe type-only failure
+        receipt = safe_receipt(
+            operation=operation,
+            status="FAIL",
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            error_type=type(exc).__name__,
+        )
+        print(
+            f"graph-recall-projector FAIL class={type(exc).__name__}",
+            file=sys.stderr,
+        )
+        print(json.dumps(receipt, sort_keys=True))
+        append_receipt(args.log, receipt)
+        return 1
+    finally:
+        await source.close()
+        store.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="project scoped Graphiti facts for prompt recall")
+    parser.add_argument("--rebuild", action="store_true", help="rebuild all registered scoped graphs")
+    parser.add_argument("--state", type=Path, default=DEFAULT_STATE_PATH)
+    parser.add_argument("--scope-map", type=Path, default=DEFAULT_SCOPE_MAP_PATH)
+    parser.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER_PATH)
+    parser.add_argument("--collection", default=PROJECTION_COLLECTION)
+    parser.add_argument("--qdrant-url", default=DEFAULT_QDRANT_URL)
+    parser.add_argument("--graph-host", default=DEFAULT_GRAPH_HOST)
+    parser.add_argument("--graph-port", type=int, default=DEFAULT_GRAPH_PORT)
+    parser.add_argument("--log", type=Path, default=DEFAULT_LOG_PATH)
+    parser.add_argument("--test", action="store_true", help="allow only a non-production test collection")
+    args = parser.parse_args(argv)
+    return asyncio.run(async_main(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

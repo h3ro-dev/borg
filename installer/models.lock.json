@@ -1,0 +1,15 @@
+{
+  "schema": "borg-model-lock/v1",
+  "models": {
+    "qwen3:4b": {
+      "manifest_digest": "sha256:359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7",
+      "bytes": 2497293444,
+      "manifest_url": "https://registry.ollama.ai/v2/library/qwen3/manifests/4b"
+    },
+    "nomic-embed-text:latest": {
+      "manifest_digest": "sha256:0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+      "bytes": 274302030,
+      "manifest_url": "https://registry.ollama.ai/v2/library/nomic-embed-text/manifests/latest"
+    }
+  }
+}

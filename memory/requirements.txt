@@ -1,0 +1,7 @@
+# Pinned native runtime set for the supplied mem0 sources (Python 3.12).
+mem0ai==0.1.115
+qdrant-client==1.14.2
+ollama==0.5.4
+fastmcp==2.11.3
+httpx==0.28.1
+numpy==2.2.6

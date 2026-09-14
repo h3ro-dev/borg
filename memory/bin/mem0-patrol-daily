@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Daily site-status patrol for an explicitly configured BORG install.
+
+Chain, in order — each step only sees the previous step's finished output:
+  1. mem0-patrol-launch --wait   Spark lane per registry site; block until done
+  2. mem0-patrol-verify          re-measure every claim with direct GETs;
+                                 write clients/patrols/AUDIT-<date>.txt
+  3. mem0-patrol-ingest          store audit-supported facts (idempotent)
+
+The wait step is load-bearing: on 2026-08-20 ingest ran while lanes were
+still writing and failed 9/9. A lane that dies (e.g. Spark usage cap) simply
+produces no parseable report; the audit names it and the day still completes.
+"""
+
+import re
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+from borg_config import CONFIG, BorgConfigError
+
+BIN = CONFIG.mem0_root / "bin"
+PATROLS = Path(os.environ["BORG_PATROL_OUTPUT_DIR"]).expanduser() if os.environ.get("BORG_PATROL_OUTPUT_DIR") else None
+ENV = {**os.environ, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "BORG_HOME": str(CONFIG.home)}
+
+
+def step(argv, timeout, stdout=None):
+    print(f"\n--- {' '.join(Path(str(argv[0])).name if i == 0 else str(a) for i, a in enumerate(argv))} ---", flush=True)
+    try:
+        r = subprocess.run([str(a) for a in argv], env=ENV, timeout=timeout,
+                           stdout=stdout, stderr=subprocess.STDOUT if stdout else None)
+        return r.returncode
+    except subprocess.TimeoutExpired:
+        print(f"TIMEOUT after {timeout}s", flush=True)
+        return 124
+    except Exception as e:
+        print(f"STEP FAILED: {e}", flush=True)
+        return 1
+
+
+def main():
+    if PATROLS is None:
+        raise BorgConfigError("BORG_PATROL_OUTPUT_DIR is required")
+    t0 = datetime.now(ZoneInfo("America/Denver"))
+    date = t0.strftime("%Y-%m-%d")
+    print(f"\n===== site patrol daily — {t0.strftime('%Y-%m-%d %-I:%M %p')} MDT =====", flush=True)
+
+    rc_launch = step([BIN / "mem0-patrol-launch", "--wait", "45"], timeout=50 * 60)
+
+    files = sorted(PATROLS.glob(f"*-{date}.out"))
+    rc_audit = 1
+    if files:
+        audit_f = PATROLS / f"AUDIT-{date}.txt"
+        with open(audit_f, "w") as f:
+            rc_audit = step([BIN / "mem0-patrol-verify", *files], timeout=15 * 60, stdout=f)
+        text = audit_f.read_text(errors="ignore")
+        accs = re.findall(r"accuracy (\d+)/(\d+) \((\d+)%\)", text)
+        unparseable = text.count("NO PARSEABLE PATROL-REPORT")
+        findings = len(re.findall(r"^\s+REVIEW\s+finding:", text, re.M))
+        print(f"audited {len(accs)}/{len(files)} lanes -> {audit_f.name}; "
+              f"{unparseable} lane(s) without a report; {findings} findings for review; "
+              f"accuracies: {', '.join(p + '%' for _, _, p in accs) or 'none'}", flush=True)
+    else:
+        print(f"no patrol output files for {date} — skipping audit", flush=True)
+
+    rc_ingest = step([BIN / "mem0-patrol-ingest"], timeout=15 * 60)
+    rc_breakout = step([BIN / "mem0-client-breakout"], timeout=10 * 60)
+
+    print(f"\nsummary {date}: launch rc={rc_launch}, audit rc={rc_audit}, ingest rc={rc_ingest}, breakout rc={rc_breakout}", flush=True)
+    return 1 if (rc_launch or rc_audit) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Email ingestion — mine the $MAILBOX (set via env) mailbox (Graph app-auth, read-only
-calls) into mem0, one conversation at a time, via local qwen extraction.
+"""Opt-in email ingestion from an explicitly configured read-only API source.
 
-Owner ruling 2026-08-19: no gates on email — grab context. Hygiene filters stay:
-no credentials, no contact data (names only). Pricing/business money facts allowed.
+The helper is disabled until its source, mailbox, token endpoint, and
+credential file are all supplied by the new owner.
 
-- Creds: $BORG_MAIL_ENV (path you choose) (never printed).
+- Credentials: ``BORG_EMAIL_CREDENTIALS_FILE`` (never printed).
 - Two phases: page all message headers -> group by conversationId -> per
   conversation fetch bodies, digest, extract, store (agent email-ingest,
   run_id eml-<conv>, kind email-thread).
@@ -31,20 +30,24 @@ from pathlib import Path
 
 import httpx
 
-BASE = Path(__file__).resolve().parent.parent
-CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BASE / "bin/mem0ctl")).load_module()
-HOOK = importlib.machinery.SourceFileLoader("mem0hook_mod", str(BASE / "bin/mem0-capture-hook")).load_module()
+SOURCE_BIN = Path(__file__).resolve().parent
+CONFIG = importlib.machinery.SourceFileLoader("borg_config_ingest_email", str(SOURCE_BIN / "borg_config.py")).load_module().CONFIG
+BASE = CONFIG.mem0_root
+CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(SOURCE_BIN / "mem0ctl")).load_module()
+HOOK = importlib.machinery.SourceFileLoader("mem0hook_mod", str(SOURCE_BIN / "mem0-capture-hook")).load_module()
 
-ENV_F = Path.home() / ".config/borg/mail-graph.env"
+_credentials = os.environ.get("BORG_EMAIL_CREDENTIALS_FILE", "").strip()
+ENV_F = Path(_credentials).expanduser().resolve() if _credentials else None
 STATE_F = BASE / "data/email-ingest-state.json"
 LOG_F = BASE / "data/email-ingest.log"
 LOCK_F = BASE / "data/email-ingest.lock"
-GRAPH = "https://graph.microsoft.com/v1.0"
+GRAPH = os.environ.get("BORG_EMAIL_API_BASE", "").strip().rstrip("/")
+TOKEN_URL = os.environ.get("BORG_EMAIL_TOKEN_URL", "").strip()
 AUTOMATED = re.compile(r"no-?reply|notifications?@|mailer|newsletter|donotreply|updates@|marketing@|billing@|invoice\+|automated|alerts?@", re.I)
 MAX_CHARS = 12000
 PER_MSG_CHARS = 1800
 
-EMAIL_PROMPT = """This is an email thread from James's business mailbox. Extract durable business facts a future agent would need:
+EMAIL_PROMPT = f"""This is an email thread from the configured mailbox for owner {CONFIG.values['BORG_OWNER_ID']}. Extract durable business facts a future agent would need:
 decisions and approvals; commitments made or received and who owns them; project and client status changes; pricing, proposals, and deal outcomes; who people are (name, role, company); what was agreed.
 Never extract: credentials, passwords, verification codes, or links; email addresses, phone numbers, or street addresses (refer to people by name only); newsletter or marketing content; receipt boilerplate; speculation.
 Each memory must be one plain self-contained sentence; prefix time-bound facts with the email date."""
@@ -56,6 +59,11 @@ def log(msg):
 
 
 def load_env():
+    if ENV_F is None or not GRAPH or not TOKEN_URL:
+        raise RuntimeError(
+            "email ingest requires BORG_EMAIL_CREDENTIALS_FILE, "
+            "BORG_EMAIL_API_BASE, and BORG_EMAIL_TOKEN_URL"
+        )
     env = {}
     for line in ENV_F.read_text().splitlines():
         if "=" in line and not line.strip().startswith("#"):
@@ -75,7 +83,7 @@ class Graph:
         if self.token and time.time() - self.token_at < 3000:
             return self.token
         r = self.client.post(
-            f"https://login.microsoftonline.com/{self.env['TENANT_ID']}/oauth2/v2.0/token",
+            TOKEN_URL,
             data={
                 "grant_type": "client_credentials",
                 "client_id": self.env["CLIENT_ID"],
@@ -135,12 +143,12 @@ def collect_conversations(g: Graph, cap: int):
             if m.get("isDraft"):
                 continue
             cid = m.get("conversationId") or m["id"]
-            c = convs.setdefault(cid, {"subject": m.get("subject") or "(no subject)", "ids": [], "senders": set(), "latest": m.get("receivedDateTime", ""), "james": False})
+            c = convs.setdefault(cid, {"subject": m.get("subject") or "(no subject)", "ids": [], "senders": set(), "latest": m.get("receivedDateTime", ""), "owner_participated": False})
             c["ids"].append(m["id"])
             addr = sender_of(m)[1]
             c["senders"].add(addr)
             if addr == g.mailbox.lower():
-                c["james"] = True  # James participated -> highest-value tier
+                c["owner_participated"] = True
             n += 1
         url = data.get("@odata.nextLink")
         if cap and n >= cap:
@@ -193,8 +201,8 @@ def main():
     convs, nmsg = collect_conversations(g, args.cap_messages)
     st = json.loads(STATE_F.read_text()) if STATE_F.exists() else {"done": {}}
     todo = [(cid, c) for cid, c in convs.items() if cid not in st["done"] and not all(AUTOMATED.search(s or "") for s in c["senders"])]
-    # Tier 1: threads James participated in (business context), then the rest; newest first within tiers.
-    todo.sort(key=lambda t: (t[1]["james"], t[1]["latest"]), reverse=True)
+    # Owner-participated threads first, then newest within each tier.
+    todo.sort(key=lambda t: (t[1]["owner_participated"], t[1]["latest"]), reverse=True)
     skipped_auto = len(convs) - len(todo) - sum(1 for c in convs if c in st["done"])
     if args.limit:
         todo = todo[: args.limit]
@@ -218,10 +226,10 @@ def main():
                     m_qwen,
                     [{"role": "user", "content": digest}],
                     threshold=0.92,
-                    user_id="james",
+                    user_id=str(CONFIG.values["BORG_OWNER_ID"]),
                     agent_id="email-ingest",
                     run_id=f"eml-{cid[-44:]}",
-                    metadata={"kind": "email-thread", "subject": conv["subject"][:120], "thread_date": date, "source": f"graph:{g.mailbox}", "added_mdt": CTL.now_mdt()},
+                    metadata={"kind": "email-thread", "subject": conv["subject"][:120], "thread_date": date, "source": f"graph:{g.mailbox}", "added_mdt": CTL.now_mdt(), "scope": CTL.DEFAULT_SCOPE},
                     prompt=EMAIL_PROMPT,
                 )
                 events = res.get("results", res) if isinstance(res, dict) else res
@@ -236,7 +244,10 @@ def main():
                         dropped += 1
                     else:
                         survivors.append(ev)
-                survivors, deduped = CTL.novelty_prune_events(m_qwen, survivors, user_id="james", agent_id="email-ingest")
+                survivors, deduped = CTL.novelty_prune_events(
+                    m_qwen, survivors, user_id=str(CONFIG.values["BORG_OWNER_ID"]),
+                    agent_id="email-ingest",
+                )
                 kept = len(survivors)
                 dropped += deduped
                 status = "ok"
@@ -247,9 +258,7 @@ def main():
         total += kept
         STATE_F.write_text(json.dumps(st))
         try:
-            from qdrant_client import QdrantClient
-
-            count = QdrantClient(host="127.0.0.1", port=6333).count("studio0").count
+            count = CTL.qdrant_client(timeout=20).count(CTL.COLLECTION).count
             (BASE / "data/consolidate-state.json").write_text(json.dumps({"count_at_last_run": count, "at": CTL.now_mdt(), "note": "email-suppression"}))
         except Exception:
             pass

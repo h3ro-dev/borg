@@ -1,68 +1,110 @@
 #!/bin/bash
-# Morning chain 2026-08-29, launchd-owned end to end:
-#   1) capture student exam (300 held-out pairs)
-#   2) v3 dataset: shim shape-pairs + original graffiti corpus, dedupe-edge x2
-#   3) v3 LoRA training with the GPU-crash auto-resume supervisor
-# Each stage logs a STAGE line; watchers key on those.
+# Explicit, owner-configured evaluation, dataset, and LoRA chain. Nothing is
+# read or written unless the new owner opts in and supplies every data source.
 set -u
-cd $HOME/Library/Memory/graphiti/training || exit 1
-LOG=runs/v3-chain.log
+
+if [ "${BORG_TRAINING_OPT_IN:-0}" != "1" ]; then
+  echo "training disabled: set BORG_TRAINING_OPT_IN=1 with explicit private paths" >&2
+  exit 2
+fi
+
+: "${BORG_TRAINING_ROOT:?set an absolute private BORG_TRAINING_ROOT}"
+: "${BORG_BASE_MODEL:?set BORG_BASE_MODEL explicitly}"
+: "${BORG_CAPTURE_ADAPTER:?set BORG_CAPTURE_ADAPTER explicitly}"
+: "${BORG_EXAM_DATA:?set BORG_EXAM_DATA explicitly}"
+: "${BORG_PAIR_SOURCE:?set BORG_PAIR_SOURCE explicitly}"
+: "${BORG_BASE_CORPUS:?set BORG_BASE_CORPUS explicitly}"
+
+case "$BORG_TRAINING_ROOT" in
+  /*) ;;
+  *) echo "BORG_TRAINING_ROOT must be absolute" >&2; exit 2 ;;
+esac
+
+cd "$BORG_TRAINING_ROOT" || exit 1
+PYTHON_BIN="${BORG_TRAINING_PYTHON:-$BORG_TRAINING_ROOT/venv/bin/python}"
+LOG="${BORG_CHAIN_LOG:-runs/v3-chain.log}"
+SHIM_DATA="${BORG_SHIM_DATASET_DIR:-data-v3-shim}"
+MIXED_DATA="${BORG_MIXED_DATASET_DIR:-data-v3}"
+OUT="${BORG_OUTPUT_DIR:-runs/graph-lora-v3}"
+TLOG="${BORG_TRAINING_LOG:-$OUT.log}"
+
+mkdir -p "$(dirname "$LOG")" "$MIXED_DATA" "$OUT"
 echo "STAGE exam-start $(date '+%F %T')" >> "$LOG"
 
-./venv/bin/python eval/capture_exam.py \
-  --model mlx-community/Qwen3-4B-Instruct-2507-4bit \
-  --adapter runs/capture-4b-lora-v1 \
-  --data $HOME/Library/Memory/mem0/data/capture-training/test.jsonl \
-  --limit 300 --max-tokens 1400 \
-  --out eval/exam-capture-v1.json --save-raw eval/raw-capture-v1 \
-  >> runs/exam-capture-v1.log 2>&1
+"$PYTHON_BIN" eval/capture_exam.py \
+  --model "$BORG_BASE_MODEL" \
+  --adapter "$BORG_CAPTURE_ADAPTER" \
+  --data "$BORG_EXAM_DATA" \
+  --limit "${BORG_EXAM_LIMIT:-300}" --max-tokens "${BORG_EXAM_MAX_TOKENS:-1400}" \
+  --out "${BORG_EXAM_REPORT:-eval/exam-capture.json}" \
+  --save-raw "${BORG_EXAM_RAW_DIR:-eval/raw-capture}" \
+  >> "${BORG_EXAM_LOG:-runs/exam-capture.log}" 2>&1
 echo "STAGE exam-done rc=$? $(date '+%F %T')" >> "$LOG"
 
 echo "STAGE v3-build-start $(date '+%F %T')" >> "$LOG"
-python3 build_v3_dataset.py --out data-v3-shim >> "$LOG" 2>&1
-./venv/bin/python - >> "$LOG" 2>&1 <<'EOF'
-import json, random
-out = {}
-shim = [json.loads(l) for l in open('data-v3-shim/train.jsonl') if l.strip()]
-dedupe = [r for r in shim if 'resolve_edge' in json.dumps(r)[:400] or 'duplicate_facts' in r['messages'][1]['content'][:200]]
-base = [json.loads(l) for l in open('data/train.jsonl') if l.strip()]
-mix = base + shim + dedupe  # dedupe-edge weighted x2 via re-append
+"$PYTHON_BIN" build_v3_dataset.py \
+  --pairs "$BORG_PAIR_SOURCE" \
+  --out "$SHIM_DATA" >> "$LOG" 2>&1
+
+BORG_SHIM_DATA="$SHIM_DATA" BORG_MIXED_DATA="$MIXED_DATA" \
+BORG_BASE_CORPUS="$BORG_BASE_CORPUS" "$PYTHON_BIN" - >> "$LOG" 2>&1 <<'PY'
+import json
+import os
+from pathlib import Path
+import random
+import shutil
+
+shim_root = Path(os.environ["BORG_SHIM_DATA"])
+mixed_root = Path(os.environ["BORG_MIXED_DATA"])
+base_source = Path(os.environ["BORG_BASE_CORPUS"])
+shim = [json.loads(line) for line in (shim_root / "train.jsonl").open() if line.strip()]
+dedupe = [row for row in shim if "resolve_edge" in json.dumps(row)[:400]
+          or "duplicate_facts" in row["messages"][1]["content"][:200]]
+base = [json.loads(line) for line in base_source.open() if line.strip()]
+mix = base + shim + dedupe
 random.Random(13).shuffle(mix)
-with open('data-v3/train.jsonl', 'w') as f:
-    for r in mix: f.write(json.dumps(r, ensure_ascii=False) + '\n')
-sv = [json.loads(l) for l in open('data-v3-shim/valid.jsonl') if l.strip()]
-bv = [json.loads(l) for l in open('data/valid.jsonl') if l.strip()]
-with open('data-v3/valid.jsonl', 'w') as f:
-    for r in sv + bv: f.write(json.dumps(r, ensure_ascii=False) + '\n')
-import shutil; shutil.copy('data-v3-shim/test.jsonl', 'data-v3/test.jsonl')
-print(f"v3 mix: {len(mix)} train ({len(base)} base + {len(shim)} shim + {len(dedupe)} dedupe-x2), {len(sv)+len(bv)} valid")
-EOF
+with (mixed_root / "train.jsonl").open("w") as handle:
+    for row in mix:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+shim_valid = [json.loads(line) for line in (shim_root / "valid.jsonl").open() if line.strip()]
+base_valid_source = base_source.with_name("valid.jsonl")
+base_valid = [json.loads(line) for line in base_valid_source.open() if line.strip()]
+with (mixed_root / "valid.jsonl").open("w") as handle:
+    for row in shim_valid + base_valid:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+shutil.copy(shim_root / "test.jsonl", mixed_root / "test.jsonl")
+print(f"v3 mix: {len(mix)} train, {len(shim_valid) + len(base_valid)} valid")
+PY
 echo "STAGE v3-build-done rc=$? $(date '+%F %T')" >> "$LOG"
 
 echo "STAGE v3-train-start $(date '+%F %T')" >> "$LOG"
-OUT=runs/graphiti-4b-lora-v3
-TLOG=runs/graphiti-4b-lora-v3.log
-mkdir -p "$OUT"
 RESUME=""
 for attempt in 1 2 3 4 5 6; do
-  latest=$(ls -t "$OUT"/*_adapters.safetensors 2>/dev/null | head -1)
+  latest=$(find "$OUT" -maxdepth 1 -type f -name '*_adapters.safetensors' -print 2>/dev/null | sort | tail -1)
   if [ -n "$latest" ]; then
     cp "$latest" "$OUT/adapters.safetensors"
-    RESUME="--resume-adapter-file $OUT/adapters.safetensors"
+    RESUME="$OUT/adapters.safetensors"
   fi
-  ./venv/bin/python -m mlx_lm lora \
-    --model mlx-community/Qwen3-4B-Instruct-2507-4bit \
-    --train --data data-v3 $RESUME \
-    --iters 5000 --batch-size 4 --max-seq-length 4096 --num-layers 16 \
+  resume_args=()
+  [ -n "$RESUME" ] && resume_args=(--resume-adapter-file "$RESUME")
+  "$PYTHON_BIN" -m mlx_lm lora \
+    --model "$BORG_BASE_MODEL" \
+    --train --data "$MIXED_DATA" "${resume_args[@]}" \
+    --iters "${BORG_TRAINING_ITERS:-5000}" --batch-size 4 --max-seq-length 4096 --num-layers 16 \
     --learning-rate 1e-5 --steps-per-report 20 --steps-per-eval 300 \
     --val-batches 25 --save-every 200 \
     --adapter-path "$OUT" \
     --grad-checkpoint >> "$TLOG" 2>&1
   code=$?
-  if [ $code -eq 0 ]; then echo "v3 finished clean on attempt $attempt" >> "$TLOG"; break; fi
-  if ! grep -q "InnocentVictim\|Command buffer execution failed" <(tail -30 "$TLOG"); then
-    echo "v3 exited $code with a non-GPU-recovery error; not restarting" >> "$TLOG"; break
+  if [ "$code" -eq 0 ]; then
+    echo "training finished clean on attempt $attempt" >> "$TLOG"
+    break
   fi
-  echo "v3 GPU-recovery crash on attempt $attempt; resuming" >> "$TLOG"; sleep 45
+  if ! tail -30 "$TLOG" | grep -q "InnocentVictim\|Command buffer execution failed"; then
+    echo "training exited $code with a non-recoverable error; not restarting" >> "$TLOG"
+    break
+  fi
+  echo "recoverable GPU failure on attempt $attempt; resuming" >> "$TLOG"
+  sleep 45
 done
 echo "STAGE v3-train-done $(date '+%F %T')" >> "$LOG"

@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Drive an explicitly configured remote thread miner over SSH.
+
+Control, state, and storage live HERE; extraction runs THERE (local llama3.1),
+and only filtered fact JSONL crosses the wire.
+
+Resumable, locked, and paced inside BORG_HOME.
+"""
+
+import os
+
+os.environ["MEM0_TELEMETRY"] = "false"
+
+import atexit
+import importlib.machinery
+import json
+import subprocess
+import time
+from pathlib import Path
+from borg_config import CONFIG, BorgConfigError
+
+BASE = Path(__file__).resolve().parent.parent
+CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BASE / "bin/mem0ctl")).load_module()
+
+REMOTE_HOST = os.environ.get("BORG_REMOTE_MINER_HOST")
+MINER = os.environ.get("BORG_REMOTE_MINER_COMMAND")
+PROBE = os.environ.get("BORG_REMOTE_MODEL_PROBE_COMMAND")
+MODEL_MARKER = os.environ.get("BORG_REMOTE_MODEL_MARKER")
+ENSURE_COMMAND = os.environ.get("BORG_REMOTE_MODEL_ENSURE_COMMAND")
+SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", REMOTE_HOST] if REMOTE_HOST else None
+RECEIVE = str(BASE / "bin/mem0-receive-facts")
+STATE_F = BASE / "data/remote-miner-state.json"
+LOG_F = BASE / "data/remote-miner-ingest.log"
+LOCK_F = BASE / "data/remote-miner.lock"
+PACE_S = 1.5
+
+
+def log(msg):
+    with open(LOG_F, "a") as f:
+        f.write(f"{CTL.now_mdt()} {msg}\n")
+    print(msg, flush=True)
+
+
+def ensure_qwen_instance():
+    if not ENSURE_COMMAND:
+        return
+    try:
+        subprocess.run(SSH + [ENSURE_COMMAND], capture_output=True, text=True, timeout=30)
+    except Exception:
+        pass
+
+
+def wait_for_model(max_min=45):
+    for _ in range(max_min * 2):
+        r = subprocess.run(SSH + [PROBE], capture_output=True, text=True, timeout=30)
+        if MODEL_MARKER in (r.stdout or ""):
+            log("REMOTE MODEL READY")
+            return True
+        time.sleep(30)
+    log("MODEL NOT READY after wait — aborting (rerun later)")
+    return False
+
+
+def main():
+    if not all((REMOTE_HOST, MINER, PROBE, MODEL_MARKER, SSH)):
+        raise BorgConfigError("remote mining requires BORG_REMOTE_MINER_HOST, BORG_REMOTE_MINER_COMMAND, BORG_REMOTE_MODEL_PROBE_COMMAND, and BORG_REMOTE_MODEL_MARKER")
+    if LOCK_F.exists():
+        try:
+            os.kill(int(LOCK_F.read_text()), 0)
+            print("already running; exiting")
+            return
+        except (ProcessLookupError, ValueError):
+            pass
+    LOCK_F.write_text(str(os.getpid()))
+    atexit.register(lambda: LOCK_F.unlink(missing_ok=True))
+
+    ensure_qwen_instance()
+    if not wait_for_model():
+        return
+    r = subprocess.run(SSH + [MINER + " --list"], capture_output=True, text=True, timeout=180)
+    files = []
+    for line in (r.stdout or "").splitlines():
+        try:
+            mtime, path = line.split("\t", 1)
+            files.append((int(mtime), path))
+        except ValueError:
+            pass
+    files.sort(reverse=True)
+    st = json.loads(STATE_F.read_text()) if STATE_F.exists() else {"done": {}}
+    todo = [(m, p) for m, p in files if p not in st["done"]]
+    log(f"RUN-START remote threads={len(files)} todo={len(todo)}")
+
+    total = 0
+    for i, (_, path) in enumerate(todo, 1):
+        t0 = time.time()
+        try:
+            r = subprocess.run(SSH + [MINER + f" --one '{path}'"], capture_output=True, text=True, timeout=420)
+            rows = [ln for ln in (r.stdout or "").splitlines() if ln.strip().startswith("{")]
+            if rows:
+                rec = subprocess.run([RECEIVE], input="\n".join(rows), capture_output=True, text=True, timeout=300)
+                summary = (rec.stdout or "").strip()
+            else:
+                summary = "RECEIVED stored=0"
+            kept = int(summary.split("stored=")[1].split()[0]) if "stored=" in summary else 0
+            total += kept
+            st["done"][path] = {"kept": kept, "at": CTL.now_mdt()}
+            status = "ok"
+        except subprocess.TimeoutExpired:
+            st["done"][path] = {"kept": 0, "at": CTL.now_mdt(), "status": "timeout"}
+            kept, status = 0, "timeout"
+        except Exception as e:
+            st["done"][path] = {"kept": 0, "status": f"error:{type(e).__name__}"}
+            kept, status = 0, f"error:{type(e).__name__}"
+        STATE_F.write_text(json.dumps(st))
+        log(f"[{i}/{len(todo)}] {status} kept={kept} {time.time()-t0:.0f}s {path}")
+        time.sleep(PACE_S)
+    log(f"RUN-END processed={len(todo)} total_kept={total}")
+
+
+if __name__ == "__main__":
+    main()

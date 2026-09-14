@@ -1,0 +1,391 @@
+#!/usr/bin/env python3
+"""Privacy-safe client lead-signal monitor.
+
+The watcher reads aggregate analytics event counts for explicitly configured
+clients. The source registry, feed destination, API base, and short-lived token
+file are required configuration. It never stores the token, a visitor
+identifier, a form field, or a lead record.
+
+This is deliberately a two-stage monitor:
+
+* Before an accepted-form success signal is proved, any new generate_lead is
+  an unexpected analytics signal. It is recorded for review.
+* After that signal is proved, the same feed can reconcile the true receipt
+  count with generate_lead and learn a silence threshold from valid events.
+
+Real notifications are not implemented here. Findings are staged in the
+event log and exposed to the ecosystem dashboard. The existing owner alert
+route can be bound only after its exact message, channel, and recipient are
+approved.
+
+Usage:
+  mem0-lead-watch
+  mem0-lead-watch --selftest
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import statistics
+import sys
+import time
+import tomllib
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+from borg_config import CONFIG, BorgConfigError
+
+REGISTRY = Path(os.environ["BORG_CLIENT_REGISTRY"]).expanduser() if os.environ.get("BORG_CLIENT_REGISTRY") else None
+STATE_PATH = CONFIG.data_root / "lead-watch-state.json"
+EVENTS_PATH = CONFIG.data_root / "lead-watch-events.jsonl"
+LOCK_PATH = CONFIG.data_root / "lead-watch.lock"
+FEED_PATH = Path(os.environ["BORG_LEAD_FEED_OUTPUT"]).expanduser() if os.environ.get("BORG_LEAD_FEED_OUTPUT") else None
+TOKEN_FILE = Path(os.environ["BORG_ANALYTICS_TOKEN_FILE"]).expanduser() if os.environ.get("BORG_ANALYTICS_TOKEN_FILE") else None
+INTERVAL_SECONDS = 900
+API = os.environ.get("BORG_ANALYTICS_API_BASE")
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def mdt_stamp(value: datetime | None = None) -> str:
+    value = value or utc_now()
+    return value.astimezone(ZoneInfo("America/Denver")).strftime("%Y-%m-%d %H:%M:%S MDT")
+
+
+def atomic_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=1) + "\n")
+    tmp.replace(path)
+
+
+def append_event(event: dict) -> None:
+    EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with EVENTS_PATH.open("a") as handle:
+        handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+
+
+def access_token() -> str:
+    if TOKEN_FILE is None:
+        raise BorgConfigError("BORG_ANALYTICS_TOKEN_FILE is required")
+    token = TOKEN_FILE.read_text().strip()
+    if not token:
+        raise RuntimeError("configured analytics token file is empty")
+    return token
+
+
+def google_post(token: str, url: str, body: dict) -> dict:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=25) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:500]
+        raise RuntimeError(f"Google Analytics API HTTP {error.code}: {detail}") from error
+
+
+def event_filter(names: list[str]) -> dict:
+    return {
+        "filter": {
+            "fieldName": "eventName",
+            "inListFilter": {"values": names, "caseSensitive": True},
+        }
+    }
+
+
+def query_ga4(config: dict, token: str) -> dict:
+    if not API:
+        raise BorgConfigError("BORG_ANALYTICS_API_BASE is required")
+    property_id = str(config["property_id"])
+    lead_event = config.get("lead_event", "generate_lead")
+    form_event = config.get("accepted_form_event")
+    names = [lead_event, "form_start", "form_submit"]
+    if form_event and form_event not in names:
+        names.append(form_event)
+
+    realtime = google_post(
+        token,
+        f"{API}/properties/{property_id}:runRealtimeReport",
+        {
+            "dimensions": [{"name": "eventName"}],
+            "metrics": [{"name": "eventCount"}],
+            "dimensionFilter": event_filter(names),
+        },
+    )
+    report = google_post(
+        token,
+        f"{API}/properties/{property_id}:runReport",
+        {
+            "dateRanges": [{"startDate": "28daysAgo", "endDate": "today"}],
+            "dimensions": [{"name": "dateHourMinute"}, {"name": "eventName"}],
+            "metrics": [{"name": "eventCount"}],
+            "dimensionFilter": event_filter(names),
+            "orderBys": [{"dimension": {"dimensionName": "dateHourMinute"}}],
+            "limit": "10000",
+        },
+    )
+
+    realtime_counts = {}
+    for row in realtime.get("rows", []):
+        realtime_counts[row["dimensionValues"][0]["value"]] = int(row["metricValues"][0]["value"])
+
+    tz = ZoneInfo(config["property_timezone"])
+    valid_from = datetime.fromisoformat(config["valid_from_utc"].replace("Z", "+00:00"))
+    valid_rows = []
+    for row in report.get("rows", []):
+        raw_time = row["dimensionValues"][0]["value"]
+        event_name = row["dimensionValues"][1]["value"]
+        occurred = datetime.strptime(raw_time, "%Y%m%d%H%M").replace(tzinfo=tz).astimezone(timezone.utc)
+        count = int(row["metricValues"][0]["value"])
+        if occurred >= valid_from:
+            valid_rows.append({"at": occurred, "event": event_name, "count": count})
+
+    lead_rows = [row for row in valid_rows if row["event"] == lead_event]
+    accepted_rows = [row for row in valid_rows if form_event and row["event"] == form_event]
+    return {
+        "realtime_counts": realtime_counts,
+        "lead_rows": lead_rows,
+        "accepted_rows": accepted_rows,
+        "lead_count": sum(row["count"] for row in lead_rows),
+        "accepted_count": sum(row["count"] for row in accepted_rows),
+        "last_lead_at": max((row["at"] for row in lead_rows), default=None),
+        "last_accepted_at": max((row["at"] for row in accepted_rows), default=None),
+    }
+
+
+def cadence(reading: dict, config: dict, checked_at: datetime) -> dict:
+    if not config.get("accepted_signal_proven", False):
+        return {
+            "state": "UNKNOWN",
+            "threshold_hours": None,
+            "reason": "Accepted-form success is not proved, so historical lead cadence is not trustworthy.",
+        }
+    rows = reading["accepted_rows"] or reading["lead_rows"]
+    expanded = []
+    for row in rows:
+        expanded.extend([row["at"]] * min(row["count"], 1000))
+    expanded.sort()
+    valid_from = datetime.fromisoformat(config["valid_from_utc"].replace("Z", "+00:00"))
+    age_days = (checked_at - valid_from).total_seconds() / 86400
+    if len(expanded) < 5 or age_days < 14:
+        return {
+            "state": "BUILDING_BASELINE",
+            "threshold_hours": None,
+            "reason": "Need at least five proved lead receipts across 14 days before a silence threshold is safe.",
+        }
+    gaps = [
+        (later - earlier).total_seconds() / 3600
+        for earlier, later in zip(expanded, expanded[1:])
+        if later > earlier
+    ]
+    if not gaps:
+        return {
+            "state": "BUILDING_BASELINE",
+            "threshold_hours": None,
+            "reason": "The valid events do not yet contain a measurable time gap.",
+        }
+    threshold = round(max(72.0, statistics.median(gaps) * 2.0), 1)
+    last = reading["last_accepted_at"] or reading["last_lead_at"]
+    silence = (checked_at - last).total_seconds() / 3600 if last else None
+    return {
+        "state": "SILENT" if silence is not None and silence > threshold else "NORMAL",
+        "threshold_hours": threshold,
+        "silence_hours": round(silence, 1) if silence is not None else None,
+        "reason": "Threshold is the larger of 72 hours or twice the median valid lead gap.",
+    }
+
+
+def evaluate(key: str, config: dict, reading: dict, previous: dict, checked_at: datetime) -> tuple[dict, list[dict]]:
+    lead_event = config.get("lead_event", "generate_lead")
+    realtime_count = reading["realtime_counts"].get(lead_event, 0)
+    prior_count = int(previous.get("valid_lead_count", 0))
+    count_delta = max(0, reading["lead_count"] - prior_count)
+    realtime_active_before = bool(previous.get("realtime_active", False))
+    new_realtime_window = realtime_count > 0 and not realtime_active_before
+    events = []
+
+    if count_delta > 0 or new_realtime_window:
+        event_type = (
+            "unexpected_ga4_lead_signal"
+            if not config.get("accepted_signal_proven", False)
+            else "lead_signal_observed"
+        )
+        events.append({
+            "at": checked_at.isoformat(),
+            "client": key,
+            "event": event_type,
+            "count_delta": count_delta,
+            "realtime_30m": realtime_count,
+            "staged": True,
+            "sent": False,
+            "detail": "Aggregate analytics count only; no visitor or form data read.",
+        })
+
+    cadence_result = cadence(reading, config, checked_at)
+    if cadence_result["state"] == "SILENT" and previous.get("cadence_state") != "SILENT":
+        events.append({
+            "at": checked_at.isoformat(),
+            "client": key,
+            "event": "lead_cadence_silent",
+            "staged": True,
+            "sent": False,
+            "threshold_hours": cadence_result.get("threshold_hours"),
+            "silence_hours": cadence_result.get("silence_hours"),
+        })
+
+    mismatch = None
+    if config.get("accepted_signal_proven", False) and config.get("accepted_form_event"):
+        mismatch = reading["lead_count"] - reading["accepted_count"]
+        if mismatch != 0 and previous.get("reconciliation_delta") != mismatch:
+            events.append({
+                "at": checked_at.isoformat(),
+                "client": key,
+                "event": "lead_reconciliation_mismatch",
+                "staged": True,
+                "sent": False,
+                "ga4_leads": reading["lead_count"],
+                "accepted_forms": reading["accepted_count"],
+                "delta": mismatch,
+            })
+
+    status = "UNEXPECTED_SIGNAL" if events and not config.get("accepted_signal_proven", False) else (
+        "SIGNAL_PROVED" if config.get("accepted_signal_proven", False) else "WATCHING_UNVERIFIED"
+    )
+    state = {
+        "checked_at": checked_at.isoformat(),
+        "status": status,
+        "valid_lead_count": reading["lead_count"],
+        "accepted_form_count": reading["accepted_count"] if config.get("accepted_form_event") else None,
+        "realtime_30m": realtime_count,
+        "realtime_active": realtime_count > 0,
+        "last_lead_at": reading["last_lead_at"].isoformat() if reading["last_lead_at"] else None,
+        "last_accepted_at": reading["last_accepted_at"].isoformat() if reading["last_accepted_at"] else None,
+        "cadence_state": cadence_result["state"],
+        "cadence": cadence_result,
+        "reconciliation_delta": mismatch,
+        "notifications": "STAGED_NO_SEND",
+    }
+    return state, events
+
+
+def public_row(key: str, client: dict, config: dict, state: dict, error: str | None = None) -> dict:
+    return {
+        "key": key,
+        "name": client.get("name", key),
+        "provider": "GA4",
+        "event": config.get("lead_event", "generate_lead"),
+        "checked_at": state.get("checked_at"),
+        "status": "ERROR" if error else state.get("status", "UNKNOWN"),
+        "realtime_30m": state.get("realtime_30m"),
+        "valid_lead_count": state.get("valid_lead_count"),
+        "last_lead_at": state.get("last_lead_at"),
+        "accepted_source": "PROVED" if config.get("accepted_signal_proven", False) else "UNKNOWN",
+        "accepted_form_count": state.get("accepted_form_count"),
+        "reconciliation_delta": state.get("reconciliation_delta"),
+        "cadence": state.get("cadence", {"state": "UNKNOWN", "reason": "No reading yet."}),
+        "notifications": state.get("notifications", "STAGED_NO_SEND"),
+        "privacy": "Aggregate counts and timestamps only; no visitor, patient, or form data.",
+        "error": error,
+    }
+
+
+def run() -> int:
+    if REGISTRY is None or FEED_PATH is None:
+        raise BorgConfigError("BORG_CLIENT_REGISTRY and BORG_LEAD_FEED_OUTPUT are required")
+    registry = tomllib.load(open(REGISTRY, "rb"))["clients"]
+    targets = [(key, client, client.get("analytics")) for key, client in registry.items() if client.get("analytics")]
+    previous_all = json.loads(STATE_PATH.read_text()) if STATE_PATH.exists() else {}
+    next_all = dict(previous_all)
+    rows = []
+    token = None
+    checked_at = utc_now()
+
+    for key, client, config in targets:
+        try:
+            token = token or access_token()
+            reading = query_ga4(config, token)
+            state, events = evaluate(key, config, reading, previous_all.get(key, {}), checked_at)
+            next_all[key] = state
+            for event in events:
+                append_event(event)
+                print("STAGED LEAD ALERT: " + json.dumps(event, separators=(",", ":")), flush=True)
+            rows.append(public_row(key, client, config, state))
+        except Exception as error:
+            old = previous_all.get(key, {})
+            next_all[key] = {**old, "checked_at": checked_at.isoformat(), "status": "ERROR", "error": str(error)[:300]}
+            rows.append(public_row(key, client, config, next_all[key], str(error)[:160]))
+            print(f"lead-watch {key}: {type(error).__name__}: {str(error)[:200]}", file=sys.stderr)
+
+    atomic_json(STATE_PATH, next_all)
+    atomic_json(FEED_PATH, {
+        "schema": "client-lead-signals/1",
+        "generated": mdt_stamp(checked_at),
+        "generated_at": checked_at.isoformat(),
+        "interval_s": INTERVAL_SECONDS,
+        "clients": rows,
+    })
+    return 1 if any(row["status"] == "ERROR" for row in rows) else 0
+
+
+def selftest() -> int:
+    checked = datetime(2026, 8, 22, 1, 0, tzinfo=timezone.utc)
+    config = {
+        "lead_event": "generate_lead",
+        "valid_from_utc": "2026-08-22T00:18:33Z",
+        "accepted_signal_proven": False,
+        "property_timezone": "America/Los_Angeles",
+    }
+    reading = {
+        "realtime_counts": {}, "lead_rows": [], "accepted_rows": [],
+        "lead_count": 0, "accepted_count": 0, "last_lead_at": None, "last_accepted_at": None,
+    }
+    state, events = evaluate("example-client", config, reading, {}, checked)
+    assert state["status"] == "WATCHING_UNVERIFIED" and events == []
+
+    reading = {**reading, "realtime_counts": {"generate_lead": 1}}
+    state, events = evaluate("example-client", config, reading, state, checked + timedelta(minutes=15))
+    assert state["status"] == "UNEXPECTED_SIGNAL" and len(events) == 1 and events[0]["sent"] is False
+
+    state, events = evaluate("example-client", config, reading, state, checked + timedelta(minutes=30))
+    assert events == []
+
+    reading = {**reading, "realtime_counts": {}, "lead_count": 1,
+               "lead_rows": [{"at": checked, "event": "generate_lead", "count": 1}],
+               "last_lead_at": checked}
+    state, events = evaluate("example-client", config, reading, state, checked + timedelta(minutes=45))
+    assert len(events) == 1 and events[0]["event"] == "unexpected_ga4_lead_signal"
+    assert state["cadence_state"] == "UNKNOWN" and state["notifications"] == "STAGED_NO_SEND"
+    print("lead-watch selftest: PASS — quiet, unexpected signal, dedupe, daily delta, no-send")
+    return 0
+
+
+def main() -> int:
+    if "--selftest" in sys.argv:
+        return selftest()
+    if LOCK_PATH.exists():
+        try:
+            pid = int(LOCK_PATH.read_text().strip())
+            import os
+            os.kill(pid, 0)
+            return 0
+        except (ValueError, ProcessLookupError, PermissionError):
+            LOCK_PATH.unlink(missing_ok=True)
+    LOCK_PATH.write_text(str(__import__("os").getpid()))
+    try:
+        return run()
+    finally:
+        LOCK_PATH.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

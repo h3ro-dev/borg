@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Store recent GitHub deliverable activity as per-client memory facts."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import tomllib
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+from borg_config import CONFIG, BorgConfigError
+
+REGISTRY = Path(os.environ["BORG_CLIENT_REGISTRY"]).expanduser() if os.environ.get("BORG_CLIENT_REGISTRY") else None
+STATE = CONFIG.data_root / "repo-activity-state.json"
+MEM0CTL = str(CONFIG.mem0_root / "bin/mem0ctl")
+LOOKBACK_DAYS = 14
+
+
+def run(command: list[str]) -> str:
+    result = subprocess.run(command, text=True, capture_output=True, check=False)
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or "command failed"
+        raise RuntimeError(detail)
+    return result.stdout
+
+
+def gh_json(arguments: list[str]) -> Any:
+    output = run(["gh", *arguments])
+    return json.loads(output) if output.strip() else []
+
+
+def load_state() -> set[str]:
+    if not STATE.exists():
+        return set()
+    try:
+        data = json.loads(STATE.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read state file: {exc}") from exc
+    ids = data.get("stored_item_ids") if isinstance(data, dict) else None
+    if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+        raise RuntimeError("state file must contain a stored_item_ids string list")
+    return set(ids)
+
+
+def save_state(stored: set[str]) -> None:
+    payload = {"stored_item_ids": sorted(stored)}
+    STATE.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def resolve_repo(repo: str, preferred_owners: list[str]) -> str:
+    if "/" in repo:
+        return repo
+    matches = gh_json([
+        "api", "-X", "GET", "search/repositories",
+        "-f", f"q={repo} in:name", "-f", "per_page=100",
+        "--jq", f'[.items[] | select((.name | ascii_downcase) == "{repo.lower()}") | .full_name]',
+    ])
+    if not isinstance(matches, list):
+        raise RuntimeError(f"unexpected repository search response for {repo}")
+    for owner in preferred_owners:
+        candidate = f"{owner}/{repo}"
+        if candidate in matches:
+            return candidate
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise RuntimeError(f"no exact GitHub repository match for {repo}")
+    raise RuntimeError(f"ambiguous bare repository {repo}: {', '.join(matches)}")
+
+
+def recent_items(repo: str, since: str) -> list[tuple[str, str, str, str]]:
+    items: list[tuple[str, str, str, str]] = []
+    prs = gh_json([
+        "pr", "list", "--repo", repo, "--state", "merged",
+        "--search", f"merged:>={since}", "--limit", "1000",
+        "--json", "number,title,mergedAt",
+    ])
+    for pr in prs:
+        date = pr["mergedAt"][:10]
+        item_id = f"{repo}:pr:{pr['number']}"
+        label = f"merged PR #{pr['number']}: {one_line(pr['title'])}."
+        items.append((date, "pr", item_id, label))
+
+    issues = gh_json([
+        "issue", "list", "--repo", repo, "--state", "closed",
+        "--search", f"closed:>={since}", "--limit", "1000",
+        "--json", "number,title,closedAt",
+    ])
+    for issue in issues:
+        date = issue["closedAt"][:10]
+        item_id = f"{repo}:issue:{issue['number']}"
+        label = f"closed issue #{issue['number']}: {one_line(issue['title'])}."
+        items.append((date, "issue", item_id, label))
+
+    repository = gh_json(["api", f"repos/{repo}"])
+    branch = repository["default_branch"]
+    pages = gh_json([
+        "api", "-X", "GET", f"repos/{repo}/commits",
+        "-f", f"sha={branch}", "-f", f"since={since}T00:00:00Z",
+        "-f", "per_page=100", "--paginate", "--slurp",
+    ])
+    commits = [commit for page in pages for commit in page]
+    for commit in commits:
+        sha = commit["sha"]
+        commit_data = commit["commit"]
+        stamp = commit_data.get("committer", {}).get("date") or commit_data["author"]["date"]
+        date = stamp[:10]
+        title = one_line(commit_data["message"].splitlines()[0])
+        item_id = f"{repo}:commit:{sha}"
+        label = f"pushed commit {sha[:7]} to {branch}: {title}."
+        items.append((date, "commit", item_id, label))
+    return items
+
+
+def one_line(value: str) -> str:
+    return " ".join(value.split()).rstrip(".")
+
+
+def main() -> int:
+    if REGISTRY is None:
+        raise BorgConfigError("BORG_CLIENT_REGISTRY is required")
+    with REGISTRY.open("rb") as handle:
+        clients = tomllib.load(handle).get("clients", {})
+    stored = load_state()
+    seen = set(stored)
+    stored_count = 0
+    since = (datetime.now(timezone.utc).date() - timedelta(days=LOOKBACK_DAYS)).isoformat()
+    preferred_owners = list(dict.fromkeys(
+        repo.split("/", 1)[0]
+        for client in clients.values()
+        for repo in client.get("repos", [])
+        if "/" in repo
+    ))
+
+    for client in clients.values():
+        client_name = client.get("name", "Unknown client")
+        for configured_repo in client.get("repos", []):
+            if not configured_repo:
+                continue
+            try:
+                repo = resolve_repo(configured_repo, preferred_owners)
+                items = recent_items(repo, since)
+            except (RuntimeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+                print(f"ERROR {client_name} {configured_repo}: {exc}", file=sys.stderr)
+                continue
+            for date, _kind, item_id, label in sorted(items, key=lambda item: (item[0], item[2])):
+                if item_id in seen:
+                    continue
+                seen.add(item_id)
+                fact = f"As of {date}, {client_name} repo {repo} {label}"
+                try:
+                    run([MEM0CTL, "add", fact, "--agent", "repo-activity", "--raw"])
+                except RuntimeError as exc:
+                    seen.remove(item_id)
+                    print(f"ERROR storing {item_id}: {exc}", file=sys.stderr)
+                    continue
+                stored.add(item_id)
+                save_state(stored)
+                stored_count += 1
+                print(fact)
+
+    if not STATE.exists():
+        save_state(stored)
+    print(f"Stored {stored_count} new facts.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

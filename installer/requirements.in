@@ -1,0 +1,15 @@
+# Exact direct versions accepted by the BORG runtime; transitive hashes live in requirements.lock.
+mem0ai==2.0.18
+graphiti-core[falkordb]==0.29.3
+fastmcp==3.4.7
+httpx==0.28.1
+starlette==1.6.0
+uvicorn==0.52.4
+qdrant-client==1.19.0
+ollama==0.6.2
+openai==3.3.1
+falkordblite==0.10.0
+websockets==17.0.1
+requests==2.34.2
+zstandard==0.25.0
+playwright==1.62.0

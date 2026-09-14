@@ -1,133 +1,98 @@
-# codex-conductor
+# BORG conductor
 
-Drive [Codex](https://github.com/openai/codex) agent threads programmatically —
-start them, watch them, and **steer them while they run** — from any outer
-orchestrator: a script, a human at a terminal, or another AI agent.
+This package is the source-only BORG control plane for an independently owned
+installation. It preserves the supplied production Codex `app-server` bridge,
+including JSON-RPC initialization, role-aware thread start and resume, exact
+turn start/steer/interrupt controls, event pagination, native thread status,
+approval denial, and private metadata-only logs.
 
-Codex's `app-server` is the same engine the Codex Desktop app runs on. It speaks
-newline-delimited JSON-RPC over stdio and exposes the full thread lifecycle:
-`thread/start`, `turn/start`, **`turn/steer`**, `turn/interrupt`,
-`thread/resume`, `thread/fork`, plus a live notification stream of everything
-every thread (and every sub-agent it spawns) is doing.
+On `POST /thread/resume`, the conductor resumes the exact requested thread and
+then performs `thread/read` with complete turns before updating `/status`.
+Bookkeeping uses the resume response's effective `cwd`, model, and reasoning
+effort rather than the persisted thread's historical cwd. It restores the
+latest turn state and native parent/fork/session identifiers, and preserves
+the BORG role plus an optional caller-supplied `predecessor` evidence object
+across later resumes. Native thread identifiers must agree across the request,
+resume response, and readback or the request fails closed.
 
-`conductor.mjs` wraps one `app-server` child process and exposes that power as
-a small local HTTP API, so orchestration becomes `curl`:
+It adds a portable install contract and a fail-closed router. Machines and
+account lanes come only from `conductors/config.json`; the source has
+no owner roster, authenticated account, fleet size assumption, private policy,
+or external queue. A one-machine, one-lane configuration is valid.
 
-```bash
-node conductor.mjs &                # http://127.0.0.1:4747
+## Runtime contract
 
-# start a manager thread in a workspace
-curl -s -X POST localhost:4747/thread/start -d '{"cwd":"/path/to/work"}'
+- Node exactly `24.21.0`
+- Codex CLI exactly `0.146.0`
+- Canonical absolute `BORG_HOME`
+- Source at `$BORG_HOME/app/conductor`
+- Root installer config at `$BORG_HOME/config.json`, preserved byte-for-byte
+- Conductor config at `$BORG_HOME/conductors/config.json`, mode `0600`
+- Primary Codex profile at `$BORG_HOME/conductors/primary/profile`
+- Primary logs at `$BORG_HOME/conductors/primary/logs`
+- Node at the root-provided executable inside `$BORG_HOME/runtime/`
+- Codex at `$BORG_HOME/runtime/npm/node_modules/.bin/codex`
+- HTTP bound only to `127.0.0.1:$PORT`
 
-# fire a long-running turn (manager can spawn its own sub-agents)
-curl -s -X POST localhost:4747/turn/start -d '{"threadId":"…","text":"…"}'
+Fresh installs contain no provider authentication. The owner authenticates the
+dedicated profile with native `codex login`, then pins the observed account
+identity digest before that lane can receive routed work.
 
-# change requirements WHILE it works
-curl -s -X POST localhost:4747/turn/steer \
-  -d '{"threadId":"…","expectedTurnId":"…","text":"STEERING UPDATE: …"}'
+See [INTEGRATION.md](INTEGRATION.md) for the exact bootstrap, start, status,
+authentication, ranking, and routing commands. `config.example.json` documents
+the complete non-secret configuration schema.
 
-# watch everything it and its sub-agents do
-curl -s 'localhost:4747/events?threadId=…&afterSeq=0'
+## Routing contract
+
+For each configured lane, a routing attempt obtains and validates:
+
+1. fresh physical machine capacity and fresh active claims;
+2. native conductor status, configured endpoint, and dedicated `CODEX_HOME`;
+3. the current native account identity and its configured digest pin; and
+4. current native allowance windows for the requested model bucket.
+
+Unknown, stale, unreachable, hot, memory-saturated, unclaimed, unauthenticated,
+or wrong-account lanes are ineligible. Eligible lanes are ordered by highest
+remaining usable native allowance; earliest reset is only the tie break.
+Actual provider exhaustion and provider spend controls have separate evidence
+codes. No discretionary reservation or allowance floor is created.
+
+Dispatch holds a private lock, rechecks the whole configured fleet immediately
+before selection, persists an intent and receipt before native lifecycle calls,
+and refuses duplicate `{workId,cwd}` intents across process restarts. An
+ambiguous thread or turn response is recorded as `DO_NOT_RETRY` evidence.
+
+Capacity and claims support local OS observation or an explicitly configured
+absolute JSON-producing command. Remote machines therefore require an
+owner-installed native collector; absent collectors fail closed. No Desktop
+Commander dependency is present.
+
+## Provider boundaries
+
+The supplied Grok conductor and launch bus are retained under `providers/`.
+Grok exposes the native lifecycle features present in that source. Claude
+headless launch remains available where configured, but native thread status
+and mid-turn steer are declared missing rather than emulated. Codex login is
+always provider-native and isolated by `CODEX_HOME`.
+
+## Tests
+
+From the installed source directory:
+
+```sh
+BORG_TEST_CODEX_BIN="$BORG_HOME/runtime/npm/node_modules/.bin/codex" \
+  "$NODE_BIN" --test tests/*.test.mjs providers/*.test.mjs
 ```
 
-## Why
+Unit providers are used only for deterministic protocol and refusal cases.
+`tests/native-app-server.test.mjs` starts the real configured Codex
+`app-server` with a separate empty profile and proves initialization through
+the loopback `/status` endpoint; it never logs in or starts a thread.
 
-Agent-orchestrating-agents topologies need a control plane: the outer
-orchestrator must be able to dispatch inner orchestrators, observe them
-mid-flight, and correct course without killing the run. Codex's open app-server
-protocol provides exactly that — this repo is the thin adapter that makes it
-scriptable.
+## Source and release boundary
 
-Proven end-to-end (see `docs/receipts/2026-06-12-smoke-1/`): a conductor-launched
-manager thread spawned two parallel sub-agents, was steered mid-turn with a new
-requirement, and produced artifacts reflecting both the original task and the
-steering update.
-
-## API
-
-| Endpoint | Body | Purpose |
-|---|---|---|
-| `GET /status` | — | health, known threads, last event seq |
-| `GET /threads?limit=` | — | `thread/list` passthrough |
-| `GET /events?threadId=&afterSeq=` | — | buffered notification stream |
-| `POST /thread/start` | `{cwd, model?, instructions?, sandbox?, config?}` | new thread (defaults: `workspace-write`, `approvalPolicy: never`) |
-| `POST /thread/resume` | `{threadId, cwd?, sandbox?, approvalPolicy?}` | reattach an existing thread; defaults to `read-only` + `never` |
-| `POST /turn/start` | `{threadId, text, effort?}` | fire a turn; returns `turnId` once started |
-| `POST /turn/steer` | `{threadId, expectedTurnId, text}` | inject guidance into a **running** turn |
-| `POST /turn/interrupt` | `{threadId, turnId}` | stop a running turn |
-| `POST /rpc` | `{method, params, timeoutMs?}` | raw JSON-RPC escape hatch |
-
-## Multi-account sharding
-
-Each conductor instance owns one `CODEX_HOME` (one account, one rate-limit
-pool). Run several:
-
-```bash
-CONDUCTOR_PORT=4747 node conductor.mjs &                       # default account
-CONDUCTOR_PORT=4748 CODEX_HOME=~/.codex-acct2 node conductor.mjs &
-```
-
-For new work across several account lanes, use `conductor-usage-router.mjs`
-instead of choosing a port by hand. It refreshes native provider headroom,
-checks the exact configured account and profile, excludes lanes that lack the
-requested capability, serializes concurrent starts, reranks the full fleet, and
-journals the attempt before starting a thread:
-
-```bash
-node conductor-usage-router.mjs rank
-node conductor-usage-router.mjs dispatch \
-  --cwd /path/to/work \
-  --prompt-file /path/to/task.txt \
-  --work-id ISSUE-123
-```
-
-See `docs/conductor-usage-routing.md` for setup, model-bucket mapping, failure
-behavior, and the direct-port bypass boundary.
-
-## Requirements
-
-- Codex CLI ≥ 0.133 on PATH (tested on 0.137.0), signed in (`codex login`)
-- Node 20+
-- For sub-agent spawning: `features.multi_agent_v2` enabled in Codex config.
-  Note: Codex CLI 0.138–0.140-alpha currently reject this flag server-side
-  ([openai/codex#26753](https://github.com/openai/codex/issues/26753)); 0.137
-  works.
-
-## Safety posture
-
-- HTTP binds to `127.0.0.1` only.
-- Threads default to `workspace-write` sandbox, scoped to their `cwd`.
-- If the server requests an approval, the conductor **denies it and logs** —
-  it never silently grants.
-- Full audit trail: every notification is appended to `logs/` per thread.
-
-See `docs/protocol-notes.md` for how the protocol was mapped and the dead ends
-(daemon control socket, remote-control mode) so you don't repeat them.
-
-## Passive agent workspace registry
-
-`agent-registry.mjs` inventories explicitly configured filesystem roots and
-produces a read-only workspace/process snapshot plus a dry-run retirement
-report. It is deliberately separate from the live conductor server: running it
-does not start, steer, interrupt, archive, or message any Codex or Claude task.
-
-```bash
-node agent-registry.mjs \
-  --config agent-registry.config.example.json \
-  --output-dir artifacts/agent-registry
-
-node --test
-```
-
-The registry fails closed. An unregistered clean checkout is `UNKNOWN`, not a
-deletion candidate. A dirty inactive checkout is `PARKED`. Only an explicitly
-archived, clean, inactive, non-canonical workspace with verified containment,
-a recovery receipt, and the configured decision owner's retirement approval
-can be reported as `RECLAIMABLE`; the tool still performs no deletion.
-
-See `docs/agent-registry.md` for the lifecycle contract and configuration,
-`docs/agent-admission.md` for prospective worktree and heavy-job admission
-control, `docs/agent-search-hygiene.md` for bounded discovery on a clone-heavy
-machine, and `docs/agent-first-cleanup-plan.md` for the staged system cleanup
-path. Existing lanes are inventoried in place and are never moved merely to
-match the prospective path standard.
+This directory is a review-ready source artifact. The root installer owns
+copying it to `$BORG_HOME/app/conductor`, installing pinned runtimes, service
+startup, end-to-end installation verification, and release. See
+`THIRD_PARTY_NOTICES.md` for distributable references. Private operational reports
+and account inventories are excluded from the distribution.

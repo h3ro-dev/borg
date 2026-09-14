@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mem0 MCP server — Studio0 shared local memory over stdio.
+"""mem0 MCP server — configured BORG memory over stdio or authenticated HTTP.
 
 Exposes the same store as `mem0ctl` (Qdrant server container mem0-qdrant on
 127.0.0.1:6333, Ollama models on 127.0.0.1:11434, telemetry disabled).
@@ -19,6 +19,9 @@ import sys
 import threading
 from pathlib import Path
 
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_mcp_v1", str(Path(__file__).resolve().parent / "borg_config.py")
+).load_module().CONFIG
 CTL = importlib.machinery.SourceFileLoader(
     "mem0ctl_mod", str(Path(__file__).resolve().parent / "mem0ctl")
 ).load_module()
@@ -29,7 +32,7 @@ FAST = importlib.machinery.SourceFileLoader(
 from fastmcp import FastMCP
 
 HTTP_MODE = "--http" in sys.argv
-TOKEN_F = Path(__file__).resolve().parent.parent / "data/mcp-token"
+TOKEN_F = CONFIG.mem0_root / "data/mcp-token"
 
 
 def _load_or_create_token() -> str:
@@ -44,22 +47,27 @@ if HTTP_MODE:
     from fastmcp.server.auth import AccessToken, TokenVerifier
 
     class StaticBearerVerifier(TokenVerifier):
-        """Tailnet exposure still requires auth: the tailnet has non-James devices."""
+        """Reload the owner token on every verification; values are never logged."""
 
-        def __init__(self, token: str):
+        def __init__(self, token_file: Path):
             super().__init__()
-            self._token = token
+            self._token_file = token_file
 
         async def verify_token(self, token: str):
-            if secrets.compare_digest(token, self._token):
-                return AccessToken(token=token, client_id="studio0-fleet", scopes=["memory"])
+            try:
+                expected = self._token_file.read_text().strip()
+            except OSError:
+                return None
+            if expected and secrets.compare_digest(token, expected):
+                return AccessToken(token=token, client_id=CONFIG.owner_id, scopes=["memory"])
             return None
 
-    _auth = StaticBearerVerifier(_load_or_create_token())
+    _load_or_create_token()
+    _auth = StaticBearerVerifier(TOKEN_F)
 
 mcp = FastMCP("mem0", auth=_auth)
 
-USER = "james"
+USER = str(CONFIG.values["BORG_OWNER_ID"])
 _instances = {}
 _lock = threading.Lock()
 
@@ -92,11 +100,11 @@ def _fmt(rows):
 
 @mcp.tool
 def memory_search(query: str, limit: int = 5, agent: str = "") -> str:
-    """Search Studio0 shared memory by meaning (works with zero keyword overlap).
+    """Search configured BORG memory by meaning (works with zero keyword overlap).
     Returns facts with relevance scores, ids, and metadata; corpus-seeded rows
     carry a source file path in metadata for full detail. Use this FIRST when
     you need an operational fact, a prior decision, a preference, or a pointer
-    into James's memory corpus."""
+    into the configured owner's memory corpus."""
     return _fmt(FAST.search(
         query,
         limit=limit,
@@ -109,7 +117,7 @@ def memory_search(query: str, limit: int = 5, agent: str = "") -> str:
 
 @mcp.tool
 def memory_add(text: str, agent: str = "", run_id: str = "", raw: bool = False) -> str:
-    """Store a durable fact in Studio0 shared memory. One plain sentence per
+    """Store a durable fact in configured BORG memory. One plain sentence per
     fact works best. NEVER store credentials, tokens, cookies, client personal
     data (emails/phones/addresses), or dollar amounts. Set raw=true to store
     verbatim (skips LLM distillation). Pass your agent name in `agent`."""
@@ -142,8 +150,8 @@ def memory_list(limit: int = 20, agent: str = "") -> str:
     must = [FieldCondition(key="user_id", match=MatchValue(value=USER))]
     if agent:
         must.append(FieldCondition(key="agent_id", match=MatchValue(value=agent)))
-    points, _ = QdrantClient(host="127.0.0.1", port=6333).scroll(
-        "studio0",
+    points, _ = QdrantClient(url=CONFIG.qdrant_url).scroll(
+        CONFIG.qdrant_collection,
         scroll_filter=Filter(
             must=must,
             must_not=[

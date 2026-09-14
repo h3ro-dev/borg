@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mem0-token — manage scoped MCP access tokens for the Studio0 memory store.
+"""mem0-token — manage scoped MCP access tokens for the configured memory store.
 
 Tokens are generated with `openssl rand -base64 36`, written to a 0600 file
 under data/tokens/, and recorded in data/mcp-tokens.json as a SHA-256 hash
@@ -8,14 +8,17 @@ To hand a token to a person, send them the file (or its contents) over a
 channel you trust, then delete the file.
 
   mem0-token list
-  mem0-token grant mateo --scopes team:project,client:*,person:mateo
+  mem0-token grant example-user --scopes team:project,client:*,person:example-user
   mem0-token grant-hash fleet-bow --sha256 <remote-generated-sha256> --scopes team:project,ops
-  mem0-token rotate mateo
-  mem0-token revoke mateo
+  mem0-token rotate example-user
+  mem0-token revoke example-user
   mem0-token scopes                       # every scope name currently valid
 """
 
 import argparse
+import fcntl
+import os
+import tempfile
 import hashlib
 import importlib.machinery
 import json
@@ -25,7 +28,8 @@ import sys
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent
-BASE = BIN.parent
+CONFIG = importlib.machinery.SourceFileLoader("borg_config_token", str(BIN / "borg_config.py")).load_module().CONFIG
+BASE = CONFIG.mem0_root
 LIB = importlib.machinery.SourceFileLoader("mem0_scope_lib", str(BIN / "mem0_scope_lib.py")).load_module()
 CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BIN / "mem0ctl")).load_module()
 
@@ -44,7 +48,7 @@ def load() -> dict:
         if LEGACY_F.exists() and LEGACY_F.read_text().strip():
             principals.append(
                 {
-                    "name": "james",
+                    "name": CONFIG.owner_id,
                     "token_sha256": sha(LEGACY_F.read_text().strip()),
                     "allowed_scopes": ["*"],
                     "write_scope": LIB.SCOPE_PERSONAL,
@@ -56,14 +60,52 @@ def load() -> dict:
     return json.loads(TOKENS_F.read_text())
 
 
+def atomic_private_write(path: Path, text: str):
+    """Publish a complete 0600 file; readers never observe a partial registry."""
+    fd, name = tempfile.mkstemp(prefix="." + path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
 def save(doc: dict):
-    TOKENS_F.write_text(json.dumps(doc, indent=2))
-    TOKENS_F.chmod(0o600)
+    # A supported writer must never publish identities the reader rejects.
+    names, hashes = set(), set()
+    for entry in doc["principals"]:
+        name, digest = entry.get("name"), entry.get("token_sha256")
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name):
+            sys.exit("invalid principal name; registry unchanged")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            sys.exit("invalid principal hash; registry unchanged")
+        if name in names or digest in hashes:
+            sys.exit("duplicate principal name or token hash; registry unchanged")
+        names.add(name)
+        hashes.add(digest)
+    atomic_private_write(TOKENS_F, json.dumps(doc, indent=2))
+
+
+def may_write_scope(scope: str, allowed: list[str], valid: set[str]) -> bool:
+    if scope not in valid or "*" in scope:
+        return False
+    return ("*" in allowed or scope in allowed or
+            (scope.startswith(LIB.SCOPE_CLIENT_PREFIX) and
+             LIB.SCOPE_CLIENT_PREFIX + "*" in allowed))
 
 
 def valid_scopes(extra_people=()) -> list[str]:
     clients = LIB.load_clients()
-    people = {p["name"] for p in (load_raw().get("principals") or []) if p["name"] != "james"}
+    people = {p["name"] for p in (load_raw().get("principals") or []) if p["name"] != CONFIG.owner_id}
     people.update(extra_people)
     return (
         ["*", LIB.SCOPE_PERSONAL, LIB.SCOPE_PROJECT, LIB.SCOPE_OPS, LIB.SCOPE_CLIENT_PREFIX + "*"]
@@ -91,8 +133,7 @@ def write_token_file(name: str, token: str) -> Path:
     TOKEN_DIR.mkdir(parents=True, exist_ok=True)
     TOKEN_DIR.chmod(0o700)
     p = TOKEN_DIR / f"{name}.token"
-    p.write_text(token + "\n")
-    p.chmod(0o600)
+    atomic_private_write(p, token + "\n")
     return p
 
 
@@ -124,6 +165,8 @@ def cmd_grant(args):
         sys.exit(f"principal {args.name!r} already exists — use `rotate` to reissue its token")
     token = gen_token()
     write_scope = args.write_scope or f"{LIB.SCOPE_PERSON_PREFIX}{args.name}"
+    if not may_write_scope(write_scope, scopes, ok):
+        sys.exit("--write-scope must be one of the principal allowed scopes")
     doc["principals"].append(
         {
             "name": args.name,
@@ -144,7 +187,7 @@ def cmd_grant(args):
 def cmd_grant_hash(args):
     """Register a token hash generated on another owned machine.
 
-    The plaintext token never reaches Studio0. This is the required fleet path.
+    The plaintext token never reaches the memory server. This is the required remote path.
     """
     if not re.fullmatch(r"[0-9a-f]{64}", args.sha256):
         sys.exit("--sha256 must be 64 lowercase hex characters")
@@ -157,7 +200,7 @@ def cmd_grant_hash(args):
     if any(p["name"] == args.name for p in doc["principals"]):
         sys.exit(f"principal {args.name!r} already exists — revoke it before registering a new remote hash")
     write_scope = args.write_scope or LIB.SCOPE_PROJECT
-    if write_scope not in ok or write_scope not in scopes:
+    if not may_write_scope(write_scope, scopes, ok):
         sys.exit("--write-scope must be one of the principal's allowed scopes")
     doc["principals"].append(
         {
@@ -166,7 +209,7 @@ def cmd_grant_hash(args):
             "allowed_scopes": scopes,
             "write_scope": write_scope,
             "created_mdt": CTL.now_mdt(),
-            "note": args.note or "remote-generated token; plaintext never reached Studio0",
+            "note": args.note or "remote-generated token; plaintext never reached the memory server",
         }
     )
     save(doc)
@@ -182,7 +225,7 @@ def cmd_rotate(args):
             p["rotated_mdt"] = CTL.now_mdt()
             save(doc)
             f = write_token_file(args.name, token)
-            print(f"rotated {args.name}; the old token stops working the moment the server reloads")
+            print(f"rotated {args.name}; the live v2 server revalidates on the next request")
             print(f"token written to {f}  (mode 600)")
             return
     sys.exit(f"no principal {args.name!r}")
@@ -198,7 +241,7 @@ def cmd_revoke(args):
     f = TOKEN_DIR / f"{args.name}.token"
     if f.exists():
         f.unlink()
-    print(f"revoked {args.name} — restart the MCP server to drop the in-memory entry")
+    print(f"revoked {args.name} — the live v2 server revalidates on the next request")
 
 
 def main():
@@ -223,7 +266,14 @@ def main():
     r = sub.add_parser("rotate"); r.add_argument("name"); r.set_defaults(fn=cmd_rotate)
     v = sub.add_parser("revoke"); v.add_argument("name"); v.set_defaults(fn=cmd_revoke)
     a = ap.parse_args()
-    a.fn(a)
+    if hasattr(a, "name") and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", a.name):
+        ap.error("principal name must be a safe identifier")
+    # Serialize the full read/modify/publish transaction, not just its write.
+    TOKENS_F.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(TOKENS_F) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        a.fn(a)
 
 
 if __name__ == "__main__":

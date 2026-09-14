@@ -1,49 +1,46 @@
 #!/usr/bin/env python3
-"""Pick the 25 REAL backlog episodes used by BOTH canary arms. READ-ONLY.
+"""Pick a dense configured episode set for two isolated canary arms.
 
-Reuses ox-pilot/pick_episodes.fetch() (qdrant scroll, same body construction
-backfill.py uses) and skips anything already in data/backfill-state.json or in
-the old ox-pilot canary set. Writes ONLY into training/eval/.
-
-Selection = the 25 DENSEST remaining episodes. Measured 2026-08-28, the
-un-processed pool is 1,794 episodes with a median body of 210 chars; graphiti
-resolves those stubs to nodes=0 without ever issuing a dedup or an edge call,
-so an unfiltered slice would not exercise the internal call shapes this canary
-exists to test. Ingest order is date-desc (backfill.py's own order) so both
-arms accumulate identical group state before each dedup call.
+The source, owner, prior selections, feed state, and destination are explicit.
+Selection favors dense inputs so internal graph call shapes are exercised;
+ingest order remains date-desc so both arms see identical accumulated state.
 """
-import os
 import argparse
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, os.path.expanduser("~/Library/Memory/graphiti/ox-pilot"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pick_episodes import fetch  # noqa: E402
-
-BASE = Path(__file__).resolve().parent
-GRAPHITI = BASE.parent.parent
-STATE_F = GRAPHITI / "data/backfill-state.json"
-OXCANARY = GRAPHITI / "ox-pilot/canary-episodes.json"
-
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-n", type=int, default=25)
     ap.add_argument("--min-chars", type=int, default=900)
     ap.add_argument("--skip", type=int, default=0)
-    ap.add_argument("--out", default="canary-episodes-25-20260828.json")
+    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--qdrant-url", required=True)
+    ap.add_argument("--collection", required=True)
+    ap.add_argument("--owner-id", required=True)
+    ap.add_argument("--state-file", type=Path, required=True,
+                    help="explicit private graph feed state")
+    ap.add_argument("--prior-canary-file", type=Path, default=None,
+                    help="optional explicit prior selection to exclude")
     args = ap.parse_args()
 
-    rows = fetch()
+    rows = fetch(args.qdrant_url, args.collection, args.owner_id)
     groups = {}
     for f in rows:
         groups.setdefault(f["run_id"], []).append(f)
     ordered = sorted(groups.items(), key=lambda kv: max(x["date"] for x in kv[1]), reverse=True)
 
-    st = json.loads(STATE_F.read_text()) if STATE_F.exists() else {"done": {}}
+    st = json.loads(args.state_file.read_text()) if args.state_file.exists() else {"done": {}}
     done = set(st.get("done") or {})
-    old = {e["run_id"] for e in json.loads(OXCANARY.read_text())} if OXCANARY.exists() else set()
+    old = (
+        {e["run_id"] for e in json.loads(args.prior_canary_file.read_text())}
+        if args.prior_canary_file is not None and args.prior_canary_file.exists()
+        else set()
+    )
 
     pool = []
     for rid, fs in ordered:
@@ -60,7 +57,8 @@ def main():
     # ingest order = backfill.py's own order (newest thread date first)
     out.sort(key=lambda e: e["date"], reverse=True)
 
-    (BASE / args.out).write_text(json.dumps(out, indent=1))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
     chars = sorted(e["chars"] for e in out)
     print(f"{len(out)} episodes -> {args.out}")
     print(f"chars min={chars[0]} median={chars[len(chars)//2]} max={chars[-1]} "

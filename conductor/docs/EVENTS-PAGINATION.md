@@ -1,22 +1,18 @@
 # /events pagination — read with an afterSeq loop, always
 
-`GET /events?threadId=<id>&afterSeq=<n>` returns AT MOST 200 events per call
-and carries no next-page marker. A reader that calls once with `afterSeq=0`
-sees only the thread's first 200 events forever.
+`GET /events?threadId=<id>&afterSeq=<n>&limit=<n>` returns at most 200 events
+per call. It returns `nextAfterSeq` and `hasMore`; a requested limit above 200
+is capped. A reader that calls once with `afterSeq=0` still sees only the
+thread's first page.
 
-Field cost (2026-08-05, a production run): an unpaged reader made finished
-threads look "still running" for hours — final answers sat on later pages —
-and prompted one wrong turn/interrupt on a healthy, completed lane.
-
-Correct pattern (from a workspace lane driver):
+Correct reader pattern:
 
     items, after = [], 0
     while True:
-        page = get(f"/events?threadId={tid}&afterSeq={after}")
-        if not page: break
-        items.extend(page)
-        if page[-1].get("seq") is None or len(page) < 200: break
-        after = page[-1]["seq"]
+        response = get(f"/events?threadId={tid}&afterSeq={after}")
+        items.extend(response["events"])
+        if not response["hasMore"]: break
+        after = response["nextAfterSeq"]
 
-Consider adding a `nextAfterSeq`/`hasMore` field to the response, or a
-`limit` parameter, so single-call readers fail loudly instead of silently.
+The response shape is `{events,lastSeq,nextAfterSeq,hasMore}`. `lastSeq` is the
+current ring cursor; `nextAfterSeq` is the exact cursor for the next request.

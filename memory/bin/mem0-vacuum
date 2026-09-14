@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Report or hard-delete configured BORG rows retired for at least 90 days.
+
+The default is a dry-run report. Physical deletion requires the explicit
+--confirm flag. This tool only targets status=tombstoned or status=decayed in
+the configured collection. It is intentionally not scheduled.
+"""
+
+import argparse
+import importlib.machinery
+from datetime import datetime, timezone
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+CTL = importlib.machinery.SourceFileLoader(
+    "mem0ctl_vacuum", str(BASE / "bin" / "mem0ctl")
+).load_module()
+
+MIN_RETENTION_DAYS = 90
+
+
+def parse_iso(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--confirm", action="store_true", help="perform the reported hard deletes")
+    parser.add_argument("--days", type=int, default=MIN_RETENTION_DAYS)
+    parser.add_argument("--user", default=str(CTL.CONFIG.values["BORG_OWNER_ID"]))
+    parser.add_argument("--run", default=None, help="limit to one run_id (test/forensics)")
+    args = parser.parse_args()
+    if args.days < MIN_RETENTION_DAYS:
+        parser.error(f"--days cannot be below {MIN_RETENTION_DAYS}")
+
+    q = CTL.qdrant_client()
+    now = datetime.now(timezone.utc)
+    candidates = []
+    retired_seen = missing_date = too_young = 0
+    for point in CTL.scroll_all(q, CTL.COLLECTION, with_payload=True, with_vectors=False):
+        payload = point.payload or {}
+        if payload.get("user_id") != args.user or (args.run and payload.get("run_id") != args.run):
+            continue
+        status = payload.get("status")
+        if status not in CTL.RETIRED_STATUSES:
+            continue
+        retired_seen += 1
+        retired_at = parse_iso(payload.get("retired_at") or payload.get("decayed_at"))
+        if retired_at is None:
+            missing_date += 1
+            continue
+        age_days = (now - retired_at).total_seconds() / 86400.0
+        if age_days < args.days:
+            too_young += 1
+            continue
+        candidates.append((str(point.id), status, age_days, payload))
+
+    mode = "CONFIRMED-HARD-DELETE" if args.confirm else "DRY-RUN"
+    print(
+        f"mem0-vacuum mode={mode} collection={CTL.COLLECTION} retention_days={args.days} "
+        f"retired_seen={retired_seen} candidates={len(candidates)} "
+        f"too_young={too_young} missing_date={missing_date}"
+    )
+    for point_id, status, age_days, _payload in candidates[:200]:
+        print(f"- {point_id} status={status} retired_age_days={age_days:.1f}")
+    if len(candidates) > 200:
+        print(f"... {len(candidates) - 200} more candidates omitted from console output")
+    if not args.confirm or not candidates:
+        if not args.confirm:
+            print("no changes; pass --confirm to hard-delete the reported candidates")
+        return
+
+    # Full current payloads are fsynced before the first destructive call.
+    for point_id, status, age_days, payload in candidates:
+        CTL.append_retired(
+            q,
+            point_id,
+            retired_by="mem0-vacuum",
+            reason=f"hard delete after {age_days:.1f} days in status={status}",
+            fallback_text=payload.get("data") or "",
+            collection=CTL.COLLECTION,
+            action="vacuum-hard-delete",
+            status_after="deleted",
+        )
+    ids = [point_id for point_id, _status, _age_days, _payload in candidates]
+    q.delete(collection_name=CTL.COLLECTION, points_selector=ids, wait=True)
+    print(f"hard-deleted={len(ids)}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Conservative, reversible decay pass for the configured BORG memory.
+
+This pass never deletes. It marks old organic rows status=decayed after first
+writing their full pre-change payload to retired-log.jsonl. Corpus/seed rows
+and facts younger than 30 days are exempt.
+"""
+
+import argparse
+import importlib.machinery
+import math
+from datetime import datetime, timezone
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+CTL = importlib.machinery.SourceFileLoader(
+    "mem0ctl_decay", str(BASE / "bin" / "mem0ctl")
+).load_module()
+
+MIN_FACT_AGE_DAYS = 30.0
+DECAY_THRESHOLD = 1.0
+
+
+def parse_date(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    for candidate in (text, text.replace(" MDT", "-06:00"), text.replace(" MST", "-07:00")):
+        try:
+            parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except ValueError:
+            continue
+    try:
+        return datetime.strptime(text[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def row_date(payload):
+    for key in ("updated_at", "created_at", "added_mdt", "thread_date"):
+        parsed = parse_date(payload.get(key))
+        if parsed:
+            return parsed, key
+    return None, None
+
+
+def is_seed_or_corpus(payload):
+    if payload.get("run_id") == "corpus-seed":
+        return True
+    kind = str(payload.get("kind") or "").strip().lower()
+    return kind in {"seed", "corpus"} or kind.startswith("seed-") or kind.startswith("corpus-")
+
+
+def confidence_factor(payload):
+    raw = payload.get("confidence")
+    if not isinstance(raw, (int, float)) or not math.isfinite(float(raw)):
+        return 1.0, None
+    value = float(raw)
+    if value > 1.0 and value <= 10.0:
+        value /= 10.0
+    value = min(1.0, max(0.0, value))
+    return 1.0 + (1.0 - value) * 0.25, value
+
+
+def kind_factor(payload):
+    kind = str(payload.get("kind") or "fact").lower()
+    if any(token in kind for token in ("status", "commit", "session", "thread", "email", "activity")):
+        return 1.15, "ephemeral"
+    if any(token in kind for token in ("preference", "policy", "decision", "principle", "identity")):
+        return 0.65, "durable"
+    return 1.0, "fact"
+
+
+def usage_factor(payload, now):
+    count = payload.get("access_count", payload.get("usage_count"))
+    last = parse_date(payload.get("last_accessed_at") or payload.get("last_accessed"))
+    present = isinstance(count, (int, float)) or last is not None
+    if not present:
+        return 1.0, False
+    frequency = max(0.0, float(count or 0.0))
+    factor = 1.0 / (1.0 + min(frequency, 20.0) * 0.04)
+    if last is not None:
+        access_age = max(0.0, (now - last).total_seconds() / 86400.0)
+        if access_age < 30.0:
+            factor *= 0.55
+        elif access_age < 90.0:
+            factor *= 0.8
+    return factor, True
+
+
+def score(payload, now):
+    stamp, date_key = row_date(payload)
+    if stamp is None:
+        return None
+    age_days = max(0.0, (now - stamp).total_seconds() / 86400.0)
+    k_factor, kind_bucket = kind_factor(payload)
+    c_factor, confidence = confidence_factor(payload)
+    u_factor, usage_present = usage_factor(payload, now)
+    value = (age_days / 365.0) * k_factor * c_factor * u_factor
+    return {
+        "score": round(value, 6),
+        "age_days": round(age_days, 3),
+        "date_key": date_key,
+        "kind_bucket": kind_bucket,
+        "confidence": confidence,
+        "usage_present": usage_present,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--user", default=str(CTL.CONFIG.values["BORG_OWNER_ID"]))
+    parser.add_argument("--run", default=None, help="limit to one run_id (test/forensics)")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    q = CTL.qdrant_client()
+    now = datetime.now(timezone.utc)
+    counters = {
+        "scanned": 0,
+        "evaluated": 0,
+        "seed_exempt": 0,
+        "canary_exempt": 0,
+        "fresh_exempt": 0,
+        "already_retired": 0,
+        "undated": 0,
+        "eligible": 0,
+        "decayed": 0,
+    }
+    usage_rows = 0
+
+    for point in CTL.scroll_all(q, CTL.COLLECTION, with_payload=True, with_vectors=False):
+        counters["scanned"] += 1
+        payload = point.payload or {}
+        if payload.get("user_id") != args.user or (args.run and payload.get("run_id") != args.run):
+            continue
+        if payload.get("status") in CTL.RETIRED_STATUSES:
+            counters["already_retired"] += 1
+            continue
+        if payload.get("is_canary") is True:
+            counters["canary_exempt"] += 1
+            continue
+        if is_seed_or_corpus(payload):
+            counters["seed_exempt"] += 1
+            continue
+        details = score(payload, now)
+        if details is None:
+            counters["undated"] += 1
+            continue
+        counters["evaluated"] += 1
+        usage_rows += int(details["usage_present"])
+        if details["age_days"] < MIN_FACT_AGE_DAYS:
+            counters["fresh_exempt"] += 1
+            continue
+        if details["score"] < DECAY_THRESHOLD:
+            continue
+        counters["eligible"] += 1
+        if args.dry_run:
+            continue
+        reason = (
+            f"decay score {details['score']:.3f} >= {DECAY_THRESHOLD:.3f}; "
+            f"age={details['age_days']:.1f}d kind={details['kind_bucket']}"
+        )
+        CTL.append_retired(
+            q,
+            point.id,
+            retired_by="mem0-decay",
+            reason=reason,
+            collection=CTL.COLLECTION,
+            action="decay",
+            status_after=CTL.DECAY_STATUS,
+        )
+        decayed_at = CTL.now_iso()
+        q.set_payload(
+            collection_name=CTL.COLLECTION,
+            payload={
+                "status": CTL.DECAY_STATUS,
+                "decayed_at": decayed_at,
+                "retired_at": decayed_at,
+                "retire_reason": reason,
+                "retired_by": "mem0-decay",
+                "superseded_by": None,
+                "decay_score": details["score"],
+                "decay_scored_at": decayed_at,
+                "decay_basis": {
+                    "age_days": details["age_days"],
+                    "date_key": details["date_key"],
+                    "kind_bucket": details["kind_bucket"],
+                    "confidence": details["confidence"],
+                    "usage_signal": details["usage_present"],
+                },
+            },
+            points=[point.id],
+            wait=True,
+        )
+        counters["decayed"] += 1
+
+    usage_note = (
+        f"usage_signal=present on {usage_rows} evaluated rows"
+        if usage_rows
+        else "usage_signal=absent; score uses age+kind and confidence when present"
+    )
+    mode = "dry-run" if args.dry_run else "apply"
+    print(f"mem0-decay mode={mode} threshold={DECAY_THRESHOLD:.3f} {usage_note}")
+    print(" ".join(f"{key}={value}" for key, value in counters.items()))
+
+
+if __name__ == "__main__":
+    main()

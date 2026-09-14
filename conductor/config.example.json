@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "owner": "new-owner",
+  "instance_id": "2e2f5e46-c196-44df-a7fd-dd509a1b1486",
+  "borgHome": "/opt/borg-owner",
+  "appPath": "/opt/borg-owner/app/conductor",
+  "statePath": "/opt/borg-owner/private/router",
+  "ports": {
+    "conductor": 4747
+  },
+  "runtime": {
+    "nodeBin": "/opt/borg-owner/runtime/node-v24.21.0/bin/node",
+    "codexBin": "/opt/borg-owner/runtime/npm/node_modules/.bin/codex"
+  },
+  "requiredVersions": {
+    "node": "24.21.0",
+    "codex": "0.146.0"
+  },
+  "routing": {
+    "timeoutMs": 5000,
+    "lockTimeoutMs": 30000,
+    "defaultLimitId": "codex",
+    "modelLimitIds": {}
+  },
+  "machines": [
+    {
+      "id": "local",
+      "capacity": {
+        "kind": "local-os",
+        "args": [],
+        "maxAgeMs": 15000,
+        "loadPerCoreLimit": 1.5,
+        "memoryUseLimitPercent": 92
+      },
+      "claims": {
+        "kind": "router-state",
+        "args": [],
+        "maxAgeMs": 15000
+      }
+    }
+  ],
+  "conductors": [
+    {
+      "id": "primary",
+      "machineId": "local",
+      "accountProfile": "primary",
+      "codexHome": "/opt/borg-owner/conductors/primary/profile",
+      "codexBin": "/opt/borg-owner/runtime/npm/node_modules/.bin/codex",
+      "logsPath": "/opt/borg-owner/conductors/primary/logs",
+      "host": "127.0.0.1",
+      "port": 4747,
+      "capabilities": [
+        "reasoning",
+        "tools"
+      ],
+      "accountPin": null,
+      "enabled": true
+    }
+  ],
+  "providers": {
+    "grok": {
+      "enabled": false,
+      "capabilities": [
+        "reasoning",
+        "interrupt-resume-steer"
+      ]
+    },
+    "claude": {
+      "enabled": false,
+      "capabilities": [
+        "reasoning"
+      ],
+      "missingCapabilities": [
+        "native-thread-status",
+        "mid-turn-steer"
+      ]
+    }
+  }
+}
