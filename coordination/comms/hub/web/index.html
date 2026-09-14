@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; form-action 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>Agent Inbox &amp; Authority</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<noscript>
+  <div class="noscript">This console needs JavaScript. It runs entirely from this origin; there is no build step and no external code.</div>
+</noscript>
+
+<!-- The whole interface is built as DOM nodes by js/views.js. Nothing on this page
+     ever assigns innerHTML, so hostile message text can only ever appear as text. -->
+<div id="root" class="root"></div>
+<div id="toasts" class="toast-root" aria-live="polite"></div>
+
+<script src="js/core.js"></script>
+<script src="js/dom.js"></script>
+<script src="js/api.js"></script>
+<script src="js/views.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

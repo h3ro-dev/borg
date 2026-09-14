@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Deterministic auditor for Spark site-patrol reports.
+
+Trust nothing: re-measures every objective claim in a PATROL-REPORT JSON
+(homepage status, robots, sitemap count, title, meta, canonical, H1, schema
+types, sampled page statuses) with direct GETs and diffs claim vs reality.
+Subjective findings are marked REVIEW (judgment tier), never auto-trusted.
+
+Usage: mem0-patrol-verify FILE [FILE...]   (patrol lane output files)
+       mem0-patrol-verify --all            (every *.out in clients/patrols/)
+"""
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+import httpx
+from borg_config import BorgConfigError
+
+PATROLS = Path(os.environ["BORG_PATROL_OUTPUT_DIR"]).expanduser() if os.environ.get("BORG_PATROL_OUTPUT_DIR") else None
+UA = {"User-Agent": "BORG-PatrolAudit/1.0"}
+AI_BOTS = ["GPTBot", "ClaudeBot", "PerplexityBot"]
+
+
+def fetch(url, **kw):
+    try:
+        return httpx.get(url, headers=UA, follow_redirects=True, timeout=20, **kw)
+    except Exception:
+        return None
+
+
+def measure(site):
+    m = {}
+    r = fetch(site)
+    m["homepage_status"] = r.status_code if r is not None else None
+    html = r.text if r is not None else ""
+    t = re.search(r"(?is)<title[^>]*>(.*?)</title>", html)
+    m["title"] = re.sub(r"\s+", " ", t.group(1)).strip() if t else None
+    md = re.search(r'(?is)<meta[^>]+name=["\']description["\'][^>]*content=["\'](.*?)["\']', html) or \
+         re.search(r'(?is)<meta[^>]+content=["\'](.*?)["\'][^>]*name=["\']description["\']', html)
+    m["meta_description_chars"] = len(md.group(1)) if md else 0
+    can = re.search(r'(?is)<link[^>]+rel=["\']canonical["\'][^>]*href=["\'](.*?)["\']', html) or \
+          re.search(r'(?is)<link[^>]+href=["\'](.*?)["\'][^>]*rel=["\']canonical["\']', html)
+    m["canonical"] = can.group(1).strip() if can else None
+    h1 = re.search(r"(?is)<h1[^>]*>(.*?)</h1>", html)
+    m["h1"] = re.sub(r"(?s)<[^>]+>", "", h1.group(1)).strip()[:120] if h1 else None
+    m["schema_types"] = sorted(set(re.findall(r'"@type"\s*:\s*"([^"]+)"', html)))
+    base = str(r.url).rstrip("/") if r is not None else site.rstrip("/")
+    rob = fetch(base + "/robots.txt")
+    m["robots_status"] = rob.status_code if rob is not None else None
+    blocked = []
+    if rob is not None and rob.status_code == 200:
+        txt = rob.text
+        for bot in AI_BOTS:
+            sec = re.search(rf"(?is)user-agent:\s*{bot}\s*(.*?)(?=user-agent:|\Z)", txt)
+            if sec and re.search(r"(?i)disallow:\s*/\s*$", sec.group(1), re.M):
+                blocked.append(bot)
+    m["ai_crawlers_blocked"] = blocked
+    sm_urls = None
+    for cand in ("/sitemap.xml", "/sitemap_index.xml"):
+        sm = fetch(base + cand)
+        if sm is not None and sm.status_code == 200 and "<" in sm.text[:200]:
+            sm_urls = len(re.findall(r"<loc>", sm.text))
+            break
+    m["sitemap_urls"] = sm_urls
+    return m
+
+
+def norm(v):
+    if isinstance(v, str):
+        return re.sub(r"\s+", " ", v).strip().rstrip("/").lower()
+    if isinstance(v, list):
+        return sorted(str(x).lower() for x in v)
+    return v
+
+
+def close_enough(field, claim, real):
+    if claim is None and real is None:
+        return True
+    if field == "meta_description_chars":
+        try:
+            return abs(int(claim) - int(real)) <= 15
+        except Exception:
+            return False
+    if field == "sitemap_urls":
+        try:
+            return abs(int(claim) - int(real)) <= max(2, int(real) * 0.1)
+        except Exception:
+            return claim == real
+    if field == "title" or field == "h1":
+        a, b = norm(claim) or "", norm(real) or ""
+        return a == b or (a and b and (a in b or b in a))
+    return norm(claim) == norm(real)
+
+
+def extract_report(path):
+    text = Path(path).read_text(errors="ignore")
+    i = text.rfind("PATROL-REPORT")
+    if i < 0:
+        return None
+    js = text[i + len("PATROL-REPORT"):]
+    m = re.search(r"\{.*\}", js, re.S)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return None
+
+
+def audit_file(path):
+    rep = extract_report(path)
+    if not rep:
+        print(f"{Path(path).name}: NO PARSEABLE PATROL-REPORT (lane fails audit)")
+        return
+    for s in rep.get("sites", []):
+        site = s.get("site", "?")
+        real = measure(site)
+        checks = []
+        for field in ("homepage_status", "title", "meta_description_chars", "canonical", "h1", "schema_types", "sitemap_urls", "ai_crawlers_blocked"):
+            if field in s:
+                ok = close_enough(field, s.get(field), real.get(field))
+                checks.append((field, ok, s.get(field), real.get(field)))
+        for p in s.get("sampled_pages", [])[:5]:
+            r = fetch(p.get("url", ""))
+            ok = (r is not None and r.status_code == p.get("status"))
+            checks.append((f"page:{p.get('url','')[:50]}", ok, p.get("status"), r.status_code if r is not None else None))
+        good = sum(1 for _, ok, _, _ in checks if ok)
+        pct = 100 * good // max(1, len(checks))
+        print(f"\n=== {site}  [{Path(path).name}]  accuracy {good}/{len(checks)} ({pct}%) ===")
+        for field, ok, claim, realv in checks:
+            mark = "CONFIRMED" if ok else "MISMATCH "
+            if not ok:
+                print(f"  {mark} {field}: claimed={claim!r} measured={realv!r}")
+        for f in s.get("findings", []):
+            print(f"  REVIEW   finding: {str(f)[:140]}")
+
+
+def main():
+    args = sys.argv[1:]
+    if "--all" in args and PATROLS is None:
+        raise BorgConfigError("--all requires BORG_PATROL_OUTPUT_DIR")
+    files = sorted(PATROLS.glob("*.out")) if "--all" in args else [Path(a) for a in args if not a.startswith("-")]
+    if not files:
+        print("no patrol files")
+        return
+    for f in files:
+        audit_file(f)
+
+
+if __name__ == "__main__":
+    main()

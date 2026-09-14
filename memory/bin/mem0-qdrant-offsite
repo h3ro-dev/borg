@@ -1,0 +1,891 @@
+#!/bin/bash
+# QB-08: create and copy a fresh Qdrant snapshot to the approved off-machine target.
+#
+# This file deliberately has no default action.  --dry-run is read-only; an
+# actual transfer requires --transfer.  The staged LaunchAgent supplies that
+# explicit argument but is not installed by this lane.
+set -u
+set -o pipefail
+umask 077
+
+: "${BORG_HOME:?BORG_HOME is required}"
+: "${BORG_QDRANT_URL:?BORG_QDRANT_URL is required}"
+: "${BORG_QDRANT_COLLECTION:?BORG_QDRANT_COLLECTION is required}"
+: "${BORG_BACKUP_DESTINATION:?BORG_BACKUP_DESTINATION is required}"
+: "${BORG_BACKUP_REMOTE_DIR:?BORG_BACKUP_REMOTE_DIR is required}"
+BASE="$BORG_HOME/mem0"
+QDRANT_URL="$BORG_QDRANT_URL"
+QDRANT_URL="${QDRANT_URL%/}"
+COLLECTION="$BORG_QDRANT_COLLECTION"
+DEST_ALIAS="$BORG_BACKUP_DESTINATION"
+REMOTE_DIR="$BORG_BACKUP_REMOTE_DIR"
+RECEIPT_PATH="${MEM0_QDRANT_RECEIPT_PATH:-$BASE/data/qdrant-offsite-receipts.jsonl}"
+RETENTION_COUNT="${MEM0_QDRANT_RETENTION_COUNT:-7}"
+TRANSFER_WINDOW_MDT="${MEM0_QDRANT_TRANSFER_WINDOW_MDT:-03:52}"
+QDRANT_TIMEOUT="${MEM0_QDRANT_TIMEOUT_S:-180}"
+
+MODE=""
+DO_RESTORE=0
+RESTORE_COLLECTION="${MEM0_QDRANT_RESTORE_COLLECTION:-}"
+EXPECTED_POINT_COUNT="${MEM0_QDRANT_EXPECTED_POINT_COUNT:-}"
+DECLARED_EXPECTED_POINT_COUNT_PROVENANCE="${MEM0_QDRANT_EXPECTED_POINT_COUNT_PROVENANCE:-manual_unbound}"
+
+SNAPSHOT_RECORD=""
+SNAPSHOT_NAME=""
+SNAPSHOT_CREATION_TIME=""
+SNAPSHOT_SIZE="0"
+SNAPSHOT_API_CHECKSUM=""
+SNAPSHOT_CREATED_JSON="false"
+SNAPSHOT_URL=""
+FINAL_NAME=""
+REMOTE_DIR_DISPLAY=""
+REMOTE_RELATIVE_DIR=""
+REMOTE_DIR_SHELL=""
+REMOTE_FINAL_SPEC=""
+REMOTE_FINAL_SHELL=""
+REMOTE_TEMP_SPEC=""
+REMOTE_TEMP_SHELL=""
+TEMP_DIR=""
+LOCAL_FILE=""
+RESTORE_FILE=""
+RESTORE_RESPONSE=""
+COUNT_RESPONSE=""
+SAMPLE_RESPONSE=""
+CREATION_RESPONSE=""
+RESTORE_TARGET_RESPONSE=""
+SOURCE_COUNT_BEFORE_RESPONSE=""
+SOURCE_COUNT_AFTER_RESPONSE=""
+SOURCE_SAMPLE_BEFORE_RESPONSE=""
+SOURCE_SAMPLE_AFTER_RESPONSE=""
+
+LOCAL_BYTES="0"
+REMOTE_BYTES="0"
+LOCAL_SHA256=""
+REMOTE_SHA256=""
+CHECKSUM_MATCH_JSON="false"
+RESTORED_POINT_COUNT="0"
+SAMPLE_QUERY_STATE="NOT_RUN"
+RECEIPT_MODE=""
+EXPECTED_POINT_COUNT_PROVENANCE="not_used"
+EXPECTED_POINT_COUNT_LIMIT="not_used"
+SOURCE_COUNT_BEFORE=""
+SOURCE_COUNT_AFTER=""
+SOURCE_COUNT_EXPECTED=""
+SOURCE_COUNT_PROVENANCE="UNKNOWN"
+SOURCE_SAMPLE_BEFORE_STATE="UNKNOWN"
+SOURCE_SAMPLE_AFTER_STATE="UNKNOWN"
+SOURCE_SAMPLE_PROVENANCE="UNKNOWN"
+SOURCE_SAMPLE_BEFORE_ID_SHA256=""
+SOURCE_SAMPLE_BEFORE_PAYLOAD_SHA256=""
+SOURCE_SAMPLE_BEFORE_VECTOR_SHA256=""
+SOURCE_SAMPLE_AFTER_ID_SHA256=""
+SOURCE_SAMPLE_AFTER_PAYLOAD_SHA256=""
+SOURCE_SAMPLE_AFTER_VECTOR_SHA256=""
+SOURCE_BEFORE_OBSERVED_AT_MDT=""
+SOURCE_AFTER_OBSERVED_AT_MDT=""
+RESTORE_SAMPLE_ID_SHA256=""
+RESTORE_SAMPLE_PAYLOAD_SHA256=""
+RESTORE_SAMPLE_VECTOR_SHA256=""
+RESTORE_SAMPLE_MATCH_JSON="null"
+
+usage() {
+  cat >&2 <<'EOF'
+usage:
+  mem0-qdrant-offsite --dry-run
+  mem0-qdrant-offsite --transfer [--restore-proof]
+  mem0-qdrant-offsite --restore-proof
+
+--restore-proof requires MEM0_QDRANT_RESTORE_COLLECTION (or
+--restore-collection) and MEM0_QDRANT_EXPECTED_POINT_COUNT (or
+--expected-point-count). The count remains a manual assertion unless its
+provenance is explicitly declared. The restore collection must be absent and
+must not be the source collection.
+EOF
+}
+
+is_uint() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+is_sha256() {
+  [[ "$1" =~ ^[0-9a-fA-F]{64}$ ]]
+}
+
+fail_config() {
+  echo "QB-08-REFUSE reason=$1" >&2
+  exit 2
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --dry-run)
+        [ -z "$MODE" ] || fail_config "one_mode_only"
+        MODE="dry-run"
+        ;;
+      --transfer)
+        [ -z "$MODE" ] || fail_config "one_mode_only"
+        MODE="transfer"
+        ;;
+      --restore-proof)
+        DO_RESTORE=1
+        ;;
+      --restore-collection)
+        [ "$#" -ge 2 ] || fail_config "restore_collection_value_missing"
+        RESTORE_COLLECTION="$2"
+        shift
+        ;;
+      --expected-point-count)
+        [ "$#" -ge 2 ] || fail_config "expected_point_count_value_missing"
+        EXPECTED_POINT_COUNT="$2"
+        shift
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        usage
+        fail_config "unknown_argument"
+        ;;
+    esac
+    shift
+  done
+
+  if [ -z "$MODE" ] && [ "$DO_RESTORE" -eq 1 ]; then
+    MODE="restore"
+  fi
+  [ -n "$MODE" ] || {
+    usage
+    exit 2
+  }
+  if [ "$DO_RESTORE" -eq 1 ] && [ "$MODE" = "dry-run" ]; then
+    fail_config "restore_not_valid_in_dry_run"
+  fi
+  if [ "$DO_RESTORE" -eq 1 ] && [ "$MODE" = "transfer" ]; then
+    RECEIPT_MODE="transfer+restore"
+  elif [ "$DO_RESTORE" -eq 1 ]; then
+    RECEIPT_MODE="restore"
+  else
+    RECEIPT_MODE="$MODE"
+  fi
+}
+
+validate_config() {
+  case "$COLLECTION" in
+    ''|*[!A-Za-z0-9._-]*) fail_config "invalid_collection" ;;
+  esac
+  case "$DEST_ALIAS" in
+    ''|-*|*[!A-Za-z0-9._-]*) fail_config "invalid_destination_alias" ;;
+  esac
+  case "$REMOTE_DIR" in
+    \~/*) ;;
+    *) fail_config "remote_dir_must_be_home_relative" ;;
+  esac
+  case "${REMOTE_DIR:2}" in
+    ''|*[!A-Za-z0-9/._-]*|*'..'*|*'//'*) fail_config "invalid_remote_dir" ;;
+  esac
+  is_uint "$RETENTION_COUNT" || fail_config "invalid_retention_count"
+  [ "$RETENTION_COUNT" -gt 0 ] || fail_config "retention_count_must_be_positive"
+  is_uint "$QDRANT_TIMEOUT" || fail_config "invalid_qdrant_timeout"
+  [ "$QDRANT_TIMEOUT" -gt 0 ] || fail_config "qdrant_timeout_must_be_positive"
+
+  REMOTE_DIR_DISPLAY="${REMOTE_DIR%/}"
+  REMOTE_RELATIVE_DIR="${REMOTE_DIR_DISPLAY:2}"
+  REMOTE_DIR_SHELL="\$HOME/$REMOTE_RELATIVE_DIR"
+  if [ "$DO_RESTORE" -eq 1 ]; then
+    [ -n "$RESTORE_COLLECTION" ] || fail_config "MEM0_QDRANT_RESTORE_COLLECTION_required"
+    case "$RESTORE_COLLECTION" in
+      ''|*[!A-Za-z0-9._-]*) fail_config "invalid_restore_collection" ;;
+    esac
+    [ "$RESTORE_COLLECTION" != "$COLLECTION" ] || fail_config "restore_collection_must_not_be_source"
+    is_uint "$EXPECTED_POINT_COUNT" || fail_config "MEM0_QDRANT_EXPECTED_POINT_COUNT_required"
+    case "$DECLARED_EXPECTED_POINT_COUNT_PROVENANCE" in
+      ''|*[!A-Za-z0-9._:-]*) fail_config "invalid_expected_point_count_provenance" ;;
+    esac
+    EXPECTED_POINT_COUNT_PROVENANCE="$DECLARED_EXPECTED_POINT_COUNT_PROVENANCE"
+    if [ "$EXPECTED_POINT_COUNT_PROVENANCE" = "manual_unbound" ]; then
+      EXPECTED_POINT_COUNT_LIMIT="manual_value_not_independently_bound_to_snapshot"
+    else
+      EXPECTED_POINT_COUNT_LIMIT="caller_declared_provenance_not_independently_verified_by_this_run"
+    fi
+  fi
+}
+
+cleanup() {
+  if [ -n "${TEMP_DIR:-}" ] && [ -d "$TEMP_DIR" ]; then
+    # Remove only files this invocation created.  This never addresses a
+    # Qdrant snapshot or a remote backup path.
+    local path
+    for path in \
+      "$LOCAL_FILE" "$RESTORE_FILE" "$RESTORE_RESPONSE" "$COUNT_RESPONSE" \
+      "$SAMPLE_RESPONSE" "$CREATION_RESPONSE" "$RESTORE_TARGET_RESPONSE" \
+      "$SOURCE_COUNT_BEFORE_RESPONSE" "$SOURCE_COUNT_AFTER_RESPONSE" \
+      "$SOURCE_SAMPLE_BEFORE_RESPONSE" "$SOURCE_SAMPLE_AFTER_RESPONSE"; do
+      [ -n "$path" ] && rm -f "$path"
+    done
+    rmdir "$TEMP_DIR" 2>/dev/null || true
+  fi
+}
+
+on_exit() {
+  local rc="$?"
+  cleanup
+  exit "$rc"
+}
+
+trap on_exit EXIT
+trap 'exit 130' INT TERM
+
+now_mdt() {
+  TZ=America/Denver date '+%Y-%m-%dT%H:%M:%S %Z'
+}
+
+json_uint_or_zero() {
+  if is_uint "$1"; then
+    printf '%s' "$1"
+  else
+    printf '0'
+  fi
+}
+
+write_receipt() {
+  local state="$1"
+  local reason="$2"
+  local receipt_dir
+  local record
+  local checksum_match="$CHECKSUM_MATCH_JSON"
+  local expected_json
+
+  receipt_dir="$(dirname "$RECEIPT_PATH")"
+  mkdir -p "$receipt_dir" || return 1
+  touch "$RECEIPT_PATH" || return 1
+  chmod 600 "$RECEIPT_PATH" || return 1
+
+  expected_json="$(json_uint_or_zero "$EXPECTED_POINT_COUNT")"
+  record="$(jq -cn \
+    --arg at_mdt "$(now_mdt)" \
+    --arg collection "$COLLECTION" \
+    --arg snapshot_name "$SNAPSHOT_NAME" \
+    --arg snapshot_creation_time "$SNAPSHOT_CREATION_TIME" \
+    --arg snapshot_api_checksum "$SNAPSHOT_API_CHECKSUM" \
+    --arg destination_alias "$DEST_ALIAS" \
+    --arg destination "${DEST_ALIAS}:${REMOTE_DIR_DISPLAY}/" \
+    --arg local_sha256 "$LOCAL_SHA256" \
+    --arg remote_sha256 "$REMOTE_SHA256" \
+    --arg mode "$RECEIPT_MODE" \
+    --arg restore_collection "$RESTORE_COLLECTION" \
+    --arg expected_point_count_provenance "$EXPECTED_POINT_COUNT_PROVENANCE" \
+    --arg expected_point_count_limit "$EXPECTED_POINT_COUNT_LIMIT" \
+    --arg sample_query "$SAMPLE_QUERY_STATE" \
+    --arg source_before_observed_at_mdt "$SOURCE_BEFORE_OBSERVED_AT_MDT" \
+    --arg source_after_observed_at_mdt "$SOURCE_AFTER_OBSERVED_AT_MDT" \
+    --arg source_count_before "$SOURCE_COUNT_BEFORE" \
+    --arg source_count_after "$SOURCE_COUNT_AFTER" \
+    --arg source_count_expected "$SOURCE_COUNT_EXPECTED" \
+    --arg source_count_provenance "$SOURCE_COUNT_PROVENANCE" \
+    --arg source_sample_before_state "$SOURCE_SAMPLE_BEFORE_STATE" \
+    --arg source_sample_after_state "$SOURCE_SAMPLE_AFTER_STATE" \
+    --arg source_sample_provenance "$SOURCE_SAMPLE_PROVENANCE" \
+    --arg source_sample_before_id_sha256 "$SOURCE_SAMPLE_BEFORE_ID_SHA256" \
+    --arg source_sample_before_payload_sha256 "$SOURCE_SAMPLE_BEFORE_PAYLOAD_SHA256" \
+    --arg source_sample_before_vector_sha256 "$SOURCE_SAMPLE_BEFORE_VECTOR_SHA256" \
+    --arg source_sample_after_id_sha256 "$SOURCE_SAMPLE_AFTER_ID_SHA256" \
+    --arg source_sample_after_payload_sha256 "$SOURCE_SAMPLE_AFTER_PAYLOAD_SHA256" \
+    --arg source_sample_after_vector_sha256 "$SOURCE_SAMPLE_AFTER_VECTOR_SHA256" \
+    --arg restore_sample_id_sha256 "$RESTORE_SAMPLE_ID_SHA256" \
+    --arg restore_sample_payload_sha256 "$RESTORE_SAMPLE_PAYLOAD_SHA256" \
+    --arg restore_sample_vector_sha256 "$RESTORE_SAMPLE_VECTOR_SHA256" \
+    --arg state "$state" \
+    --arg reason "$reason" \
+    --argjson snapshot_size_bytes "$(json_uint_or_zero "$SNAPSHOT_SIZE")" \
+    --argjson snapshot_created_by_run "$SNAPSHOT_CREATED_JSON" \
+    --argjson local_bytes "$(json_uint_or_zero "$LOCAL_BYTES")" \
+    --argjson remote_bytes "$(json_uint_or_zero "$REMOTE_BYTES")" \
+    --argjson retention_count "$(json_uint_or_zero "$RETENTION_COUNT")" \
+    --argjson expected_point_count "$expected_json" \
+    --argjson restored_point_count "$(json_uint_or_zero "$RESTORED_POINT_COUNT")" \
+    --argjson checksum_match "$checksum_match" \
+    --argjson restore_sample_matches_source "$RESTORE_SAMPLE_MATCH_JSON" \
+    'def maybe_uint($value):
+        if $value == "" then null else ($value | tonumber) end;
+      def maybe_text($value):
+        if $value == "" then null else $value end;
+      {
+      at_mdt: $at_mdt,
+      collection: $collection,
+      snapshot_name: $snapshot_name,
+      snapshot_creation_time: $snapshot_creation_time,
+      snapshot_api_checksum: maybe_text($snapshot_api_checksum),
+      snapshot_created_by_run: $snapshot_created_by_run,
+      snapshot_size_bytes: $snapshot_size_bytes,
+      local_bytes: $local_bytes,
+      remote_bytes: $remote_bytes,
+      local_sha256: $local_sha256,
+      remote_sha256: $remote_sha256,
+      destination_alias: $destination_alias,
+      destination: $destination,
+      retention_count: $retention_count,
+      checksum_match: $checksum_match,
+      mode: $mode,
+      restore_collection: (if $restore_collection == "" then null else $restore_collection end),
+      expected_point_count: $expected_point_count,
+      expected_point_count_provenance: $expected_point_count_provenance,
+      expected_point_count_limit: $expected_point_count_limit,
+      restored_point_count: $restored_point_count,
+      sample_query: $sample_query,
+      source_observation: {
+        before_at_mdt: maybe_text($source_before_observed_at_mdt),
+        after_at_mdt: maybe_text($source_after_observed_at_mdt),
+        count: {
+          before: maybe_uint($source_count_before),
+          after: maybe_uint($source_count_after),
+          expected: maybe_uint($source_count_expected),
+          provenance: $source_count_provenance,
+          limitation: "observational_bracket_not_snapshot_native; concurrent_changes_may_evade_detection"
+        },
+        sample: {
+          before_state: $source_sample_before_state,
+          after_state: $source_sample_after_state,
+          provenance: $source_sample_provenance,
+          limitation: "one_bounded_scroll_point_bracketing_snapshot; contents_replaced_by_sha256",
+          before: {
+            point_id_sha256: maybe_text($source_sample_before_id_sha256),
+            payload_sha256: maybe_text($source_sample_before_payload_sha256),
+            vector_sha256: maybe_text($source_sample_before_vector_sha256)
+          },
+          after: {
+            point_id_sha256: maybe_text($source_sample_after_id_sha256),
+            payload_sha256: maybe_text($source_sample_after_payload_sha256),
+            vector_sha256: maybe_text($source_sample_after_vector_sha256)
+          }
+        }
+      },
+      restore_sample: {
+        state: $sample_query,
+        point_id_sha256: maybe_text($restore_sample_id_sha256),
+        payload_sha256: maybe_text($restore_sample_payload_sha256),
+        vector_sha256: maybe_text($restore_sample_vector_sha256),
+        matches_source_sample: $restore_sample_matches_source
+      },
+      reason: $reason,
+      state: $state
+    }')" || return 1
+  printf '%s\n' "$record" >> "$RECEIPT_PATH" || return 1
+  chmod 600 "$RECEIPT_PATH" || return 1
+}
+
+fail_run() {
+  local reason="$1"
+  if [ "$MODE" != "dry-run" ]; then
+    write_receipt "FAIL" "$reason" || echo "QB-08-RECEIPT-FAIL reason=receipt_write_failed" >&2
+  fi
+  echo "QB-08-FAIL reason=$reason" >&2
+  exit 1
+}
+
+set_snapshot_record() {
+  local require_checksum="$1"
+  SNAPSHOT_NAME="$(printf '%s' "$SNAPSHOT_RECORD" | jq -er '.name')" || return 1
+  SNAPSHOT_CREATION_TIME="$(printf '%s' "$SNAPSHOT_RECORD" | jq -er '.creation_time')" || return 1
+  SNAPSHOT_SIZE="$(printf '%s' "$SNAPSHOT_RECORD" | jq -er '.size | tonumber')" || return 1
+  SNAPSHOT_API_CHECKSUM="$(printf '%s' "$SNAPSHOT_RECORD" | jq -er '.checksum // ""')" || return 1
+  case "$SNAPSHOT_NAME" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  is_uint "$SNAPSHOT_SIZE" || return 1
+  [ "$SNAPSHOT_SIZE" -gt 0 ] || return 1
+  if [ "$require_checksum" -eq 1 ]; then
+    is_sha256 "$SNAPSHOT_API_CHECKSUM" || return 1
+  elif [ -n "$SNAPSHOT_API_CHECKSUM" ]; then
+    is_sha256 "$SNAPSHOT_API_CHECKSUM" || return 1
+  fi
+  SNAPSHOT_API_CHECKSUM="$(printf '%s' "$SNAPSHOT_API_CHECKSUM" | tr '[:upper:]' '[:lower:]')"
+
+  local encoded_name
+  encoded_name="$(jq -nr --arg name "$SNAPSHOT_NAME" '$name | @uri')" || return 1
+  SNAPSHOT_URL="$QDRANT_URL/collections/$COLLECTION/snapshots/$encoded_name"
+  FINAL_NAME="${COLLECTION}-${SNAPSHOT_NAME}"
+  REMOTE_FINAL_SPEC="${DEST_ALIAS}:${REMOTE_DIR_DISPLAY}/${FINAL_NAME}"
+  REMOTE_FINAL_SHELL="$REMOTE_DIR_SHELL/$FINAL_NAME"
+}
+
+select_snapshot() {
+  # Inventory/restore selection is read-only. Transfer never calls this path.
+  SNAPSHOT_RECORD="$(curl -fsS --max-time "$QDRANT_TIMEOUT" \
+    "$QDRANT_URL/collections/$COLLECTION/snapshots" \
+    | jq -e -c '
+      .result
+      | if type != "array" then error("snapshot result is not an array") else . end
+      | map(select(
+          type == "object"
+          and (.name | type) == "string"
+          and (.creation_time | type) == "string"
+          and (((.size | tonumber?) // 0) > 0)
+        ))
+      | if length == 0 then error("no completed snapshots") else max_by(.creation_time) end
+    ')" || return 1
+  set_snapshot_record 0
+}
+
+create_snapshot() {
+  CREATION_RESPONSE="$TEMP_DIR/snapshot-create.json"
+  curl -fsS --max-time "$QDRANT_TIMEOUT" -X POST \
+    "$QDRANT_URL/collections/$COLLECTION/snapshots?wait=true" \
+    -o "$CREATION_RESPONSE" || return 1
+  SNAPSHOT_RECORD="$(jq -e -c '
+    select(.status == "ok")
+    | .result
+    | select(
+        type == "object"
+        and (.name | type) == "string"
+        and (.creation_time | type) == "string"
+        and (((.size | tonumber?) // 0) > 0)
+        and (.checksum | type) == "string"
+      )
+  ' "$CREATION_RESPONSE")" || return 1
+  set_snapshot_record 1 || return 1
+  SNAPSHOT_CREATED_JSON="true"
+}
+
+sha256_text() {
+  local digest
+  digest="$(shasum -a 256 2>/dev/null | awk 'NR == 1 {print tolower($1)}')" || return 1
+  is_sha256 "$digest" || return 1
+  printf '%s' "$digest"
+}
+
+extract_sample_hashes() {
+  local phase="$1"
+  local path="$2"
+  local count
+  local id_json
+  local payload_json
+  local vector_json
+  local id_sha
+  local payload_sha
+  local vector_sha
+
+  jq -e '.status == "ok" and (.result.points | type) == "array"' \
+    "$path" >/dev/null 2>&1 || return 1
+  count="$(jq -er '.result.points | length' "$path")" || return 1
+  is_uint "$count" || return 1
+  if [ "$count" -eq 0 ]; then
+    if [ "$phase" = "before" ]; then
+      SOURCE_SAMPLE_BEFORE_STATE="EMPTY"
+    else
+      SOURCE_SAMPLE_AFTER_STATE="EMPTY"
+    fi
+    return 0
+  fi
+
+  id_json="$(jq -ecS '.result.points[0].id' "$path")" || return 1
+  payload_json="$(jq -ecS '.result.points[0].payload' "$path")" || return 1
+  vector_json="$(jq -ecS '.result.points[0].vector' "$path")" || return 1
+  id_sha="$(printf '%s' "$id_json" | sha256_text)" || return 1
+  payload_sha="$(printf '%s' "$payload_json" | sha256_text)" || return 1
+  vector_sha="$(printf '%s' "$vector_json" | sha256_text)" || return 1
+
+  if [ "$phase" = "before" ]; then
+    SOURCE_SAMPLE_BEFORE_STATE="PASS"
+    SOURCE_SAMPLE_BEFORE_ID_SHA256="$id_sha"
+    SOURCE_SAMPLE_BEFORE_PAYLOAD_SHA256="$payload_sha"
+    SOURCE_SAMPLE_BEFORE_VECTOR_SHA256="$vector_sha"
+  else
+    SOURCE_SAMPLE_AFTER_STATE="PASS"
+    SOURCE_SAMPLE_AFTER_ID_SHA256="$id_sha"
+    SOURCE_SAMPLE_AFTER_PAYLOAD_SHA256="$payload_sha"
+    SOURCE_SAMPLE_AFTER_VECTOR_SHA256="$vector_sha"
+  fi
+}
+
+observe_source() {
+  local phase="$1"
+  local count_path
+  local sample_path
+  local count_value=""
+  local observed_at
+
+  observed_at="$(now_mdt)"
+  if [ "$phase" = "before" ]; then
+    SOURCE_BEFORE_OBSERVED_AT_MDT="$observed_at"
+    count_path="$TEMP_DIR/source-count-before.json"
+    sample_path="$TEMP_DIR/source-sample-before.json"
+    SOURCE_COUNT_BEFORE_RESPONSE="$count_path"
+    SOURCE_SAMPLE_BEFORE_RESPONSE="$sample_path"
+  else
+    SOURCE_AFTER_OBSERVED_AT_MDT="$observed_at"
+    count_path="$TEMP_DIR/source-count-after.json"
+    sample_path="$TEMP_DIR/source-sample-after.json"
+    SOURCE_COUNT_AFTER_RESPONSE="$count_path"
+    SOURCE_SAMPLE_AFTER_RESPONSE="$sample_path"
+  fi
+
+  if curl -fsS --max-time "$QDRANT_TIMEOUT" -X POST \
+    -H 'Content-Type: application/json' \
+    --data-binary '{"exact":true}' \
+    "$QDRANT_URL/collections/$COLLECTION/points/count" \
+    -o "$count_path"; then
+    count_value="$(jq -er 'select(.status == "ok") | .result.count | tonumber' \
+      "$count_path" 2>/dev/null || true)"
+    is_uint "$count_value" || count_value=""
+  fi
+  if [ "$phase" = "before" ]; then
+    SOURCE_COUNT_BEFORE="$count_value"
+  else
+    SOURCE_COUNT_AFTER="$count_value"
+  fi
+
+  if curl -fsS --max-time "$QDRANT_TIMEOUT" -X POST \
+    -H 'Content-Type: application/json' \
+    --data-binary '{"limit":1,"with_payload":true,"with_vector":true}' \
+    "$QDRANT_URL/collections/$COLLECTION/points/scroll" \
+    -o "$sample_path"; then
+    extract_sample_hashes "$phase" "$sample_path" || true
+  fi
+}
+
+finalize_source_observation() {
+  if is_uint "$SOURCE_COUNT_BEFORE" && is_uint "$SOURCE_COUNT_AFTER" \
+      && [ "$SOURCE_COUNT_BEFORE" -eq "$SOURCE_COUNT_AFTER" ]; then
+    SOURCE_COUNT_EXPECTED="$SOURCE_COUNT_BEFORE"
+    SOURCE_COUNT_PROVENANCE="stable_before_after"
+  else
+    SOURCE_COUNT_EXPECTED=""
+    SOURCE_COUNT_PROVENANCE="UNKNOWN"
+  fi
+
+  if [ "$SOURCE_SAMPLE_BEFORE_STATE" = "EMPTY" ] \
+      && [ "$SOURCE_SAMPLE_AFTER_STATE" = "EMPTY" ]; then
+    SOURCE_SAMPLE_PROVENANCE="stable_before_after"
+  elif [ "$SOURCE_SAMPLE_BEFORE_STATE" = "PASS" ] \
+      && [ "$SOURCE_SAMPLE_AFTER_STATE" = "PASS" ] \
+      && [ "$SOURCE_SAMPLE_BEFORE_ID_SHA256" = "$SOURCE_SAMPLE_AFTER_ID_SHA256" ] \
+      && [ "$SOURCE_SAMPLE_BEFORE_PAYLOAD_SHA256" = "$SOURCE_SAMPLE_AFTER_PAYLOAD_SHA256" ] \
+      && [ "$SOURCE_SAMPLE_BEFORE_VECTOR_SHA256" = "$SOURCE_SAMPLE_AFTER_VECTOR_SHA256" ]; then
+    SOURCE_SAMPLE_PROVENANCE="stable_before_after"
+  else
+    SOURCE_SAMPLE_PROVENANCE="UNKNOWN"
+  fi
+}
+
+file_size() {
+  local value
+  if [ "$(uname -s)" = "Darwin" ]; then
+    value="$(stat -f%z "$1" 2>/dev/null || true)"
+    if is_uint "$value"; then
+      printf '%s' "$value"
+      return 0
+    fi
+  else
+    value="$(stat -c%s "$1" 2>/dev/null || true)"
+    if is_uint "$value"; then
+      printf '%s' "$value"
+      return 0
+    fi
+  fi
+  value="$(wc -c < "$1" 2>/dev/null | tr -d '[:space:]' || true)"
+  is_uint "$value" || return 1
+  printf '%s' "$value"
+}
+
+sha256_file() {
+  local digest
+  digest="$(shasum -a 256 "$1" 2>/dev/null | awk 'NR == 1 {print tolower($1)}')" || return 1
+  is_sha256 "$digest" || return 1
+  printf '%s' "$digest"
+}
+
+make_temp_dir() {
+  TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mem0-qdrant-offsite.XXXXXX")" || return 1
+  chmod 700 "$TEMP_DIR" || return 1
+}
+
+download_snapshot() {
+  LOCAL_FILE="$TEMP_DIR/$FINAL_NAME"
+  curl -fsS --max-time "$QDRANT_TIMEOUT" "$SNAPSHOT_URL" -o "$LOCAL_FILE" || return 1
+  [ -s "$LOCAL_FILE" ] || return 1
+  LOCAL_BYTES="$(file_size "$LOCAL_FILE")" || return 1
+  is_uint "$LOCAL_BYTES" || return 1
+  [ "$LOCAL_BYTES" -gt 0 ] || return 1
+  [ "$LOCAL_BYTES" -eq "$SNAPSHOT_SIZE" ] || return 2
+  LOCAL_SHA256="$(sha256_file "$LOCAL_FILE")" || return 1
+  if [ -n "$SNAPSHOT_API_CHECKSUM" ] \
+      && [ "$LOCAL_SHA256" != "$SNAPSHOT_API_CHECKSUM" ]; then
+    return 3
+  fi
+}
+
+remote_mkdir() {
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$DEST_ALIAS" \
+    "mkdir -p $REMOTE_DIR_SHELL" >/dev/null 2>&1
+}
+
+remote_file_size() {
+  local remote_path="$1"
+  local value
+  value="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$DEST_ALIAS" \
+    "stat -f%z $remote_path" 2>/dev/null | tr -d '[:space:]' || true)"
+  if is_uint "$value"; then
+    printf '%s' "$value"
+    return 0
+  fi
+  value="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$DEST_ALIAS" \
+    "stat -c%s $remote_path" 2>/dev/null | tr -d '[:space:]' || true)"
+  is_uint "$value" || return 1
+  printf '%s' "$value"
+}
+
+remote_file_sha256() {
+  local remote_path="$1"
+  local digest
+  digest="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$DEST_ALIAS" \
+    "shasum -a 256 $remote_path" 2>/dev/null \
+    | awk 'NF {print tolower($1); exit}' || true)"
+  is_sha256 "$digest" || return 1
+  printf '%s' "$digest"
+}
+
+verify_remote_file() {
+  local remote_path="$1"
+  REMOTE_BYTES="$(remote_file_size "$remote_path")" || return 1
+  REMOTE_SHA256="$(remote_file_sha256 "$remote_path")" || return 1
+  [ "$REMOTE_BYTES" -gt 0 ] || return 1
+  [ "$LOCAL_BYTES" -eq "$REMOTE_BYTES" ] || return 2
+  [ "$LOCAL_SHA256" = "$REMOTE_SHA256" ] || return 3
+  CHECKSUM_MATCH_JSON="true"
+  return 0
+}
+
+remote_transfer() {
+  local temp_name
+  temp_name=".${FINAL_NAME}.part.$$.$RANDOM"
+  REMOTE_TEMP_SPEC="${DEST_ALIAS}:${REMOTE_DIR_DISPLAY}/${temp_name}"
+  REMOTE_TEMP_SHELL="$REMOTE_DIR_SHELL/$temp_name"
+
+  remote_mkdir || return 1
+  scp -q -o BatchMode=yes -o ConnectTimeout=10 "$LOCAL_FILE" "$REMOTE_TEMP_SPEC" || return 2
+  verify_remote_file "$REMOTE_TEMP_SHELL"
+  case "$?" in
+    0) ;;
+    2) return 3 ;;
+    3) return 4 ;;
+    *) return 5 ;;
+  esac
+  # Same-directory link creation is atomic and refuses an existing final name.
+  # Removing the invocation-owned part file never addresses an older backup.
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$DEST_ALIAS" \
+    "ln $REMOTE_TEMP_SHELL $REMOTE_FINAL_SHELL && rm $REMOTE_TEMP_SHELL" \
+    >/dev/null 2>&1 || return 6
+  verify_remote_file "$REMOTE_FINAL_SHELL" || return 6
+  return 0
+}
+
+pull_remote_final() {
+  LOCAL_FILE="$TEMP_DIR/$FINAL_NAME"
+  scp -q -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_FINAL_SPEC" "$LOCAL_FILE" || return 1
+  [ -s "$LOCAL_FILE" ] || return 1
+  LOCAL_BYTES="$(file_size "$LOCAL_FILE")" || return 1
+  LOCAL_SHA256="$(sha256_file "$LOCAL_FILE")" || return 1
+  # The offsite copy must match the selected source snapshot before upload.
+  [ "$LOCAL_BYTES" -eq "$SNAPSHOT_SIZE" ] || return 2
+  is_sha256 "$SNAPSHOT_API_CHECKSUM" || return 3
+  [ "$LOCAL_SHA256" = "$SNAPSHOT_API_CHECKSUM" ] || return 3
+  verify_remote_file "$REMOTE_FINAL_SHELL" || return $?
+  return 0
+}
+
+restore_target_absent() {
+  local http_code
+  RESTORE_TARGET_RESPONSE="$TEMP_DIR/restore-target.json"
+  http_code="$(curl -sS --max-time "$QDRANT_TIMEOUT" \
+    -o "$RESTORE_TARGET_RESPONSE" -w '%{http_code}' \
+    "$QDRANT_URL/collections/$RESTORE_COLLECTION")" || return 1
+  case "$http_code" in
+    404) return 0 ;;
+    200) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
+extract_restore_sample_hashes() {
+  local id_json
+  local payload_json
+  local vector_json
+  id_json="$(jq -ecS '.result.points[0].id' "$SAMPLE_RESPONSE")" || return 1
+  payload_json="$(jq -ecS '.result.points[0].payload' "$SAMPLE_RESPONSE")" || return 1
+  vector_json="$(jq -ecS '.result.points[0].vector' "$SAMPLE_RESPONSE")" || return 1
+  RESTORE_SAMPLE_ID_SHA256="$(printf '%s' "$id_json" | sha256_text)" || return 1
+  RESTORE_SAMPLE_PAYLOAD_SHA256="$(printf '%s' "$payload_json" | sha256_text)" || return 1
+  RESTORE_SAMPLE_VECTOR_SHA256="$(printf '%s' "$vector_json" | sha256_text)" || return 1
+}
+
+restore_from_remote() {
+  local restore_bytes
+  local restore_sha256
+  restore_target_absent
+  case "$?" in
+    0) ;;
+    2) return 8 ;;
+    *) return 7 ;;
+  esac
+
+  RESTORE_FILE="$TEMP_DIR/restore-$FINAL_NAME"
+  scp -q -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE_FINAL_SPEC" "$RESTORE_FILE" || return 1
+  [ -s "$RESTORE_FILE" ] || return 1
+  restore_bytes="$(file_size "$RESTORE_FILE")" || return 6
+  restore_sha256="$(sha256_file "$RESTORE_FILE")" || return 6
+  [ "$restore_bytes" -eq "$LOCAL_BYTES" ] || return 6
+  [ "$restore_sha256" = "$LOCAL_SHA256" ] || return 6
+  RESTORE_RESPONSE="$TEMP_DIR/restore-response.json"
+  curl -fsS --max-time "$QDRANT_TIMEOUT" -X POST \
+    -F "snapshot=@$RESTORE_FILE" \
+    "$QDRANT_URL/collections/$RESTORE_COLLECTION/snapshots/upload?priority=snapshot&wait=true&checksum=$restore_sha256" \
+    -o "$RESTORE_RESPONSE" || return 2
+  jq -e '.status == "ok" and .result == true' "$RESTORE_RESPONSE" >/dev/null 2>&1 || return 2
+
+  COUNT_RESPONSE="$TEMP_DIR/restore-count.json"
+  curl -fsS --max-time "$QDRANT_TIMEOUT" -X POST \
+    -H 'Content-Type: application/json' \
+    --data-binary '{"exact":true}' \
+    "$QDRANT_URL/collections/$RESTORE_COLLECTION/points/count" \
+    -o "$COUNT_RESPONSE" || return 3
+  RESTORED_POINT_COUNT="$(jq -er '.result.count | tonumber' "$COUNT_RESPONSE")" || return 3
+  is_uint "$RESTORED_POINT_COUNT" || return 3
+  [ "$RESTORED_POINT_COUNT" -eq "$EXPECTED_POINT_COUNT" ] || return 4
+
+  SAMPLE_RESPONSE="$TEMP_DIR/restore-sample.json"
+  curl -fsS --max-time "$QDRANT_TIMEOUT" -X POST \
+    -H 'Content-Type: application/json' \
+    --data-binary '{"limit":1,"with_payload":true,"with_vector":true}' \
+    "$QDRANT_URL/collections/$RESTORE_COLLECTION/points/scroll" \
+    -o "$SAMPLE_RESPONSE" || return 5
+  jq -e '.status == "ok" and (.result.points | type) == "array"' \
+    "$SAMPLE_RESPONSE" >/dev/null 2>&1 || return 5
+  if [ "$RESTORED_POINT_COUNT" -eq 0 ]; then
+    jq -e '.result.points | length == 0' "$SAMPLE_RESPONSE" >/dev/null 2>&1 || return 5
+    SAMPLE_QUERY_STATE="EMPTY"
+    if [ "$SOURCE_SAMPLE_PROVENANCE" = "stable_before_after" ] \
+        && [ "$SOURCE_SAMPLE_BEFORE_STATE" = "EMPTY" ]; then
+      RESTORE_SAMPLE_MATCH_JSON="true"
+    fi
+    return 0
+  fi
+
+  jq -e '.result.points | length > 0' "$SAMPLE_RESPONSE" >/dev/null 2>&1 || return 5
+  extract_restore_sample_hashes || return 5
+  SAMPLE_QUERY_STATE="PASS"
+  if [ "$SOURCE_SAMPLE_PROVENANCE" = "stable_before_after" ] \
+      && [ "$SOURCE_SAMPLE_BEFORE_STATE" = "PASS" ]; then
+    if [ "$RESTORE_SAMPLE_ID_SHA256" != "$SOURCE_SAMPLE_BEFORE_ID_SHA256" ] \
+        || [ "$RESTORE_SAMPLE_PAYLOAD_SHA256" != "$SOURCE_SAMPLE_BEFORE_PAYLOAD_SHA256" ] \
+        || [ "$RESTORE_SAMPLE_VECTOR_SHA256" != "$SOURCE_SAMPLE_BEFORE_VECTOR_SHA256" ]; then
+      RESTORE_SAMPLE_MATCH_JSON="false"
+      return 9
+    fi
+    RESTORE_SAMPLE_MATCH_JSON="true"
+  fi
+  return 0
+}
+
+print_dry_run() {
+  printf 'collection=%s\n' "$COLLECTION"
+  printf 'snapshot=%s\n' "$SNAPSHOT_NAME"
+  printf 'creation_time=%s\n' "$SNAPSHOT_CREATION_TIME"
+  printf 'snapshot_size_bytes=%s\n' "$SNAPSHOT_SIZE"
+  printf 'target=%s:%s/\n' "$DEST_ALIAS" "$REMOTE_DIR_DISPLAY"
+  printf 'retention_keep_newest=%s\n' "$RETENTION_COUNT"
+  printf 'transfer_window_mdt=%s\n' "$TRANSFER_WINDOW_MDT"
+  printf 'snapshot_creation=NOT_RUN\n'
+  printf 'transfer=NOT_RUN\n'
+}
+
+main() {
+  parse_args "$@"
+  validate_config
+
+  if [ "$MODE" = "dry-run" ]; then
+    if ! select_snapshot; then
+      fail_run "snapshot_list_failed"
+    fi
+    print_dry_run
+    return 0
+  fi
+
+  make_temp_dir || fail_run "temp_dir_failed"
+  if [ "$MODE" = "transfer" ]; then
+    observe_source "before"
+    create_snapshot || fail_run "snapshot_creation_failed"
+    observe_source "after"
+    finalize_source_observation
+    download_snapshot
+    case "$?" in
+      0) ;;
+      2) fail_run "snapshot_download_size_mismatch" ;;
+      3) fail_run "snapshot_download_checksum_mismatch" ;;
+      *) fail_run "snapshot_download_failed" ;;
+    esac
+    remote_transfer
+    case "$?" in
+      0) ;;
+      1) fail_run "remote_unreachable" ;;
+      2) fail_run "remote_upload_failed" ;;
+      3) fail_run "remote_size_mismatch" ;;
+      4) fail_run "checksum_mismatch" ;;
+      6) fail_run "remote_finalize_failed" ;;
+      *) fail_run "remote_transfer_failed" ;;
+    esac
+    if [ "$DO_RESTORE" -eq 1 ]; then
+      restore_from_remote
+      case "$?" in
+        0) ;;
+        1) fail_run "restore_remote_download_failed" ;;
+        2) fail_run "restore_upload_failed" ;;
+        3) fail_run "restore_count_failed" ;;
+        4) fail_run "restore_point_count_mismatch" ;;
+        5) fail_run "restore_sample_failed" ;;
+        6) fail_run "restore_roundtrip_checksum_mismatch" ;;
+        7) fail_run "restore_target_preflight_failed" ;;
+        8) fail_run "restore_collection_exists" ;;
+        9) fail_run "restore_sample_mismatch" ;;
+        *) fail_run "restore_failed" ;;
+      esac
+    fi
+  else
+    if ! select_snapshot; then
+      fail_run "snapshot_list_failed"
+    fi
+    pull_remote_final
+    case "$?" in
+      0) ;;
+      1) fail_run "remote_restore_source_unreachable" ;;
+      2) fail_run "remote_restore_source_size_mismatch" ;;
+      3) fail_run "remote_restore_source_checksum_mismatch" ;;
+      *) fail_run "remote_restore_source_failed" ;;
+    esac
+    restore_from_remote
+    case "$?" in
+      0) ;;
+      1) fail_run "restore_remote_download_failed" ;;
+      2) fail_run "restore_upload_failed" ;;
+      3) fail_run "restore_count_failed" ;;
+      4) fail_run "restore_point_count_mismatch" ;;
+      5) fail_run "restore_sample_failed" ;;
+      6) fail_run "restore_roundtrip_checksum_mismatch" ;;
+      7) fail_run "restore_target_preflight_failed" ;;
+      8) fail_run "restore_collection_exists" ;;
+      9) fail_run "restore_sample_mismatch" ;;
+      *) fail_run "restore_failed" ;;
+    esac
+  fi
+
+  write_receipt "PASS" "completed" || fail_run "receipt_write_failed"
+  printf 'QB-08-PASS mode=%s collection=%s local_bytes=%s remote_bytes=%s checksum_match=true\n' \
+    "$RECEIPT_MODE" "$COLLECTION" "$LOCAL_BYTES" "$REMOTE_BYTES"
+  return 0
+}
+
+main "$@"

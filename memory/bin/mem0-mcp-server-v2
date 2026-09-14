@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""mem0 MCP server v2 — Studio0 shared memory with per-person scoped access.
+"""mem0 MCP server v2 — BORG memory with per-person scoped access.
 
 Same store and same tools as v1 (`mem0-mcp-server`). What is new is that every
 request is attributed to a *principal*, and every read is filtered to the scopes
 that principal is allowed to see.
 
   data/mcp-tokens.json   token sha256 -> {name, allowed_scopes, write_scope}
-  data/mcp-token         v1's single token; auto-imported as the "james"
+  data/mcp-token         v1's single token; auto-imported as the configured owner
                          principal with all scopes, so nothing breaks on cutover
 
 Scope model (see SCOPE-AUDIT.md and ACCESS.md):
 
-  personal:james   James only. THE DEFAULT. A row with no `scope` key is
-                   treated as personal:james, because MatchAny cannot match a
+  personal:<owner> owner only. THE DEFAULT. A row with no `scope` key is
+                   treated as owner-private, because MatchAny cannot match a
                    missing field — default-closed is structural, not a policy
                    the code has to remember.
   team:project     internal product / engineering work
@@ -24,7 +24,7 @@ Scope model (see SCOPE-AUDIT.md and ACCESS.md):
 that is the only value that also reveals unscoped rows).
 
 Run:
-  mem0-mcp-server-v2                 # stdio (local Studio0 client = james)
+  mem0-mcp-server-v2                 # stdio for the configured local owner
   mem0-mcp-server-v2 --http 8766     # HTTP, bearer token required
 """
 
@@ -32,34 +32,65 @@ import os
 
 os.environ["MEM0_TELEMETRY"] = "false"
 
+import asyncio
+import fcntl
 import hashlib
+import inspect
 import importlib.machinery
 import json
+import logging
 import re
 import secrets
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
-BIN = Path(__file__).resolve().parent
-BASE = BIN.parent
-CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BIN / "mem0ctl")).load_module()
-LIB = importlib.machinery.SourceFileLoader("mem0_scope_lib", str(BIN / "mem0_scope_lib.py")).load_module()
-LIFECYCLE = importlib.machinery.SourceFileLoader("mem0_lifecycle", str(BIN / "mem0-codex-hook")).load_module()
+SOURCE_BIN = Path(__file__).resolve().parent
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_mcp_v2", str(SOURCE_BIN / "borg_config.py")
+).load_module().CONFIG
+BIN = SOURCE_BIN if not CONFIG.portable else CONFIG.mem0_root / "bin"
+BASE = CONFIG.mem0_root
+CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(SOURCE_BIN / "mem0ctl")).load_module()
+LIB = importlib.machinery.SourceFileLoader("mem0_scope_lib", str(SOURCE_BIN / "mem0_scope_lib.py")).load_module()
+CAPTURE = importlib.machinery.SourceFileLoader(
+    "mem0_capture_identity", str(SOURCE_BIN / "mem0_capture_identity.py")
+).load_module()
+LIFECYCLE = importlib.machinery.SourceFileLoader("mem0_lifecycle", str(SOURCE_BIN / "mem0-codex-hook")).load_module()
+GRAPH = importlib.machinery.SourceFileLoader("mem0_graph", str(SOURCE_BIN / "mem0_graph.py")).load_module()
+SELECTOR = importlib.machinery.SourceFileLoader(
+    "mem0_selection", str(SOURCE_BIN / "memory_selection.py")
+).load_module()
+CONTRACT = importlib.machinery.SourceFileLoader(
+    "mem0_runtime_contract", str(SOURCE_BIN / "mem0_runtime_contract.py")
+).load_module()
 
 from fastmcp import FastMCP
+from pydantic import StrictInt
 from fastmcp.exceptions import ToolError
 
 HTTP_MODE = "--http" in sys.argv
 TOKENS_F = BASE / "data/mcp-tokens.json"
 LEGACY_TOKEN_F = BASE / "data/mcp-token"
-USER = "james"
+USER = str(CONFIG.values["BORG_OWNER_ID"])
 HOOK_OFF = BASE / "HOOK_OFF"
 FLEET_STATE = BASE / "data/hook-runs/fleet-server"
 FLEET_LOG = BASE / "data/fleet-server.log"
 
 FULL = "*"
+RETIRED_STATUSES = frozenset({"tombstoned", "decayed"})
+VERIFIED_CAPTURE_SCHEMA = "borg.mem0.verified-finding/v1"
+VERIFIED_AGENT = "verified-finding"
+VERIFIED_LOCK_WAIT_SECONDS = 5.0
+VERIFIED_LOCK_POLL_SECONDS = 0.01
+LIFECYCLE_PREPARED_SCHEMA = "borg.mem0.lifecycle-prepared/v1"
+LIFECYCLE_RECEIPT_SCHEMA = "borg.mem0.lifecycle-receipt/v1"
+LIFECYCLE_CAPTURE_SCHEMA = "borg.mem0.lifecycle-candidate/v1"
+MAX_CURSOR_POSITION = (1 << 63) - 1
+LIFECYCLE_CAPTURE_AGENT = "lifecycle-candidate"
+LIFECYCLE_CAPTURE_PROVENANCE = "lifecycle-candidate"
 
 
 # ------------------------------------------------------------- principals --
@@ -107,53 +138,138 @@ class TokenStore:
     def h(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
+    def _signature(self):
+        try:
+            st = self.path.stat()
+            return (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        except OSError:
+            return None
+
+    def _load_locked(self, *, bootstrap=False):
+        if not self.path.exists():
+            if bootstrap:
+                self._bootstrap()
+            else:
+                raise FileNotFoundError(self.path)
+        # Bind the parsed bytes to the opened inode, not a later path stat.
+        # A concurrent atomic replace must trigger a retry, never cache old bytes
+        # under the replacement file's signature.
+        for _ in range(3):
+            with self.path.open("r") as stream:
+                before = os.fstat(stream.fileno())
+                raw = stream.read()
+                after = os.fstat(stream.fileno())
+            signature = lambda st: (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+            loaded_signature = signature(after)
+            if signature(before) == loaded_signature == self._signature():
+                break
+        else:
+            raise OSError("token registry changed during read")
+        doc = json.loads(raw)
+        if not isinstance(doc, dict) or doc.get("version") != 1 or not isinstance(doc.get("principals"), list):
+            raise ValueError("invalid token registry")
+        by_hash, by_name = {}, {}
+        for entry in doc["principals"]:
+            if not isinstance(entry, dict):
+                raise ValueError("invalid principal")
+            name, digest, scopes = entry.get("name"), entry.get("token_sha256"), entry.get("allowed_scopes")
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", name):
+                raise ValueError("invalid principal name")
+            if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("invalid principal hash")
+            if name in by_name or digest in by_hash:
+                raise ValueError("duplicate principal identity")
+            if not isinstance(scopes, list) or any(not isinstance(scope, str) or not scope.strip() for scope in scopes):
+                raise ValueError("invalid principal scopes")
+            if not isinstance(entry.get("write_scope"), str) or not entry["write_scope"].strip():
+                raise ValueError("invalid principal write scope")
+            principal = Principal(entry)
+            by_hash[digest], by_name[name] = principal, principal
+        self.doc, self.by_hash, self.by_name = doc, by_hash, by_name
+        self._loaded_signature, self._available = loaded_signature, True
+
     def reload(self):
         with self._lock:
-            if not self.path.exists():
-                self._bootstrap()
-            doc = json.loads(self.path.read_text())
-            self.doc = doc
-            self.by_hash = {p["token_sha256"]: Principal(p) for p in doc.get("principals", [])}
-            self.by_name = {p["name"]: Principal(p) for p in doc.get("principals", [])}
+            self._load_locked(bootstrap=not hasattr(self, "_loaded_signature"))
+
+    def reload_if_changed(self):
+        observed = self._signature()
+        if observed == getattr(self, "_loaded_signature", None) and getattr(self, "_available", False):
+            return False
+        with self._lock:
+            try:
+                self._load_locked(bootstrap=False)
+                return True
+            except Exception:
+                self._available = False
+                self._loaded_signature = observed
+                return False
 
     def _bootstrap(self):
-        """First run: adopt v1's single token as the all-scopes `james` principal.
-
-        This is what makes cutover a no-op for every client that already holds
-        the existing token.
-        """
-        principals = []
-        if LEGACY_TOKEN_F.exists():
-            legacy = LEGACY_TOKEN_F.read_text().strip()
-            if legacy:
-                principals.append(
-                    {
-                        "name": "james",
-                        "token_sha256": self.h(legacy),
-                        "allowed_scopes": [FULL],
-                        "write_scope": LIB.SCOPE_PERSONAL,
-                        "created_mdt": CTL.now_mdt(),
-                        "note": "imported from data/mcp-token (v1 single-token) — unchanged, still valid",
-                    }
-                )
-        self.path.write_text(json.dumps({"version": 1, "principals": principals}, indent=2))
-        self.path.chmod(0o600)
+        """Initialize once under the same advisory lock as the token CLI."""
+        import fcntl
+        import tempfile
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(self.path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(fd, "a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if self.path.exists():
+                return
+            principals = []
+            if LEGACY_TOKEN_F.exists():
+                legacy = LEGACY_TOKEN_F.read_text().strip()
+                if legacy:
+                    principals.append(
+                        {
+                            "name": USER,
+                            "token_sha256": self.h(legacy),
+                            "allowed_scopes": [FULL],
+                            "write_scope": LIB.SCOPE_PERSONAL,
+                            "created_mdt": CTL.now_mdt(),
+                            "note": "imported from data/mcp-token (v1 single-token) — unchanged, still valid",
+                        }
+                    )
+            fd, name = tempfile.mkstemp(prefix="." + self.path.name + ".", dir=self.path.parent)
+            try:
+                with os.fdopen(fd, "w") as stream:
+                    json.dump({"version": 1, "principals": principals}, stream, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(name, self.path)
+                directory_fd = os.open(self.path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                if os.path.exists(name):
+                    os.unlink(name)
 
     def lookup(self, token: str) -> Principal | None:
+        if not isinstance(token, str):
+            return None
+        self.reload_if_changed()
+        if not getattr(self, "_available", False):
+            return None
         want = self.h(token)
-        for h, p in self.by_hash.items():  # constant-time compare each candidate
-            if secrets.compare_digest(h, want):
-                return p
+        with self._lock:
+            for h, p in self.by_hash.items():
+                if secrets.compare_digest(h, want):
+                    return p
         return None
+
+    def lookup_bound(self, token: str, client_id: str) -> Principal | None:
+        p = self.lookup(token)
+        return p if p is not None and p.name == client_id else None
 
 
 STORE = TokenStore(TOKENS_F)
 CLIENTS = LIB.load_clients()
 
-# stdio runs on Studio0 itself, under James's own account. There is no token to
+# stdio runs locally under the configured owner's account. There is no token to
 # present and no second party on the pipe, so it keeps v1 behaviour: full access.
 LOCAL_PRINCIPAL = Principal(
-    {"name": "james", "allowed_scopes": [FULL], "write_scope": LIB.SCOPE_PERSONAL, "note": "stdio/local"}
+    {"name": USER, "allowed_scopes": [FULL], "write_scope": LIB.SCOPE_PERSONAL, "note": "stdio/local"}
 )
 
 _auth = None
@@ -179,6 +295,23 @@ if HTTP_MODE:
 mcp = FastMCP("mem0", auth=_auth)
 _instances: dict[str, object] = {}
 _lock = threading.Lock()
+_log = logging.getLogger("mem0-mcp-server-v2")
+_graph_adapter = None
+_graph_lock = threading.Lock()
+_graph_loop = None
+_graph_loop_thread = None
+_graph_loop_ready = threading.Event()
+_graph_loop_lock = threading.Lock()
+# Ordinary recall uses the dependency-free graph projection, loaded only when
+# its opt-in flag is active. It must never initialize the Graphiti adapter.
+_recall_fast = None
+_recall_fast_lock = threading.Lock()
+# Lifecycle extraction uses bounded local model capacity and may run serial fallbacks.
+# Reject concurrent fresh extraction immediately; retained client requests retry.
+_lifecycle_extraction_lock = threading.Lock()
+# Tests and the isolated canary may provide a validated registry directly.  A
+# live server falls back to the read-only GF-02 registry through the adapter.
+GRAPH_SCOPE_REGISTRY = None
 
 
 def M(model_key: str = "llama"):
@@ -188,7 +321,296 @@ def M(model_key: str = "llama"):
         return _instances[model_key]
 
 
+def _feature_enabled(name: str) -> bool:
+    """Feature flags are opt-in and are read at call time for safe rollback."""
+    return os.environ.get(name, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def set_graph_adapter(adapter) -> None:
+    """Install a test/canary adapter without changing the production door."""
+    global _graph_adapter
+    with _graph_lock:
+        _graph_adapter = adapter
+
+
+def _get_graph_adapter():
+    global _graph_adapter
+    with _graph_lock:
+        if _graph_adapter is None:
+            _graph_adapter = GRAPH.GraphitiAdapter()
+        return _graph_adapter
+
+
+def _await_graph_result(value):
+    if not inspect.isawaitable(value):
+        return value
+    deadline = time.monotonic() + GRAPH.GRAPH_SEARCH_TIMEOUT_SECONDS
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        if inspect.iscoroutine(value):
+            value.close()
+        # memory_search is intentionally synchronous.  FastMCP runs synchronous
+        # tools outside the request event loop; refusing an unsafe nested loop is
+        # safer than making a second event-loop/thread bridge on the prompt path.
+        raise RuntimeError("graph adapter returned an awaitable in an active event loop")
+
+    global _graph_loop, _graph_loop_thread
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not _graph_loop_lock.acquire(timeout=max(0, remaining)):
+        if inspect.iscoroutine(value):
+            value.close()
+        elif isinstance(value, asyncio.Future):
+            value.cancel()
+        raise TimeoutError("graph bridge exceeded its deadline")
+    try:
+        if _graph_loop is None:
+            if _graph_loop_thread is None:
+                def run_graph_loop():
+                    global _graph_loop
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    _graph_loop = loop
+                    _graph_loop_ready.set()
+                    loop.run_forever()
+
+                _graph_loop_thread = threading.Thread(
+                    target=run_graph_loop,
+                    name="mem0-graph-loop",
+                    daemon=True,
+                )
+                _graph_loop_thread.start()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not _graph_loop_ready.wait(timeout=remaining):
+                if inspect.iscoroutine(value):
+                    value.close()
+                elif isinstance(value, asyncio.Future):
+                    value.cancel()
+                raise TimeoutError("graph loop did not start before graph deadline")
+        loop = _graph_loop
+    finally:
+        _graph_loop_lock.release()
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        if inspect.iscoroutine(value):
+            value.close()
+        elif isinstance(value, asyncio.Future):
+            value.cancel()
+        raise TimeoutError("graph bridge exceeded its deadline")
+
+    async def await_graph_value():
+        return await value
+
+    # Submit raw coroutines directly so cancellation before their first step
+    # closes them too, rather than abandoning a coroutine captured by a wrapper.
+    pending = asyncio.run_coroutine_threadsafe(
+        value if inspect.iscoroutine(value) else await_graph_value(), loop
+    )
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            pending.cancel()
+            raise TimeoutError("graph bridge exceeded its deadline")
+        return pending.result(timeout=remaining)
+    except TimeoutError:
+        pending.cancel()
+        raise
+
+
+def _graph_registry(adapter):
+    if GRAPH_SCOPE_REGISTRY is not None:
+        return GRAPH_SCOPE_REGISTRY
+    registry = getattr(adapter, "registry", None)
+    if registry is not None:
+        return registry
+    return GRAPH.ScopeGraphRegistry.load()
+
+
+def _graph_keys(principal: Principal, adapter):
+    registry = _graph_registry(adapter)
+    scopes = principal.concrete_scopes(CLIENTS)
+    # The authorization boundary derives keys from the validated registry; an
+    # adapter never gets to widen the query set by returning its own list.
+    keys = registry.keys_for(scopes, full_access=principal.full_access)
+    return registry, sorted(set(keys))
+
+
+def _load_recall_fast():
+    """Load the dependency-free recall transport without creating Graphiti."""
+    global _recall_fast
+    with _recall_fast_lock:
+        if _recall_fast is None:
+            loader = getattr(LIFECYCLE, "load_recall_fast", None)
+            if callable(loader):
+                _recall_fast = loader()
+            else:
+                _recall_fast = importlib.machinery.SourceFileLoader(
+                    "mem0_recall_fast_mcp", str(SOURCE_BIN / "mem0_recall_fast.py")
+                ).load_module()
+        return _recall_fast
+
+
+def _graph_projection_for(principal: Principal, query: str, limit: int):
+    """Resolve registered graph scopes and query only their fast projections."""
+    concrete = principal.concrete_scopes(CLIENTS)
+    # ``concrete_scopes`` is empty for both an empty restricted grant and the
+    # full-access wildcard. Only the explicit full-access bit can authorize
+    # registry expansion.
+    if not principal.full_access and not concrete:
+        return [], [], []
+
+    registry = GRAPH_SCOPE_REGISTRY
+    if registry is None:
+        registry = GRAPH.ScopeGraphRegistry.load()
+    keys = registry.keys_for(concrete, full_access=principal.full_access)
+    allowed_keys = []
+    allowed_scopes = []
+    legacy_key = getattr(GRAPH, "LEGACY_GRAPH_KEY", "backfill-v1")
+    for key in sorted(set(keys)):
+        scope = registry.scope(key)
+        if key != legacy_key and isinstance(scope, str) and scope:
+            allowed_keys.append(key)
+            allowed_scopes.append(scope)
+    allowed_scopes = sorted(set(allowed_scopes))
+    # ``backfill-v1`` has no registry scope and is intentionally omitted.
+    if not allowed_scopes:
+        return [], allowed_keys, []
+
+    errors = []
+    rows = _load_recall_fast().search_projection(
+        query,
+        allowed_scopes=allowed_scopes,
+        limit=limit,
+        timeout_s=0.5,
+        errors=errors,
+    )
+    if not isinstance(rows, (list, tuple)):
+        raise TypeError("graph projection returned invalid rows")
+    return list(rows), allowed_keys, errors
+
+
+def _graph_receipt(principal: Principal, tool: str, status: str, elapsed_ms: int, **fields):
+    """Write metadata-only graph evidence; never write query text or results."""
+    row = {
+        "at": CTL.now_mdt(),
+        "event": "graph-recall",
+        "status": status,
+        "principal": principal.name,
+        "tool": tool,
+        "elapsed_ms": max(0, int(elapsed_ms)),
+    }
+    for name in ("result_count", "graph_count"):
+        value = fields.get(name)
+        if isinstance(value, int):
+            row[name] = value
+    reason = fields.get("reason")
+    if isinstance(reason, str) and reason:
+        row["reason"] = reason[:80]
+    try:
+        FLEET_LOG.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(FLEET_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+
+
+_RECALL_ERROR_REASONS = frozenset({"embed", "search", "projection", "no-agents"})
+
+
+def _recall_error_reason(errors: list) -> str:
+    if errors and all(
+        isinstance(error, str) and error in _RECALL_ERROR_REASONS
+        for error in errors
+    ):
+        return errors[0]
+    return "unknown"
+
+
+def _raw_scope(row):
+    return GRAPH.row_scope(row)
+
+
+def _safe_graph_rows(principal: Principal, raw_rows, registry, allowed_keys, *, current_only):
+    """Filter and normalize graph rows after the adapter returns them."""
+    if not isinstance(raw_rows, (list, tuple)):
+        return []
+    allowed = set(allowed_keys)
+    out = []
+    for raw in raw_rows:
+        key = GRAPH.row_graph_key(raw)
+        if key not in allowed:
+            continue
+        mapped_scope = registry.scope(key)
+        claimed_scope = _raw_scope(raw)
+        if key != GRAPH.LEGACY_GRAPH_KEY:
+            # A registered key is the authority.  Do not trust a contradictory
+            # scope supplied by the graph row or an adapter.
+            if mapped_scope is None or (claimed_scope and claimed_scope != mapped_scope):
+                continue
+            scope = mapped_scope
+        else:
+            if not principal.full_access:
+                continue
+            # backfill-v1 has no reconstructable per-row scope.  Preserve that
+            # fact explicitly instead of manufacturing a scope claim.
+            scope = None
+        normalized = GRAPH.normalize_graph_row(
+            raw, graph_key=key, scope=scope, current_only=current_only
+        )
+        if normalized is not None:
+            out.append(normalized)
+    return out
+
+
+def _graph_rows_for(principal: Principal, method: str, argument, limit: int, *, current_only):
+    adapter = _get_graph_adapter()
+    registry, keys = _graph_keys(principal, adapter)
+    if not keys:
+        return [], keys
+    fn = getattr(adapter, method)
+    raw = _await_graph_result(fn(argument, keys, limit))
+    return _safe_graph_rows(principal, raw, registry, keys, current_only=current_only), keys
+
+
+def _graph_stats_for(principal: Principal):
+    adapter = _get_graph_adapter()
+    registry, keys = _graph_keys(principal, adapter)
+    if not keys:
+        return {"graphs": {}}, keys
+    raw = _await_graph_result(adapter.stats(keys))
+    if not isinstance(raw, dict):
+        return {"graphs": {}}, keys
+    candidate = raw.get("graphs", raw)
+    graphs = {}
+    if isinstance(candidate, dict):
+        for key, value in candidate.items():
+            if key in keys and key in {GRAPH.LEGACY_GRAPH_KEY, *registry.registered_graph_keys()}:
+                graphs[key] = value
+    result = {"graphs": graphs}
+    # Feed timestamps are metadata from the already scope-restricted adapter.
+    for field in ("ingestion_watermark", "ingestion_watermark_state", "last_complete_scan"):
+        if field in raw:
+            result[field] = raw[field]
+    return result, keys
+
+
+def _warn_open_fds():
+    """Emit a cheap per-call alarm before FD exhaustion becomes an outage."""
+    fd_dir = "/dev/fd" if os.path.isdir("/dev/fd") else "/proc/self/fd"
+    try:
+        count = len(os.listdir(fd_dir))
+    except OSError:
+        return
+    if count > 512:
+        _log.warning("open file descriptor count exceeds 512: %d", count)
+
+
 def who() -> Principal:
+    _warn_open_fds()
     if not HTTP_MODE:
         return LOCAL_PRINCIPAL
     from fastmcp.server.dependencies import get_access_token
@@ -196,9 +618,10 @@ def who() -> Principal:
     tok = get_access_token()
     if tok is None:
         raise ToolError("unauthenticated")
-    p = STORE.by_name.get(tok.client_id)
+    raw = getattr(tok, "token", None)
+    p = STORE.lookup_bound(raw, tok.client_id) if isinstance(raw, str) else None
     if p is None:
-        raise ToolError("unknown principal")
+        raise ToolError("unknown or revoked principal")
     return p
 
 
@@ -253,15 +676,909 @@ def lifecycle_records(records_json: str):
     return records, rejected
 
 
-def lifecycle_receipt(principal: str, machine: str, harness: str, digest: str) -> Path:
+class _VerifiedConflict(Exception):
+    pass
+
+
+class _LifecycleExtractionBusy(Exception):
+    pass
+
+
+def verified_receipt_path(identity_sha256: str) -> Path:
+    return FLEET_STATE / "verified-findings" / f"{identity_sha256}.json"
+
+
+def verified_event_lock_path(event_lock_key: str) -> Path:
+    return FLEET_STATE / "locks" / f"verified-event-{event_lock_key}.lock"
+
+
+def acquire_verified_event_lock(event_lock_key: str):
+    """Take the event lock; its inode is deliberately never unlinked."""
+    path = verified_event_lock_path(event_lock_key)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            pass
+        handle = open(path, "a+", encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    except OSError:
+        return None
+
+    deadline = time.monotonic() + VERIFIED_LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except (BlockingIOError, OSError):
+            if time.monotonic() >= deadline:
+                handle.close()
+                return None
+            time.sleep(VERIFIED_LOCK_POLL_SECONDS)
+
+
+def _verified_log(status: str, principal: Principal, *, identity_sha256: str,
+                  payload_sha256: str, scope: str, memory_id: str,
+                  reason: str | None = None, history_reconciled: bool = False,
+                  receipt_reconciled: bool = False) -> None:
+    """Append only safe hashes/flags; never pass finding or evidence text."""
+    row = {
+        "at": CTL.now_mdt(),
+        "event": "verified-finding-capture",
+        "status": status,
+        "principal": principal.name,
+        "scope": scope,
+        "memory_id": memory_id,
+        "identity_sha256": identity_sha256,
+        "payload_sha256": payload_sha256,
+        "history_reconciled": bool(history_reconciled),
+        "receipt_reconciled": bool(receipt_reconciled),
+    }
+    if reason in {
+        "embedding", "lock-timeout", "native-read", "native-write",
+        "history-read", "history-write", "receipt-read", "receipt-write",
+        "receipt-readback",
+    }:
+        row["reason"] = reason
+    try:
+        FLEET_LOG.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(FLEET_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+
+
+def _verified_response(status: str, identity: dict, payload: dict, scope: str, *,
+                       point_verified: bool = False, history_reconciled: bool = False,
+                       receipt_reconciled: bool = False) -> str:
+    return json.dumps(
+        {
+            "status": status,
+            "memory_id": identity["memory_id"],
+            "identity_sha256": identity["identity_sha256"],
+            "payload_sha256": payload["payload_sha256"],
+            "scope": scope,
+            "point_verified": bool(point_verified),
+            "history_reconciled": bool(history_reconciled),
+            "receipt_reconciled": bool(receipt_reconciled),
+        },
+        separators=(",", ":"),
+    )
+
+
+def _verified_unknown(identity: dict, payload: dict, scope: str, *, reason: str,
+                      principal: Principal, point_verified: bool = False,
+                      history_reconciled: bool = False, receipt_reconciled: bool = False) -> str:
+    _verified_log(
+        "RETRYABLE_UNKNOWN",
+        principal,
+        identity_sha256=identity["identity_sha256"],
+        payload_sha256=payload["payload_sha256"],
+        scope=scope,
+        memory_id=identity["memory_id"],
+        reason=reason,
+        history_reconciled=history_reconciled,
+        receipt_reconciled=receipt_reconciled,
+    )
+    return _verified_response(
+        "RETRYABLE_UNKNOWN",
+        identity,
+        payload,
+        scope,
+        point_verified=point_verified,
+        history_reconciled=history_reconciled,
+        receipt_reconciled=receipt_reconciled,
+    )
+
+
+def _point_parts(point):
+    if isinstance(point, dict):
+        return point.get("id"), point.get("payload")
+    return getattr(point, "id", None), getattr(point, "payload", None)
+
+
+def _read_verified_point(memory, memory_id: str):
+    store = getattr(memory, "vector_store", None)
+    getter = getattr(store, "get", None)
+    if not callable(getter):
+        raise OSError("native vector read unavailable")
+    return getter(vector_id=memory_id)
+
+
+def _verify_verified_point(
+    point,
+    identity: dict,
+    payload: dict,
+    finding: str,
+    *,
+    capture_schema: str = VERIFIED_CAPTURE_SCHEMA,
+    agent_id: str | None = None,
+    provenance: str | None = None,
+) -> None:
+    if point is None:
+        raise LookupError("native point absent")
+    point_id, stored = _point_parts(point)
+    if point_id is not None and str(point_id) != identity["memory_id"]:
+        raise _VerifiedConflict
+    if not isinstance(stored, dict):
+        raise _VerifiedConflict
+    if stored.get("capture_schema") != capture_schema:
+        raise _VerifiedConflict
+    if agent_id is not None and stored.get("agent_id") != agent_id:
+        raise _VerifiedConflict
+    if provenance is not None and stored.get("source") != provenance:
+        raise _VerifiedConflict
+    if stored.get("identity_sha256") != identity["identity_sha256"]:
+        raise _VerifiedConflict
+    if stored.get("payload_sha256") != payload["payload_sha256"]:
+        raise _VerifiedConflict
+    if stored.get("data") != finding:
+        raise _VerifiedConflict
+
+
+def _verified_text_lemmatized(text: str) -> str:
+    try:
+        from mem0.utils.lemmatization import lemmatize_for_bm25
+        return lemmatize_for_bm25(text)
+    except Exception:
+        # The production Mem0 adapter supplies the lemmatizer.  The fallback is
+        # deterministic and keeps the private adapter testable without Mem0.
+        return text
+
+
+def _verified_embed(memory, finding: str):
+    model = getattr(memory, "embedding_model", None)
+    embed = getattr(model, "embed", None)
+    if not callable(embed):
+        raise OSError("native embedding unavailable")
+    try:
+        return embed(finding, memory_action="add")
+    except TypeError:
+        return embed(finding, "add")
+
+
+def _verified_payload(identity: dict, payload: dict, finding: str, principal: Principal,
+                      scope: str, *, created_at: str | None = None,
+                      lifecycle_metadata: dict | None = None,
+                      capture_schema: str = VERIFIED_CAPTURE_SCHEMA,
+                      agent_id: str = VERIFIED_AGENT,
+                      provenance: str = "mcp-verified-finding",
+                      run_id_prefix: str = "verified") -> dict:
+    source = identity["document"]["source"]
+    now = created_at or datetime.now(timezone.utc).isoformat()
+    stored = {
+        "capture_schema": capture_schema,
+        "data": finding,
+        "hash": hashlib.md5(finding.encode("utf-8")).hexdigest(),
+        "created_at": now,
+        "updated_at": now,
+        "text_lemmatized": _verified_text_lemmatized(finding),
+        "user_id": USER,
+        "agent_id": agent_id,
+        "run_id": f"{run_id_prefix}:{identity['identity_sha256'][:32]}",
+        "role": "user",
+        "scope": scope,
+        "source": provenance,
+        "written_by": principal.name,
+        "identity_sha256": identity["identity_sha256"],
+        "payload_sha256": payload["payload_sha256"],
+        "evidence_sha256": payload["evidence_sha256"],
+        "source_system": source["system"],
+        "source_event_id": source["event_id"],
+        "source_version": source["version"],
+        "kind": payload["document"]["kind"],
+        "observed_at": payload["document"]["observed_at"],
+        "evidence": payload["document"]["evidence"],
+    }
+    if lifecycle_metadata is not None:
+        stored["lifecycle"] = lifecycle_metadata
+        if lifecycle_metadata.get("retention_class") is not None:
+            stored["retention_class"] = lifecycle_metadata["retention_class"]
+    for key in ("valid_at", "invalid_at", "supersedes_version"):
+        if key in payload["document"]:
+            stored[key] = payload["document"][key]
+    return CONTRACT.normalize_metadata(stored, default_scope=scope, default_source=provenance, infer=None)
+
+
+def _reconcile_verified_history(memory, memory_id: str, finding: str, created_at: str,
+                                principal: Principal) -> bool:
+    db = getattr(memory, "db", None)
+    getter = getattr(db, "get_history", None)
+    adder = getattr(db, "add_history", None)
+    if not callable(getter) or not callable(adder):
+        raise OSError("native history unavailable")
+    try:
+        rows = getter(memory_id)
+    except Exception as exc:
+        raise OSError("history read failed") from exc
+    if not isinstance(rows, list):
+        raise OSError("history read returned invalid rows")
+    adds = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise OSError("history row invalid")
+        if row.get("event") == "ADD":
+            if row.get("new_memory") != finding:
+                raise _VerifiedConflict
+            adds.append(row)
+        else:
+            raise _VerifiedConflict
+    if len(adds) > 1:
+        raise OSError("history has duplicate ADD records")
+    if adds:
+        return True
+    try:
+        adder(
+            memory_id,
+            None,
+            finding,
+            "ADD",
+            created_at=created_at,
+            updated_at=created_at,
+            actor_id=principal.name,
+            role="user",
+        )
+    except Exception as exc:
+        raise OSError("history write failed") from exc
+    return True
+
+
+def _read_verified_receipt(path: Path):
+    try:
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise OSError("receipt read failed") from exc
+    except (TypeError, ValueError):
+        return None
+
+
+def _receipt_is_verified(receipt, identity: dict, payload: dict) -> bool:
+    return (
+        isinstance(receipt, dict)
+        and receipt.get("status") == "complete"
+        and receipt.get("memory_id") == identity["memory_id"]
+        and receipt.get("identity_sha256") == identity["identity_sha256"]
+        and receipt.get("payload_sha256") == payload["payload_sha256"]
+    )
+
+
+def _reconcile_verified_receipt(path: Path, identity: dict, payload: dict, scope: str,
+                                history_reconciled: bool) -> bool:
+    try:
+        existing = _read_verified_receipt(path)
+    except OSError as exc:
+        raise OSError("receipt read failed") from exc
+    if _receipt_is_verified(existing, identity, payload):
+        return True
+    receipt = {
+        "status": "complete",
+        "memory_id": identity["memory_id"],
+        "identity_sha256": identity["identity_sha256"],
+        "payload_sha256": payload["payload_sha256"],
+        "scope": scope,
+        "run_id": f"verified:{identity['identity_sha256'][:32]}",
+        "history_reconciled": bool(history_reconciled),
+        "at": CTL.now_mdt(),
+    }
+    try:
+        LIFECYCLE.atomic_json(path, receipt)
+    except Exception as exc:
+        raise OSError("receipt write failed") from exc
+    try:
+        verified = _receipt_is_verified(_read_verified_receipt(path), identity, payload)
+    except OSError as exc:
+        raise OSError("receipt readback failed") from exc
+    if not verified:
+        raise OSError("receipt readback failed")
+    return True
+
+
+def _capture_admission(finding: str, kind: str, evidence_json):
+    evidence = CAPTURE.normalize_evidence(evidence_json)
+    records = evidence["records"]
+    # Run the existing lifecycle parser and gate over the exact same records.
+    parsed, rejected = lifecycle_records(json.dumps(records, ensure_ascii=False, separators=(",", ":")))
+    if rejected or parsed != records:
+        raise ValueError("evidence parser rejected a row")
+    if LIFECYCLE.sensitive_reason(finding):
+        raise ValueError("finding is sensitive")
+    for record in records:
+        if LIFECYCLE.sensitive_reason(record["text"]):
+            raise ValueError("evidence is sensitive")
+    valid, _reason = LIFECYCLE.validate_candidate(
+        {"fact": finding, "kind": kind, "support": [record["ref"] for record in records]},
+        records,
+    )
+    if not valid:
+        raise ValueError("finding admission rejected")
+    return evidence
+
+
+def _capture_verified_native(memory, embedding, identity: dict, payload: dict, finding: str,
+                             principal: Principal, scope: str, *, created_at: str | None = None,
+                             lifecycle_metadata: dict | None = None,
+                             capture_schema: str = VERIFIED_CAPTURE_SCHEMA,
+                             agent_id: str = VERIFIED_AGENT,
+                             provenance: str = "mcp-verified-finding",
+                             run_id_prefix: str = "verified"):
+    memory_id = identity["memory_id"]
+    try:
+        point = _read_verified_point(memory, memory_id)
+    except Exception as exc:
+        raise OSError("native point read failed") from exc
+    existed = point is not None
+    if existed:
+        _verify_verified_point(
+            point,
+            identity,
+            payload,
+            finding,
+            capture_schema=capture_schema,
+            agent_id=agent_id,
+            provenance=provenance,
+        )
+    else:
+        store = getattr(memory, "vector_store", None)
+        inserter = getattr(store, "insert", None)
+        if not callable(inserter):
+            raise OSError("native vector write unavailable")
+        stored_payload = _verified_payload(
+            identity,
+            payload,
+            finding,
+            principal,
+            scope,
+            created_at=created_at,
+            lifecycle_metadata=lifecycle_metadata,
+            capture_schema=capture_schema,
+            agent_id=agent_id,
+            provenance=provenance,
+            run_id_prefix=run_id_prefix,
+        )
+        CONTRACT.validate_vector(embedding)
+        try:
+            inserter(vectors=[embedding], ids=[memory_id], payloads=[stored_payload])
+        except Exception:
+            # Qdrant may have applied the upsert before the response failed.
+            pass
+        try:
+            point = _read_verified_point(memory, memory_id)
+        except Exception as exc:
+            raise OSError("native point readback failed") from exc
+        if point is None:
+            raise OSError("native point absent after write")
+        _verify_verified_point(
+            point,
+            identity,
+            payload,
+            finding,
+            capture_schema=capture_schema,
+            agent_id=agent_id,
+            provenance=provenance,
+        )
+
+    point_id, stored_payload = _point_parts(point)
+    created_at = stored_payload.get("created_at") if isinstance(stored_payload, dict) else None
+    if not isinstance(created_at, str) or not created_at:
+        created_at = payload["document"]["observed_at"]
+    history_reconciled = _reconcile_verified_history(
+        memory, memory_id, finding, created_at, principal
+    )
+    receipt_reconciled = _reconcile_verified_receipt(
+        verified_receipt_path(identity["identity_sha256"]),
+        identity,
+        payload,
+        scope,
+        history_reconciled,
+    )
+    return existed, history_reconciled, receipt_reconciled
+
+
+def lifecycle_legacy_receipt(principal: str, machine: str, harness: str, digest: str) -> Path:
     key = hashlib.sha256(f"{principal}\0{machine}\0{harness}\0{digest}".encode()).hexdigest()
     return FLEET_STATE / f"{key}.json"
+
+
+def lifecycle_receipt(
+    principal: str,
+    machine: str = "",
+    harness: str = "",
+    digest: str = "",
+    *,
+    scope: str | None = None,
+    source_system: str | None = None,
+    source_event_id: str | None = None,
+    source_version: str | None = None,
+) -> Path:
+    """Return the machine-independent v2 receipt, or the old path in legacy mode."""
+    if all(value is not None for value in (scope, source_system, source_event_id, source_version)):
+        identity = CAPTURE.build_identity(
+            principal=principal,
+            scope=scope,
+            source_system=source_system,
+            source_event_id=source_event_id,
+            source_version=source_version,
+        )
+        return FLEET_STATE / f"lifecycle-{identity['identity_sha256']}.json"
+    return lifecycle_legacy_receipt(principal, machine, harness, digest)
+
+
+def acquire_lifecycle_event_lock(event_lock_key: str):
+    """Lifecycle uses the same bounded, never-unlinked flock discipline."""
+    path = FLEET_STATE / "locks" / f"lifecycle-event-{event_lock_key}.lock"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            pass
+        handle = open(path, "a+", encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    except OSError:
+        return None
+    deadline = time.monotonic() + VERIFIED_LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except (BlockingIOError, OSError):
+            if time.monotonic() >= deadline:
+                handle.close()
+                return None
+            time.sleep(VERIFIED_LOCK_POLL_SECONDS)
+
+
+def _lifecycle_identity(p: Principal, target_scope: str, session: str, harness: str,
+                        digest: str, machine: str, source_system: str,
+                        source_event_id: str, source_version: str,
+                        source_range_start: int | None = None,
+                        source_range_end: int | None = None):
+    bounded = source_range_start is not None or source_range_end is not None
+    if bounded:
+        if (type(source_range_start) is not int or type(source_range_end) is not int
+                or not 0 <= source_range_start < source_range_end <= MAX_CURSOR_POSITION):
+            raise ToolError("invalid source range")
+        if not all(isinstance(value, str) and value for value in
+                   (source_system, source_event_id, source_version)):
+            raise ToolError("source range requires canonical source identity")
+    supplied = [source_system, source_event_id, source_version]
+    if any(not isinstance(value, str) for value in supplied):
+        raise ToolError("source identity fields must be text")
+    if all(value == "" for value in supplied):
+        source_system = harness
+        source_event_id = f"legacy-session:{session}"
+        source_version = digest
+        quality = "legacy_session"
+    elif any(value == "" for value in supplied):
+        raise ToolError("source identity fields must be all present or all absent")
+    else:
+        if source_system not in {"codex", "claude", "grok", "hermes"} or source_system != harness:
+            raise ToolError("source_system must equal the supported harness")
+        expected_version = (
+            hashlib.sha256(f"{digest}:{source_range_start}:{source_range_end}".encode("utf-8")).hexdigest()
+            if bounded else digest
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", source_version) or source_version != expected_version:
+            raise ToolError("source_version must equal the verified range digest" if bounded
+                            else "source_version must equal the verified digest")
+        try:
+            normalized_event_id = CAPTURE.normalize_text(source_event_id, "source_event_id")
+            if bounded and normalized_event_id != source_event_id:
+                raise ValueError("noncanonical source_event_id")
+            source_event_id = normalized_event_id
+        except ValueError as exc:
+            raise ToolError("invalid source_event_id") from exc
+        quality = "source_event"
+    try:
+        identity = CAPTURE.build_identity(
+            principal=p.name,
+            scope=target_scope,
+            source_system=source_system,
+            source_event_id=source_event_id,
+            source_version=source_version,
+        )
+    except ValueError as exc:
+        raise ToolError("invalid lifecycle source identity") from exc
+    return identity, quality, source_system, source_event_id, source_version
+
+
+def lifecycle_prepared_manifest_path(receipt: Path) -> Path:
+    """Return the private prepared-manifest path beside one lifecycle receipt."""
+    return receipt.with_name(f"{receipt.stem}.prepared.json")
+
+
+def _lifecycle_candidate_identity(parent_identity: dict, candidate_sha256: str) -> dict:
+    source = parent_identity["document"]["source"]
+    source_event_id = (
+        f"lifecycle:{parent_identity['identity_sha256']}:{candidate_sha256}"
+    )
+    return CAPTURE.build_identity(
+        principal=parent_identity["document"]["principal"],
+        scope=parent_identity["document"]["scope"],
+        source_system=source["system"],
+        source_event_id=source_event_id,
+        source_version=source["version"],
+    )
+
+
+def _lifecycle_candidate_evidence(
+    records: list[dict],
+    support: list[str],
+    source_event_id: str,
+    source_version: str,
+) -> dict:
+    record_map = {record["ref"]: record for record in records}
+    rows = []
+    for ref in support:
+        record = record_map.get(ref)
+        if record is None:
+            raise ValueError("candidate support is not present in evidence")
+        rows.append(
+            {
+                "ref": record["ref"],
+                "kind": record["kind"],
+                "text": record["text"],
+                "source": {
+                    "type": "artifact" if record["kind"] == "user" else "tool_receipt",
+                    "id": source_event_id,
+                    "version": source_version,
+                    "sha256": hashlib.sha256(record["text"].encode("utf-8")).hexdigest(),
+                },
+            }
+        )
+    normalized = CAPTURE.normalize_evidence(rows)
+    return {
+        "pointers": normalized["pointers"],
+        "evidence_sha256": normalized["evidence_sha256"],
+    }
+
+
+def _lifecycle_manifest_candidates(
+    candidates: list[dict],
+    records: list[dict],
+    parent_identity: dict,
+    source_event_id: str,
+    source_version: str,
+) -> tuple[list[dict], int]:
+    frozen = []
+    rejected = 0
+    seen_hashes = set()
+    for candidate in list(candidates or [])[:8]:
+        try:
+            valid, _reason = LIFECYCLE.validate_candidate(candidate, records)
+        except Exception:
+            valid = False
+        if not valid:
+            rejected += 1
+            continue
+        try:
+            fact = CAPTURE.normalize_text(
+                str(candidate.get("fact") or candidate.get("memory") or "").strip(),
+                "finding",
+                max_bytes=2400,
+            )
+            kind = CAPTURE.normalize_text(
+                str(candidate.get("kind") or "").strip().lower(),
+                "kind",
+                max_bytes=32,
+            )
+            support = sorted(
+                {
+                    CAPTURE.normalize_text(str(ref), "support_ref", max_bytes=16)
+                    for ref in candidate.get("support") or []
+                }
+            )
+            candidate_document = {"fact": fact, "kind": kind, "support": support}
+            candidate_sha256 = hashlib.sha256(
+                CAPTURE.canonical_json(candidate_document).encode("utf-8")
+            ).hexdigest()
+            if candidate_sha256 in seen_hashes:
+                continue
+            evidence = _lifecycle_candidate_evidence(
+                records, support, source_event_id, source_version
+            )
+            frozen.append(
+                {
+                    **candidate_document,
+                    "candidate_sha256": candidate_sha256,
+                    "identity": _lifecycle_candidate_identity(
+                        parent_identity, candidate_sha256
+                    ),
+                    "evidence": evidence,
+                }
+            )
+            seen_hashes.add(candidate_sha256)
+        except Exception:
+            rejected += 1
+    return frozen, rejected
+
+
+def _lifecycle_manifest(
+    *,
+    parent_identity: dict,
+    identity_quality: str,
+    digest: str,
+    source_system: str,
+    source_event_id: str,
+    source_version: str,
+    observed_at: str,
+    machine: str,
+    harness: str,
+    cwd: str,
+    session: str,
+    candidates: list[dict],
+    rejected: int,
+) -> dict:
+    lifecycle_metadata = {
+        "authority": "candidate",
+        "retention_class": "durable",
+        "retention_intent": "admission",
+        "parent_identity_sha256": parent_identity["identity_sha256"],
+        "parent_source": dict(parent_identity["document"]["source"]),
+        "machine": machine,
+        "harness": harness,
+        "cwd": cwd,
+        "session": session,
+        "identity_quality": identity_quality,
+    }
+    manifest = {
+        "schema": LIFECYCLE_PREPARED_SCHEMA,
+        "digest": digest,
+        "parent_identity": parent_identity,
+        "identity_quality": identity_quality,
+        "source_system": source_system,
+        "source_event_id": source_event_id,
+        "source_version": source_version,
+        "observed_at": observed_at,
+        "lifecycle_metadata": lifecycle_metadata,
+        "candidates": candidates,
+        "rejected": rejected,
+        "skipped": 0,
+    }
+    manifest["manifest_sha256"] = hashlib.sha256(
+        CAPTURE.canonical_json(manifest).encode("utf-8")
+    ).hexdigest()
+    return manifest
+
+
+def _lifecycle_validate_manifest(manifest: dict, expected: dict, records: list[dict]) -> bool:
+    if not isinstance(manifest, dict):
+        return False
+    required = {
+        "schema", "digest", "parent_identity", "identity_quality", "source_system",
+        "source_event_id", "source_version", "observed_at", "lifecycle_metadata",
+        "candidates", "rejected", "skipped", "manifest_sha256",
+    }
+    if set(manifest) != required or manifest.get("schema") != LIFECYCLE_PREPARED_SCHEMA:
+        return False
+    unsigned = dict(manifest)
+    manifest_sha256 = unsigned.pop("manifest_sha256", None)
+    try:
+        if manifest_sha256 != hashlib.sha256(
+            CAPTURE.canonical_json(unsigned).encode("utf-8")
+        ).hexdigest():
+            return False
+        if any(manifest.get(key) != expected.get(key) for key in (
+            "digest", "parent_identity", "identity_quality", "source_system",
+            "source_event_id", "source_version",
+        )):
+            return False
+        if CAPTURE.normalize_timestamp(manifest["observed_at"], "observed_at") != manifest["observed_at"]:
+            return False
+    except Exception:
+        return False
+
+    metadata = manifest.get("lifecycle_metadata")
+    if not isinstance(metadata, dict) or metadata.get("authority") != "candidate":
+        return False
+    if metadata.get("retention_class") != "durable" or metadata.get("retention_intent") != "admission":
+        return False
+    if metadata.get("parent_identity_sha256") != expected["parent_identity"]["identity_sha256"]:
+        return False
+    if metadata.get("parent_source") != expected["parent_identity"]["document"]["source"]:
+        return False
+    if any(not isinstance(metadata.get(key), str) for key in (
+        "machine", "harness", "cwd", "session", "identity_quality",
+    )):
+        return False
+    if metadata.get("harness") != expected["source_system"] or metadata.get("identity_quality") != expected["identity_quality"]:
+        return False
+    if any(key in metadata for key in ("text", "evidence", "finding")):
+        return False
+
+    candidates = manifest.get("candidates")
+    if not isinstance(candidates, list) or len(candidates) > 8:
+        return False
+    if not isinstance(manifest.get("rejected"), int) or isinstance(manifest["rejected"], bool) or manifest["rejected"] < 0:
+        return False
+    if manifest.get("skipped") != 0:
+        return False
+    seen_hashes = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or set(candidate) != {
+            "fact", "kind", "support", "candidate_sha256", "identity", "evidence",
+        }:
+            return False
+        fact = candidate.get("fact")
+        kind = candidate.get("kind")
+        support = candidate.get("support")
+        if not isinstance(fact, str) or not isinstance(kind, str) or not isinstance(support, list):
+            return False
+        try:
+            if CAPTURE.normalize_text(fact, "finding", max_bytes=2400) != fact:
+                return False
+            if kind not in {"fact", "decision", "preference", "procedure"}:
+                return False
+            if support != sorted(set(support)) or not all(
+                isinstance(ref, str) and CAPTURE.normalize_text(ref, "support_ref", max_bytes=16) == ref
+                for ref in support
+            ):
+                return False
+            candidate_document = {"fact": fact, "kind": kind, "support": support}
+            candidate_sha256 = hashlib.sha256(
+                CAPTURE.canonical_json(candidate_document).encode("utf-8")
+            ).hexdigest()
+            if candidate.get("candidate_sha256") != candidate_sha256 or candidate_sha256 in seen_hashes:
+                return False
+            if candidate.get("identity") != _lifecycle_candidate_identity(
+                expected["parent_identity"], candidate_sha256
+            ):
+                return False
+            valid, _reason = LIFECYCLE.validate_candidate(
+                {"fact": fact, "kind": kind, "support": support}, records
+            )
+            if not valid:
+                return False
+            expected_evidence = _lifecycle_candidate_evidence(
+                records,
+                support,
+                expected["source_event_id"],
+                expected["source_version"],
+            )
+            if candidate.get("evidence") != expected_evidence:
+                return False
+            CAPTURE.payload_document(
+                identity=candidate["identity"],
+                finding=fact,
+                kind=kind,
+                observed_at=manifest["observed_at"],
+                evidence=candidate["evidence"],
+            )
+        except Exception:
+            return False
+        seen_hashes.add(candidate_sha256)
+    return True
+
+
+def _lifecycle_load_or_create_manifest(
+    path: Path, expected: dict, records: list[dict], create
+) -> dict:
+    def read_valid() -> dict:
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise OSError("prepared manifest read failed") from exc
+        if not _lifecycle_validate_manifest(document, expected, records):
+            raise OSError("prepared manifest malformed or mismatched")
+        return document
+
+    if path.exists():
+        return read_valid()
+    document = create()
+    if not _lifecycle_validate_manifest(document, expected, records):
+        raise OSError("prepared manifest creation failed")
+    try:
+        LIFECYCLE.atomic_json(path, document)
+    except Exception as exc:
+        # A response can be lost after an atomic replace. Keep and validate the
+        # durable manifest rather than running extraction again on retry.
+        if path.exists():
+            return read_valid()
+        raise OSError("prepared manifest write failed") from exc
+    return read_valid()
+
+
+def _lifecycle_candidate_payload(manifest: dict, candidate: dict) -> dict:
+    payload = CAPTURE.payload_document(
+        identity=candidate["identity"],
+        finding=candidate["fact"],
+        kind=candidate["kind"],
+        observed_at=manifest["observed_at"],
+        evidence=candidate["evidence"],
+    )
+    document = dict(payload["document"])
+    document["lifecycle"] = manifest["lifecycle_metadata"]
+    payload["document"] = document
+    payload["canonical"] = CAPTURE.canonical_json(document)
+    payload["payload_sha256"] = hashlib.sha256(
+        payload["canonical"].encode("utf-8")
+    ).hexdigest()
+    return payload
+
+
+def _lifecycle_terminal_receipt_valid(
+    path: Path, expected: dict, records: list[dict], manifest_path: Path
+) -> bool:
+    required = {
+        "schema", "status", "digest", "principal", "identity_sha256",
+        "identity_quality", "run_id", "stored", "skipped", "rejected",
+        "prepared_manifest_sha256", "at",
+    }
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(receipt, dict) or set(receipt) != required:
+            return False
+        identity = expected["parent_identity"]
+        if (
+            receipt["schema"] != LIFECYCLE_RECEIPT_SCHEMA
+            or receipt["digest"] != expected["digest"]
+            or receipt["principal"] != identity["document"]["principal"]
+            or receipt["identity_sha256"] != identity["identity_sha256"]
+            or receipt["identity_quality"] != expected["identity_quality"]
+            or receipt["run_id"] != f"lifecycle:{identity['identity_sha256'][:32]}"
+        ):
+            return False
+        for key in ("stored", "skipped", "rejected"):
+            if not isinstance(receipt[key], int) or isinstance(receipt[key], bool) or receipt[key] < 0:
+                return False
+        CAPTURE.normalize_timestamp(receipt["at"], "at")
+        if receipt["status"] == "empty":
+            return (
+                receipt["stored"] == 0
+                and receipt["skipped"] == 0
+                and receipt["rejected"] == expected["pre_rejected"]
+                and receipt["prepared_manifest_sha256"] is None
+            )
+        if receipt["status"] != "complete":
+            return False
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not _lifecycle_validate_manifest(manifest, expected, records):
+            return False
+        if receipt["prepared_manifest_sha256"] != manifest["manifest_sha256"]:
+            return False
+        return (
+            receipt["stored"] == len(manifest["candidates"])
+            and receipt["skipped"] == manifest["skipped"]
+            and receipt["rejected"] == manifest["rejected"]
+        )
+    except Exception:
+        return False
 
 
 def read_filters(p: Principal, agent: str = "") -> dict:
     """Filters for any read. For a scoped principal the `scope` MatchAny is what
     enforces access: a row whose payload has no `scope` key cannot match it, so
-    unclassified rows stay James-only without needing a second rule."""
+    unclassified rows stay owner-only without needing a second rule."""
     f = {"user_id": USER}
     if agent:
         f["agent_id"] = agent
@@ -281,17 +1598,26 @@ def scope_guard(p: Principal, rows: list) -> list:
 
     Runs AFTER the vector-store filter: if a filter regression ever lets an
     out-of-scope row through, it is dropped here instead of being returned.
-    Rows with no metadata.scope are personal:james and can never pass this
+    Retired statuses are also rejected here as a defense-in-depth recall gate.
+    Rows with no metadata.scope are owner-private and can never pass this
     guard for a scoped principal (default-closed, structural).
     """
-    rows = [
-        row for row in rows
-        if isinstance(row, dict)
-        and not (
+    visible = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        row_status = row.get("status")
+        metadata_status = metadata.get("status")
+        if (
             row.get("is_canary") is True
-            or (row.get("metadata") or {}).get("is_canary") is True
-        )
-    ]
+            or metadata.get("is_canary") is True
+            or (isinstance(row_status, str) and row_status in RETIRED_STATUSES)
+            or (isinstance(metadata_status, str) and metadata_status in RETIRED_STATUSES)
+        ):
+            continue
+        visible.append(row)
+    rows = visible
     if p.full_access:
         return rows
     allowed = set(p.concrete_scopes(CLIENTS))
@@ -326,23 +1652,223 @@ def _fmt(rows):
     )
 
 
+def _bounded_limit(value, maximum: int) -> int:
+    try:
+        return max(1, min(int(value), maximum))
+    except (TypeError, ValueError) as exc:
+        raise ToolError("invalid limit") from exc
+
+
 # ------------------------------------------------------------------ tools --
 
 
 @mcp.tool
-def memory_search(query: str, limit: int = 5, agent: str = "") -> str:
-    """Search Studio0 shared memory by meaning (works with zero keyword overlap).
+def memory_search(query: str, limit: int = 5, agent: str = "", include_graph: bool = True) -> str:
+    """Search configured BORG memory by meaning (works with zero keyword overlap).
     Returns facts with relevance scores, ids, and metadata; corpus-seeded rows
     carry a source file path in metadata for full detail. Use this FIRST when
     you need an operational fact, a prior decision, a preference, or a pointer
-    into the memory corpus. Results are limited to the scopes your token allows."""
+    into the memory corpus. Results are limited to the scopes your token allows.
+    Graph candidates are opt-in at the server level and remain fail-open to the
+    ordinary mem0 rows when the graph dependency is unavailable."""
     p = who()
-    return _fmt(scope_guard(p, _rows(M().search(query, top_k=limit, filters=read_filters(p, agent)))))
+    requested_limit = _bounded_limit(limit, 25)
+    pool_limit = min(requested_limit * 4, 100)
+    filters = read_filters(p, agent)
+    recall_errors = []
+    recall_started = time.monotonic()
+    try:
+        fast = _load_recall_fast()
+        recall_started = time.monotonic()
+        rows = fast.search(
+            query,
+            limit=pool_limit,
+            min_score=0.1,
+            # Explicit MCP searches must allow a cold local embedding model to
+            # load. Prompt hooks retain their separate short fail-open budget.
+            timeout_s=30.0,
+            user_id=filters.get("user_id"),
+            agent_id=filters.get("agent_id"),
+            allowed_scopes=filters.get("scope"),
+            include_graph=False,
+            errors=recall_errors,
+        )
+    except Exception as exc:
+        _graph_receipt(
+            p,
+            "memory_search",
+            "FAIL_OPEN",
+            int((time.monotonic() - recall_started) * 1000),
+            reason=type(exc).__name__,
+        )
+        raise ToolError("memory recall transport unavailable") from exc
+    if recall_errors:
+        _graph_receipt(
+            p,
+            "memory_search",
+            "FAIL_OPEN",
+            int((time.monotonic() - recall_started) * 1000),
+            reason=_recall_error_reason(recall_errors),
+        )
+        raise ToolError("memory recall transport unavailable")
+    if not isinstance(rows, (list, tuple)):
+        _graph_receipt(
+            p,
+            "memory_search",
+            "FAIL_OPEN",
+            int((time.monotonic() - recall_started) * 1000),
+            reason="invalid-rows",
+        )
+        raise ToolError("memory recall transport returned invalid rows")
+    rows = scope_guard(p, rows)
+    if not include_graph or not _feature_enabled("MEM0_GRAPH_IN_SEARCH"):
+        return _fmt(SELECTOR.select_rows(rows, requested_limit, add_single_provenance=False))
+
+    t0 = time.monotonic()
+    projection_errors = []
+    try:
+        graph_rows, graph_keys, projection_errors = _graph_projection_for(
+            p, query, pool_limit
+        )
+    except Exception as exc:
+        _graph_receipt(
+            p,
+            "memory_search",
+            "FAIL_OPEN",
+            int((time.monotonic() - t0) * 1000),
+            reason=type(exc).__name__,
+        )
+        return _fmt(SELECTOR.select_rows(rows, requested_limit, add_single_provenance=False))
+
+    merged = scope_guard(p, [*rows, *graph_rows])
+    projection_status = "FAIL_OPEN" if projection_errors else "PASS"
+    _graph_receipt(
+        p,
+        "memory_search",
+        projection_status,
+        int((time.monotonic() - t0) * 1000),
+        result_count=len(graph_rows),
+        graph_count=len(graph_keys),
+        reason=(projection_errors[0] if projection_errors else None),
+    )
+    return _fmt(SELECTOR.select_rows(merged, requested_limit, add_single_provenance=False))
+
+
+def _require_graph_enabled() -> None:
+    if not _feature_enabled("MEM0_GRAPH_ENABLED"):
+        raise ToolError("graph tools disabled")
+
+
+@mcp.tool
+def memory_graph_search(query: str, limit: int = 10) -> str:
+    """Deliberate scope-safe semantic search over Graphiti facts."""
+    p = who()
+    _require_graph_enabled()
+    t0 = time.monotonic()
+    try:
+        rows, graph_keys = _graph_rows_for(
+            p,
+            "search",
+            query,
+            _bounded_limit(limit, 25),
+            current_only=False,
+        )
+    except Exception as exc:
+        _graph_receipt(
+            p,
+            "memory_graph_search",
+            "UNKNOWN",
+            int((time.monotonic() - t0) * 1000),
+            reason=type(exc).__name__,
+        )
+        return json.dumps({"status": "UNKNOWN", "results": []})
+    _graph_receipt(
+        p,
+        "memory_graph_search",
+        "PASS",
+        int((time.monotonic() - t0) * 1000),
+        result_count=len(rows),
+        graph_count=len(graph_keys),
+    )
+    return json.dumps(
+        {"status": "PASS", "graph_keys": len(graph_keys), "results": rows},
+        default=str,
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool
+def memory_entity_timeline(entity: str, limit: int = 20) -> str:
+    """Deliberate historical Graphiti timeline for one entity."""
+    p = who()
+    _require_graph_enabled()
+    t0 = time.monotonic()
+    try:
+        rows, graph_keys = _graph_rows_for(
+            p,
+            "entity_timeline",
+            entity,
+            _bounded_limit(limit, 50),
+            current_only=False,
+        )
+    except Exception as exc:
+        _graph_receipt(
+            p,
+            "memory_entity_timeline",
+            "UNKNOWN",
+            int((time.monotonic() - t0) * 1000),
+            reason=type(exc).__name__,
+        )
+        return json.dumps({"status": "UNKNOWN", "entity": entity, "results": []})
+    _graph_receipt(
+        p,
+        "memory_entity_timeline",
+        "PASS",
+        int((time.monotonic() - t0) * 1000),
+        result_count=len(rows),
+        graph_count=len(graph_keys),
+    )
+    return json.dumps(
+        {"status": "PASS", "entity": entity, "results": rows},
+        default=str,
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool
+def memory_graph_stats() -> str:
+    """Return counts for only the graph groups this principal may inspect."""
+    p = who()
+    _require_graph_enabled()
+    t0 = time.monotonic()
+    try:
+        stats, graph_keys = _graph_stats_for(p)
+    except Exception as exc:
+        _graph_receipt(
+            p,
+            "memory_graph_stats",
+            "UNKNOWN",
+            int((time.monotonic() - t0) * 1000),
+            reason=type(exc).__name__,
+        )
+        return json.dumps({"status": "UNKNOWN", "graphs": {}})
+    _graph_receipt(
+        p,
+        "memory_graph_stats",
+        "PASS",
+        int((time.monotonic() - t0) * 1000),
+        graph_count=len(graph_keys),
+    )
+    return json.dumps(
+        {"status": "PASS", **stats},
+        default=str,
+        ensure_ascii=False,
+    )
 
 
 @mcp.tool
 def memory_add(text: str, agent: str = "", run_id: str = "", raw: bool = False, scope: str = "") -> str:
-    """Store a durable fact in Studio0 shared memory. One plain sentence per
+    """Store a durable fact in configured BORG memory. One plain sentence per
     fact works best. NEVER store credentials, tokens, cookies, client personal
     data (emails/phones/addresses), or dollar amounts. Set raw=true to store
     verbatim (skips LLM distillation). Pass your agent name in `agent`.
@@ -386,6 +1912,155 @@ def memory_add(text: str, agent: str = "", run_id: str = "", raw: bool = False, 
 
 
 @mcp.tool
+def memory_capture_verified_finding(
+    finding: str,
+    kind: str,
+    scope: str,
+    source_system: str,
+    source_event_id: str,
+    source_version: str,
+    observed_at: str,
+    evidence_json: str | list[dict],
+    valid_at: str | None = None,
+    invalid_at: str | None = None,
+    supersedes_version: str | None = None,
+) -> str:
+    """Store one authenticated, admitted finding at a deterministic native ID.
+
+    ``run_id`` is a stable attribution field only.  It is never consulted for
+    duplicate detection; the native point and its ADD history are authoritative.
+    """
+    p = who()
+    if not isinstance(scope, str) or not scope.strip():
+        raise ToolError("explicit target scope is required")
+    try:
+        target_scope = CAPTURE.normalize_text(scope, "scope")
+    except ValueError as exc:
+        raise ToolError("invalid target scope") from exc
+    if not p.may_write(target_scope, CLIENTS):
+        raise ToolError(f"principal {p.name!r} may not write scope {target_scope!r}")
+
+    try:
+        identity = CAPTURE.build_identity(
+            principal=p.name,
+            scope=target_scope,
+            source_system=source_system,
+            source_event_id=source_event_id,
+            source_version=source_version,
+        )
+        evidence = _capture_admission(finding, kind, evidence_json)
+        payload = CAPTURE.payload_document(
+            identity=identity,
+            finding=finding,
+            kind=kind,
+            observed_at=observed_at,
+            evidence=evidence,
+            valid_at=valid_at,
+            invalid_at=invalid_at,
+            supersedes_version=supersedes_version,
+        )
+        clean_finding = payload["document"]["finding"]
+    except Exception as exc:
+        if isinstance(exc, ToolError):
+            raise
+        raise ToolError("invalid or inadmissible verified finding") from exc
+
+    # Embedding is the only native operation allowed before the event lock.
+    try:
+        memory = M()
+        embedding = _verified_embed(memory, clean_finding)
+    except Exception:
+        return _verified_unknown(
+            identity,
+            payload,
+            target_scope,
+            reason="embedding",
+            principal=p,
+        )
+
+    lock = acquire_verified_event_lock(identity["event_lock_key"])
+    if lock is None:
+        return _verified_unknown(
+            identity,
+            payload,
+            target_scope,
+            reason="lock-timeout",
+            principal=p,
+        )
+    try:
+        try:
+            existed, history_reconciled, receipt_reconciled = _capture_verified_native(
+                memory,
+                embedding,
+                identity,
+                payload,
+                clean_finding,
+                p,
+                target_scope,
+            )
+        except _VerifiedConflict:
+            _verified_log(
+                "CONFLICT",
+                p,
+                identity_sha256=identity["identity_sha256"],
+                payload_sha256=payload["payload_sha256"],
+                scope=target_scope,
+                memory_id=identity["memory_id"],
+            )
+            return _verified_response("CONFLICT", identity, payload, target_scope)
+        except OSError as exc:
+            message = str(exc)
+            reason = "native-read"
+            if "write" in message or "absent after" in message:
+                reason = "native-write"
+            elif "history" in message:
+                reason = "history-write" if "write" in message else "history-read"
+            elif "receipt" in message:
+                reason = "receipt-write" if "write" in message else "receipt-read"
+            return _verified_unknown(
+                identity,
+                payload,
+                target_scope,
+                reason=reason,
+                principal=p,
+            )
+        except Exception:
+            return _verified_unknown(
+                identity,
+                payload,
+                target_scope,
+                reason="native-read",
+                principal=p,
+            )
+        status = "ALREADY_COMMITTED" if existed else "COMMITTED"
+        _verified_log(
+            status,
+            p,
+            identity_sha256=identity["identity_sha256"],
+            payload_sha256=payload["payload_sha256"],
+            scope=target_scope,
+            memory_id=identity["memory_id"],
+            history_reconciled=history_reconciled,
+            receipt_reconciled=receipt_reconciled,
+        )
+        return _verified_response(
+            status,
+            identity,
+            payload,
+            target_scope,
+            point_verified=True,
+            history_reconciled=history_reconciled,
+            receipt_reconciled=receipt_reconciled,
+        )
+    finally:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock.close()
+
+
+@mcp.tool
 def memory_lifecycle_capture(
     records_json: str,
     session: str,
@@ -395,24 +2070,41 @@ def memory_lifecycle_capture(
     digest: str,
     completed: bool = True,
     dry_run: bool = False,
+    source_system: str = "",
+    source_event_id: str = "",
+    source_version: str = "",
+    identity_quality: str = "",
+    source_range_start: StrictInt | None = None,
+    source_range_end: StrictInt | None = None,
 ) -> str:
     """Capture durable, supported facts from redacted lifecycle evidence.
 
     This tool is for the fleet hook only. It rechecks evidence before the
-    existing Studio0 extractor and store run. It never accepts assistant text.
+    existing configured extractor and store run. It never accepts assistant text.
     """
     p = who()
-    machine = re.sub(r"[^A-Za-z0-9._-]+", "_", machine)[:80] or "unknown"
-    harness = re.sub(r"[^A-Za-z0-9._-]+", "_", harness)[:40] or "unknown"
-    session = re.sub(r"[^A-Za-z0-9._-]+", "_", session)[:180] or "unknown"
-    if harness not in {"codex", "claude", "grok"}:
+    machine = re.sub(r"[^A-Za-z0-9._-]+", "_", str(machine))[:80] or "unknown"
+    harness = str(harness or "")
+    session = re.sub(r"[^A-Za-z0-9._-]+", "_", str(session))[:180] or "unknown"
+    if harness not in {"codex", "claude", "grok", "hermes"}:
         raise ToolError("unsupported harness")
-    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ToolError("invalid evidence digest")
     if HOOK_OFF.exists():
         return json.dumps({"status": "KILL_SWITCH"})
     records, pre_rejected = lifecycle_records(records_json)
-    computed = hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+    if identity_quality not in {"", "legacy_session"}:
+        raise ToolError("unsupported identity_quality")
+    reported_identity_quality = identity_quality
+    canonical_source = any(value != "" for value in (source_system, source_event_id, source_version))
+    if canonical_source:
+        # New clients bind the exact submitted bytes. Safety filtering must not
+        # silently change the records whose digest the client authenticated.
+        if json.loads(records_json) != records:
+            raise ToolError("evidence changed by safety filter")
+        computed = hashlib.sha256(records_json.encode("utf-8")).hexdigest()
+    else:
+        computed = hashlib.sha256(json.dumps(records, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
     if computed != digest:
         fleet_log("REJECT", principal=p.name, machine=machine, harness=harness, digest=digest[:16], reason="digest-mismatch", rejected=pre_rejected)
         raise ToolError("evidence digest mismatch after safety filter")
@@ -420,83 +2112,198 @@ def memory_lifecycle_capture(
         return json.dumps({"status": "SKIP_INTERRUPTED", "rejected": pre_rejected})
     if dry_run:
         return json.dumps({"status": "PASS_DRY_RUN", "records": len(records), "rejected": pre_rejected})
-    receipt = lifecycle_receipt(p.name, machine, harness, digest)
-    if receipt.exists():
-        return json.dumps({"status": "SKIP_DUP"})
-    if not records:
-        LIFECYCLE.atomic_json(receipt, {"status": "empty", "digest": digest, "principal": p.name, "machine": machine, "harness": harness, "at": CTL.now_mdt()})
-        return json.dumps({"status": "PASS_EMPTY", "stored": 0, "rejected": pre_rejected})
 
     target_scope = p.write_scope
     if not p.may_write(target_scope, CLIENTS):
         raise ToolError("principal write scope is not allowed")
-    t0 = time.monotonic()
-    try:
-        candidates = LIFECYCLE.default_extractor(records)
-        memory = M()
-        agent_id = f"{harness}-hook:{machine}"
-        run_id = f"fleet:{p.name}:{session}:{digest[:24]}"
-        existing = LIFECYCLE.existing_run_rows(memory, run_id)
-        existing_texts = [LIFECYCLE.row_text(row) for row in existing]
-        stored = 0
-        skipped = 0
-        rejected = pre_rejected
-        for candidate in candidates[:8]:
-            valid, _reason = LIFECYCLE.validate_candidate(candidate, records)
-            if not valid:
-                rejected += 1
-                continue
-            fact = str(candidate.get("fact") or candidate.get("memory") or "").strip()
-            if LIFECYCLE.near_duplicate(fact, existing_texts):
-                skipped += 1
-                continue
-            try:
-                similar = scope_guard(p, LIFECYCLE.unwrap_rows(memory.search(
-                    fact, top_k=3,
-                    filters={"user_id": USER, "agent_id": agent_id, "scope": target_scope, "NOT": [{"is_canary": True}]},
-                    threshold=0.93,
-                )))
-            except Exception:
-                similar = []
-            if any(
-                LIFECYCLE.near_duplicate(fact, [LIFECYCLE.row_text(row)])
-                or (isinstance(row.get("score"), (int, float)) and float(row["score"]) >= 0.97)
-                for row in similar
-            ):
-                skipped += 1
-                continue
-            memory.add(
-                [{"role": "user", "content": fact}],
-                user_id=USER,
-                agent_id=agent_id,
-                run_id=run_id,
-                metadata={
-                    "added_mdt": CTL.now_mdt(),
-                    "source": f"{harness}-session-hook",
-                    "scope": target_scope,
-                    "written_by": p.name,
-                    "machine": machine,
-                    "cwd": cwd,
-                    "capture_digest": digest,
-                    "kind": str(candidate.get("kind") or "fact"),
-                    "support_refs": [str(ref) for ref in candidate.get("support") or []],
-                },
-                infer=False,
-            )
-            existing_texts.append(fact)
-            stored += 1
-    except Exception:
-        fleet_log("FAIL_OPEN", principal=p.name, machine=machine, harness=harness, digest=digest[:16], reason="service-unavailable", elapsed_ms=int((time.monotonic() - t0) * 1000))
+    identity, identity_quality, source_system, source_event_id, source_version = _lifecycle_identity(
+        p,
+        target_scope,
+        session,
+        harness,
+        digest,
+        machine,
+        source_system,
+        source_event_id,
+        source_version,
+        source_range_start,
+        source_range_end,
+    )
+    if reported_identity_quality == "legacy_session":
+        identity_quality = "legacy_session"
+    receipt = lifecycle_receipt(
+        p.name,
+        scope=target_scope,
+        source_system=source_system,
+        source_event_id=source_event_id,
+        source_version=source_version,
+    )
+    legacy_receipt = lifecycle_legacy_receipt(p.name, machine, harness, digest)
+    manifest_path = lifecycle_prepared_manifest_path(receipt)
+    expected_manifest = {
+        "digest": digest,
+        "parent_identity": identity,
+        "identity_quality": identity_quality,
+        "source_system": source_system,
+        "source_event_id": source_event_id,
+        "source_version": source_version,
+        "pre_rejected": pre_rejected,
+    }
+    lock = acquire_lifecycle_event_lock(identity["event_lock_key"])
+    if lock is None:
+        fleet_log("FAIL_OPEN", principal=p.name, machine=machine, harness=harness, digest=digest[:16], reason="event-lock")
         return json.dumps({"status": "FAIL_OPEN"})
+    try:
+        try:
+            if receipt.exists():
+                if _lifecycle_terminal_receipt_valid(
+                    receipt, expected_manifest, records, manifest_path
+                ):
+                    return json.dumps({"status": "SKIP_DUP"})
+                fleet_log(
+                    "FAIL_OPEN",
+                    principal=p.name,
+                    machine=machine,
+                    harness=harness,
+                    digest=digest[:16],
+                    reason="receipt-invalid",
+                )
+                return json.dumps({"status": "FAIL_OPEN"})
+            if not canonical_source and legacy_receipt.exists():
+                return json.dumps({"status": "SKIP_DUP"})
+        except OSError:
+            fleet_log("FAIL_OPEN", principal=p.name, machine=machine, harness=harness, digest=digest[:16], reason="receipt-read")
+            return json.dumps({"status": "FAIL_OPEN"})
 
-    LIFECYCLE.atomic_json(receipt, {
-        "status": "complete", "digest": digest, "principal": p.name,
-        "machine": machine, "harness": harness, "run_id": run_id,
-        "stored": stored, "skipped": skipped, "rejected": rejected,
-        "at": CTL.now_mdt(),
-    })
-    fleet_log("PASS", principal=p.name, machine=machine, harness=harness, digest=digest[:16], stored=stored, skipped=skipped, rejected=rejected, elapsed_ms=int((time.monotonic() - t0) * 1000))
-    return json.dumps({"status": "PASS", "stored": stored, "skipped": skipped, "rejected": rejected})
+        run_id = f"lifecycle:{identity['identity_sha256'][:32]}"
+        if not records:
+            try:
+                terminal_receipt = {
+                    "schema": LIFECYCLE_RECEIPT_SCHEMA,
+                    "status": "empty",
+                    "digest": digest,
+                    "principal": p.name,
+                    "identity_sha256": identity["identity_sha256"],
+                    "identity_quality": identity_quality,
+                    "run_id": run_id,
+                    "stored": 0,
+                    "skipped": 0,
+                    "rejected": pre_rejected,
+                    "prepared_manifest_sha256": None,
+                    "at": CTL.now_iso(),
+                }
+                LIFECYCLE.atomic_json(receipt, terminal_receipt)
+                if not _lifecycle_terminal_receipt_valid(
+                    receipt, expected_manifest, records, manifest_path
+                ):
+                    raise OSError("empty receipt readback mismatch")
+            except Exception:
+                fleet_log("FAIL_OPEN", principal=p.name, machine=machine, harness=harness, digest=digest[:16], reason="receipt-write")
+                return json.dumps({"status": "FAIL_OPEN"})
+            return json.dumps({"status": "PASS_EMPTY", "stored": 0, "rejected": pre_rejected})
+
+        t0 = time.monotonic()
+
+        def create_manifest():
+            if not _lifecycle_extraction_lock.acquire(blocking=False):
+                raise _LifecycleExtractionBusy
+            try:
+                extracted = LIFECYCLE.default_extractor(records)
+            finally:
+                _lifecycle_extraction_lock.release()
+            candidates, candidate_rejected = _lifecycle_manifest_candidates(
+                extracted,
+                records,
+                identity,
+                source_event_id,
+                source_version,
+            )
+            observed_at = CAPTURE.normalize_timestamp(
+                datetime.now(timezone.utc).isoformat(), "observed_at"
+            )
+            return _lifecycle_manifest(
+                parent_identity=identity,
+                identity_quality=identity_quality,
+                digest=digest,
+                source_system=source_system,
+                source_event_id=source_event_id,
+                source_version=source_version,
+                observed_at=observed_at,
+                machine=machine,
+                harness=harness,
+                cwd=cwd,
+                session=session,
+                candidates=candidates,
+                rejected=pre_rejected + candidate_rejected,
+            )
+
+        try:
+            manifest = _lifecycle_load_or_create_manifest(
+                manifest_path,
+                expected_manifest,
+                records,
+                create_manifest,
+            )
+            memory = M()
+            for candidate in manifest["candidates"]:
+                payload = _lifecycle_candidate_payload(manifest, candidate)
+                embedding = _verified_embed(memory, candidate["fact"])
+                _capture_verified_native(
+                    memory,
+                    embedding,
+                    candidate["identity"],
+                    payload,
+                    candidate["fact"],
+                    p,
+                    target_scope,
+                    created_at=manifest["observed_at"],
+                    lifecycle_metadata=manifest["lifecycle_metadata"],
+                    capture_schema=LIFECYCLE_CAPTURE_SCHEMA,
+                    agent_id=LIFECYCLE_CAPTURE_AGENT,
+                    provenance=LIFECYCLE_CAPTURE_PROVENANCE,
+                    run_id_prefix=LIFECYCLE_CAPTURE_AGENT,
+                )
+            stored = len(manifest["candidates"])
+            skipped = manifest["skipped"]
+            rejected = manifest["rejected"]
+        except _LifecycleExtractionBusy:
+            fleet_log("FAIL_OPEN", principal=p.name, machine=machine, harness=harness, digest=digest[:16], reason="extraction-busy", elapsed_ms=int((time.monotonic() - t0) * 1000))
+            return json.dumps({"status": "BUSY", "retry_after_seconds": 5})
+        except Exception:
+            fleet_log("FAIL_OPEN", principal=p.name, machine=machine, harness=harness, digest=digest[:16], reason="service-unavailable", elapsed_ms=int((time.monotonic() - t0) * 1000))
+            return json.dumps({"status": "FAIL_OPEN"})
+
+        try:
+            terminal_receipt = {
+                "schema": LIFECYCLE_RECEIPT_SCHEMA,
+                "status": "complete",
+                "digest": digest,
+                "principal": p.name,
+                "identity_sha256": identity["identity_sha256"],
+                "identity_quality": identity_quality,
+                "run_id": run_id,
+                "stored": stored,
+                "skipped": skipped,
+                "rejected": rejected,
+                "prepared_manifest_sha256": manifest["manifest_sha256"],
+                "at": CTL.now_iso(),
+            }
+            LIFECYCLE.atomic_json(receipt, terminal_receipt)
+            if not _lifecycle_terminal_receipt_valid(
+                receipt, expected_manifest, records, manifest_path
+            ):
+                raise OSError("terminal receipt readback mismatch")
+        except Exception:
+            fleet_log("FAIL_OPEN", principal=p.name, machine=machine, harness=harness, digest=digest[:16], reason="receipt-write", elapsed_ms=int((time.monotonic() - t0) * 1000))
+            return json.dumps({"status": "FAIL_OPEN"})
+        fleet_log("PASS", principal=p.name, machine=machine, harness=harness, digest=digest[:16], stored=stored, skipped=skipped, rejected=rejected, elapsed_ms=int((time.monotonic() - t0) * 1000))
+        return json.dumps({"status": "PASS", "stored": stored, "skipped": skipped, "rejected": rejected})
+    finally:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock.close()
 
 
 @mcp.tool
@@ -512,12 +2319,15 @@ def memory_delete(memory_id: str) -> str:
     p = who()
     if not p.full_access:
         q = LIB.qdrant()
-        pts = q.retrieve(LIB.COLLECTION, ids=[memory_id], with_payload=True)
-        if not pts:
-            raise ToolError("not found")
-        row_scope = (pts[0].payload or {}).get("scope")
-        if row_scope not in p.concrete_scopes(CLIENTS):
-            raise ToolError("not found")  # do not confirm existence out of scope
+        try:
+            pts = q.retrieve(LIB.COLLECTION, ids=[memory_id], with_payload=True)
+            if not pts:
+                raise ToolError("not found")
+            row_scope = (pts[0].payload or {}).get("scope")
+            if row_scope not in p.concrete_scopes(CLIENTS):
+                raise ToolError("not found")  # do not confirm existence out of scope
+        finally:
+            q.close()
     M().delete(memory_id)
     return json.dumps({"deleted": memory_id})
 
@@ -529,20 +2339,23 @@ def memory_stats() -> str:
     from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 
     q = LIB.qdrant()
-    must = [FieldCondition(key="user_id", match=MatchValue(value=USER))]
-    if not p.full_access:
-        must.append(FieldCondition(key="scope", match=MatchAny(any=p.concrete_scopes(CLIENTS))))
-    flt = Filter(must=must, must_not=[FieldCondition(key="is_canary", match=MatchValue(value=True))])
-    total = q.count(LIB.COLLECTION, count_filter=flt, exact=True).count
-    by_scope = {}
     try:
-        for hit in q.facet(LIB.COLLECTION, key="scope", facet_filter=flt, limit=200, exact=True).hits:
-            by_scope[str(hit.value)] = hit.count
-    except Exception:
-        pass
+        must = [FieldCondition(key="user_id", match=MatchValue(value=USER))]
+        if not p.full_access:
+            must.append(FieldCondition(key="scope", match=MatchAny(any=p.concrete_scopes(CLIENTS))))
+        flt = Filter(must=must, must_not=[FieldCondition(key="is_canary", match=MatchValue(value=True))])
+        total = q.count(LIB.COLLECTION, count_filter=flt, exact=True).count
+        by_scope = {}
+        try:
+            for hit in q.facet(LIB.COLLECTION, key="scope", facet_filter=flt, limit=200, exact=True).hits:
+                by_scope[str(hit.value)] = hit.count
+        except Exception:
+            pass
+    finally:
+        q.close()
     unscoped = total - sum(by_scope.values())
     if unscoped > 0:
-        by_scope["(unscoped — James only)"] = unscoped
+        by_scope["(unscoped — owner only)"] = unscoped
     return json.dumps({"principal": p.name, "visible": total, "by_scope": by_scope})
 
 
@@ -564,7 +2377,9 @@ if __name__ == "__main__":
     if HTTP_MODE:
         i = sys.argv.index("--http")
         port = int(sys.argv[i + 1]) if len(sys.argv) > i + 1 and sys.argv[i + 1].isdigit() else 8765
-        mcp.run(transport="http", host="127.0.0.1", port=port)
+        # Each capture is an independent HTTP call. Stateful mode retains every
+        # MCP transport indefinitely in FastMCP 3.4.7 (no idle timeout).
+        mcp.run(transport="http", host="127.0.0.1", port=port, stateless_http=True)
     else:
         # Parent-death watchdog (leak fix 2026-08-28): stdio children must die
         # with their client. 679 orphans were measured holding 13.7 GB after

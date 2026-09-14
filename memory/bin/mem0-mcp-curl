@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Run one bounded Mem0 MCP call through mem0-fleet-hook.mcp_call.
+
+    mem0-mcp-curl TOOL [JSON_ARGS|-]
+    mem0-mcp-curl TOKEN_FILE PORT TOOL [JSON_ARGS|-]
+
+Automatic mode requires MEM0_FLEET_TOKEN_FILE, so it cannot silently change
+principal. JSON_ARGS ``-`` reads stdin and keeps tool input out of argv.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import runpy
+import signal
+import sys
+import time
+from pathlib import Path
+from typing import Any
+from typing import Callable
+
+
+DEFAULT_TIMEOUT_SECONDS = 15.0
+MAX_TIMEOUT_SECONDS = 90.0
+MAX_ARGUMENT_BYTES = 1024 * 1024
+
+
+class CliError(Exception):
+    pass
+
+
+def parse_call(values: list[str]) -> tuple[dict[str, Any], str, str]:
+    if len(values) in (1, 2):
+        return {}, values[0], values[1] if len(values) == 2 else "{}"
+    if len(values) in (3, 4):
+        token_file, raw_port, tool = values[:3]
+        try:
+            port = int(raw_port)
+        except ValueError as error:
+            raise CliError("port must be an integer") from error
+        if str(port) != raw_port or not 1 <= port <= 65535:
+            raise CliError("port must be an integer from 1 through 65535")
+        route = {
+            "token_file": token_file,
+            "endpoint": f"http://127.0.0.1:{port}/mcp",
+        }
+        return route, tool, values[3] if len(values) == 4 else "{}"
+    raise CliError(
+        "expected TOOL [JSON_ARGS|-] or TOKEN_FILE PORT TOOL [JSON_ARGS|-]"
+    )
+
+
+def read_arguments(source: str) -> dict[str, Any]:
+    raw = sys.stdin.read(MAX_ARGUMENT_BYTES + 1) if source == "-" else source
+    if len(raw.encode()) > MAX_ARGUMENT_BYTES:
+        raise CliError("tool arguments exceed the 1 MiB limit")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise CliError("tool arguments must be valid JSON") from error
+    if not isinstance(value, dict):
+        raise CliError("tool arguments must be a JSON object")
+    return value
+
+
+def load_mcp_call() -> Callable[[str, dict[str, Any], dict[str, Any]], Any]:
+    configured = os.environ.get("MEM0_MCP_CURL_HOOK", "").strip()
+    hook = (
+        Path(configured)
+        if configured
+        else Path(__file__).resolve().with_name("mem0-fleet-hook")
+    )
+    if not hook.is_file():
+        raise CliError("mem0-fleet-hook is not installed beside this command")
+    call = runpy.run_path(str(hook)).get("mcp_call")
+    if not callable(call):
+        raise CliError("mem0-fleet-hook does not expose mcp_call")
+    return call
+
+
+def write_result(value: Any) -> None:
+    if isinstance(value, str):
+        print(value, end="" if value.endswith("\n") else "\n")
+    else:
+        json.dump(value, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        description="Stateless recovery after a native Mem0 MCP transport failure.",
+        usage=(
+            "%(prog)s [--timeout SECONDS] TOOL [JSON_ARGS|-]\n"
+            "       %(prog)s [--timeout SECONDS] TOKEN_FILE PORT TOOL [JSON_ARGS|-]"
+        ),
+    )
+    parser.add_argument("--timeout", type=float, metavar="SECONDS")
+    parser.add_argument(
+        "values",
+        nargs="+",
+        metavar="ROUTE_OR_CALL",
+        help="automatic call, or legacy token-file/loopback-port call",
+    )
+    options = parser.parse_args(argv)
+
+    try:
+        raw_timeout = options.timeout
+        if raw_timeout is None:
+            raw_timeout = os.environ.get(
+                "MEM0_MCP_CURL_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS
+            )
+        try:
+            timeout = float(raw_timeout)
+        except (TypeError, ValueError) as error:
+            raise CliError("timeout must be a number") from error
+        if not 0 < timeout <= MAX_TIMEOUT_SECONDS:
+            raise CliError("timeout must be greater than zero and at most 90 seconds")
+
+        routing, tool, argument_source = parse_call(options.values)
+        if not routing and not os.environ.get("MEM0_FLEET_TOKEN_FILE", "").strip():
+            raise CliError(
+                "automatic mode token-file route is required in MEM0_FLEET_TOKEN_FILE"
+            )
+
+        def expire(_signum: int, _frame: Any) -> None:
+            raise TimeoutError
+
+        started = time.monotonic()
+        previous_handler = signal.signal(signal.SIGALRM, expire)
+        signal.setitimer(signal.ITIMER_REAL, timeout)
+        try:
+            arguments = read_arguments(argument_source)
+            routing["_deadline"] = started + timeout
+            result = load_mcp_call()(tool, arguments, routing)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+        write_result(result)
+        return 0
+    except TimeoutError:
+        print("mem0-mcp-curl: request timed out", file=sys.stderr)
+        return 1
+    except CliError as error:
+        print(f"mem0-mcp-curl: {error}", file=sys.stderr)
+        return 2
+    except Exception:
+        # Upstream error text may include headers or token values; never echo it.
+        print("mem0-mcp-curl: request failed", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

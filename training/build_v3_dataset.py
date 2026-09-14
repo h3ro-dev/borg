@@ -3,19 +3,14 @@
 
 WHY THIS EXISTS
 ---------------
-The 2026-08-28 promotion canary (training/eval/CANARY-2026-08-28.md) returned
-DO-NOT-PROMOTE. The crowned 4B student finished 1 of 25 episodes. It was not
-broken everywhere — it was perfect at the one call shape it was trained on
-(`extract_nodes.extract_text`, 25/25) and scored **0 / 534** on
-`dedupe_edges.resolve_edge`, where it printed the required answer shape back
-instead of filling it in. The v1/v2 corpus was built from ONE hand-written
-harvest prompt, which covers one of graphiti's six internal calls.
+Prior isolated evaluation showed that training one extraction call shape did
+not generalize to Graphiti's other internal calls. In particular, a model can
+emit valid JSON with the wrong schema keys, silently producing no graph data.
 
 The rule that broke: **a student is only a drop-in replacement for the callsite
 it was trained on.** So this builder does not invent a prompt. It reads the
 (request, response) pairs the live shim now tees to data/shim-pairs.jsonl,
-which are graphiti's real callsites answered by the 27B teacher — the arm that
-went 233/233 shape-conformant in the same canary.
+which are Graphiti's real callsites and their explicitly supplied answers.
 
 WHAT IT PRODUCES
 ----------------
@@ -31,9 +26,9 @@ teacher's answer re-serialized canonically. Train order from the canary:
 
 MIXING
 ------
-This corpus is meant to be MIXED with the existing extraction corpus at
-training/data/train.jsonl, at a ratio the v3 run decides. Nothing is mixed by
-default. `--emit-mixed --mix-ratio N:M` writes the mixed file and reports what
+This corpus may be mixed with an explicitly supplied extraction corpus at a
+ratio the new owner chooses. Nothing is mixed by default. `--emit-mixed
+--mix-with PRIVATE_CORPUS --mix-ratio N:M` writes the mixed file and reports what
 went in; the report always prints the per-shape counts you need to choose N:M.
 
 Note the format difference the mix has to live with: the v1 corpus rows are
@@ -50,12 +45,10 @@ with the wrong keys is not an error anywhere in the stack; it silently becomes
 "100% valid JSON" on its exam. So valid JSON is not the bar here: every kept
 row must carry the required top-level keys of the schema the call declared.
 
-Usage (nothing is written until you pass --out):
-    build_v3_dataset.py --report-only
-    build_v3_dataset.py --out training/data/v3
-    build_v3_dataset.py --out training/data/v3 --emit-mixed --mix-ratio 1:2
+Usage (all data sources are explicit; nothing is written until --out):
+    build_v3_dataset.py --pairs PRIVATE_PAIRS --report-only
+    build_v3_dataset.py --pairs PRIVATE_PAIRS --out PRIVATE_OUTPUT
 """
-import os
 import argparse
 import hashlib
 import json
@@ -63,11 +56,6 @@ import random
 import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
-
-BASE = Path(os.path.expanduser("~/Library/Memory/graphiti"))
-PAIRS = BASE / "data" / "shim-pairs.jsonl"
-V1_CORPUS = BASE / "training" / "data" / "train.jsonl"
-OUT_DEFAULT = BASE / "training" / "data" / "v3"
 
 # Required top-level keys per declared schema, read off graphiti_core 0.29.3's
 # pydantic models. A response missing any of these is shape-wrong, however
@@ -243,10 +231,10 @@ def write_jsonl(path, rows):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--pairs", type=Path, default=PAIRS)
+    ap.add_argument("--pairs", type=Path, required=True,
+                    help="explicit approved request/response pair source")
     ap.add_argument("--out", type=Path, default=None,
-                    help=f"output dir (nothing is written without it; "
-                         f"suggested {OUT_DEFAULT})")
+                    help="explicit private output directory; nothing is written without it")
     ap.add_argument("--report-only", action="store_true")
     ap.add_argument("--max-chars", type=int, default=0,
                     help="prompt+target ceiling; 0 = no cap. The report prints "
@@ -260,11 +248,15 @@ def main():
                          "the exact blind spot the canary found")
     ap.add_argument("--emit-mixed", action="store_true",
                     help="also write mixed-train.jsonl")
-    ap.add_argument("--mix-with", type=Path, default=V1_CORPUS)
+    ap.add_argument("--mix-with", type=Path, default=None,
+                    help="explicit existing corpus; required with --emit-mixed")
     ap.add_argument("--mix-ratio", default="1:1",
                     help="new:existing, by rows, e.g. 1:2")
     ap.add_argument("--seed", type=int, default=13)
     args = ap.parse_args()
+
+    if args.emit_mixed and args.mix_with is None:
+        ap.error("--mix-with is required with --emit-mixed")
 
     if not args.pairs.exists():
         raise SystemExit(f"no pairs file at {args.pairs}")

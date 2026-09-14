@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""Audit patrol reports and store only audit-supported site facts."""
+
+from __future__ import annotations
+
+import ast
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import date
+from pathlib import Path
+from typing import Any
+from borg_config import CONFIG, BorgConfigError
+
+PATROLS = Path(os.environ["BORG_PATROL_OUTPUT_DIR"]).expanduser() if os.environ.get("BORG_PATROL_OUTPUT_DIR") else None
+STATE_PATH = CONFIG.data_root / "patrol-ingest-state.json"
+LOG_PATH = PATROLS / "INGESTED.md" if PATROLS else None
+AUDITOR = CONFIG.mem0_root / "bin/mem0-patrol-verify"
+MEM0CTL = CONFIG.mem0_root / "bin/mem0ctl"
+
+HEADER_RE = re.compile(
+    r"^=== (?P<site>.*?)\s+\[(?P<filename>[^]]+)]\s+"
+    r"accuracy (?P<good>\d+)/(?P<total>\d+) \((?P<pct>\d+)%\) ===$",
+    re.MULTILINE,
+)
+MISMATCH_RE = re.compile(
+    r"^\s+MISMATCH\s+(?P<field>.*?): claimed=.*? measured=(?P<measured>.*)$",
+    re.MULTILINE,
+)
+REVIEW_RE = re.compile(r"^\s+REVIEW\s+finding:\s*(?P<finding>.*)$", re.MULTILINE)
+
+
+def load_state() -> dict[str, Any]:
+    if not STATE_PATH.exists():
+        return {}
+    try:
+        value = json.loads(STATE_PATH.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"cannot read state file: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError("state file must contain a JSON object")
+    return value
+
+
+def save_state(state: dict[str, Any]) -> None:
+    tmp = STATE_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    tmp.replace(STATE_PATH)
+
+
+def extract_report(path: Path) -> dict[str, Any] | None:
+    text = path.read_text(errors="ignore")
+    marker = text.rfind("PATROL-REPORT")
+    if marker < 0:
+        return None
+    match = re.search(r"\{.*\}", text[marker + len("PATROL-REPORT") :], re.DOTALL)
+    if not match:
+        return None
+    try:
+        report = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return report if isinstance(report, dict) else None
+
+
+def report_date(path: Path) -> str:
+    match = re.search(r"(20\d{2}-\d{2}-\d{2})", path.name)
+    return match.group(1) if match else date.fromtimestamp(path.stat().st_mtime).isoformat()
+
+
+def parse_measured(raw: str) -> Any:
+    try:
+        return ast.literal_eval(raw.strip())
+    except (SyntaxError, ValueError):
+        return raw.strip()
+
+
+def sections(audit: str) -> list[tuple[re.Match[str], str]]:
+    headers = list(HEADER_RE.finditer(audit))
+    return [
+        (header, audit[header.end() : headers[i + 1].start() if i + 1 < len(headers) else len(audit)])
+        for i, header in enumerate(headers)
+    ]
+
+
+def display(value: Any) -> str:
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value) if value else "none"
+    if value is None or value == "":
+        return "none"
+    return str(value)
+
+
+def site_facts(
+    site: str,
+    day: str,
+    lane: dict[str, Any],
+    mismatches: dict[str, Any],
+    reviews: list[str],
+) -> list[str]:
+    """Build at most six facts, using measured mismatch values or confirmed lane values."""
+
+    def audited(field: str) -> Any:
+        return mismatches[field] if field in mismatches else lane.get(field)
+
+    facts: list[str] = []
+    blocked = audited("ai_crawlers_blocked")
+    if "ai_crawlers_blocked" in lane or "ai_crawlers_blocked" in mismatches:
+        if blocked:
+            facts.append(f"As of {day}, {site} blocks these AI crawlers: {display(blocked)}.")
+        else:
+            facts.append(f"As of {day}, {site} blocks none of GPTBot, ClaudeBot, or PerplexityBot.")
+
+    sitemap = audited("sitemap_urls")
+    if "sitemap_urls" in lane or "sitemap_urls" in mismatches:
+        if sitemap is None:
+            facts.append(f"As of {day}, no sitemap URL count could be measured for {site}.")
+        else:
+            facts.append(f"As of {day}, {site} has {sitemap} URLs in its measured sitemap.")
+
+    missing: list[str] = []
+    canonical = audited("canonical")
+    meta_chars = audited("meta_description_chars")
+    schema = audited("schema_types")
+    if ("canonical" in lane or "canonical" in mismatches) and not canonical:
+        missing.append("canonical")
+    if ("meta_description_chars" in lane or "meta_description_chars" in mismatches) and not meta_chars:
+        missing.append("meta description")
+    if ("schema_types" in lane or "schema_types" in mismatches) and not schema:
+        missing.append("schema")
+    if missing:
+        facts.append(f"As of {day}, {site} is missing {', '.join(missing)} on its homepage.")
+
+    broken: list[str] = []
+    for field, value in mismatches.items():
+        if field.startswith("page:") and value != 200:
+            broken.append(f"{field[5:]} ({display(value)})")
+    # Confirmed sampled statuses are safe to re-derive, but only broken pages are worth storing.
+    mismatched_pages = {field[5:] for field in mismatches if field.startswith("page:")}
+    for page in lane.get("sampled_pages", []):
+        url = str(page.get("url", ""))
+        if url and url[:50] not in mismatched_pages and page.get("status") != 200:
+            broken.append(f"{url} ({display(page.get('status'))})")
+    if broken:
+        facts.append(f"As of {day}, {site} had broken sampled pages: {'; '.join(broken)}.")
+
+    for finding in reviews:
+        finding = finding.strip()
+        if finding:
+            facts.append(f"Patrol finding (unreviewed): {finding}")
+        if len(facts) == 6:
+            break
+    return facts[:6]
+
+
+def add_fact(sentence: str) -> None:
+    result = subprocess.run(
+        [str(MEM0CTL), "add", sentence, "--agent", "site-patrol", "--raw"],
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"mem0ctl add failed: {detail}")
+
+
+def process(path: Path) -> tuple[int, int]:
+    report = extract_report(path)
+    if not report:
+        raise RuntimeError("no parseable final PATROL-REPORT")
+    result = subprocess.run([str(AUDITOR), str(path)], text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError(f"auditor failed: {(result.stderr or result.stdout).strip()}")
+    parsed = sections(result.stdout)
+    if not parsed:
+        raise RuntimeError(f"auditor produced no accuracy section: {result.stdout.strip()}")
+
+    lanes = {str(item.get("site", "?")): item for item in report.get("sites", [])}
+    stored = 0
+    for header, body in parsed:
+        site = header.group("site")
+        pct = int(header.group("pct"))
+        if pct < 70:
+            facts = [
+                f"As of {report_date(path)}, the site patrol lane for {site} failed its audit "
+                f"({pct}% accuracy) - findings discarded."
+            ]
+        else:
+            lane = lanes.get(site)
+            if lane is None:
+                raise RuntimeError(f"audited site {site!r} absent from final report JSON")
+            mismatches = {
+                match.group("field").strip(): parse_measured(match.group("measured"))
+                for match in MISMATCH_RE.finditer(body)
+            }
+            reviews = [match.group("finding") for match in REVIEW_RE.finditer(body)]
+            facts = site_facts(site, report_date(path), lane, mismatches, reviews)
+        for fact in facts:
+            add_fact(fact)
+            stored += 1
+    return stored, len(parsed)
+
+
+def main() -> int:
+    if PATROLS is None or LOG_PATH is None:
+        raise BorgConfigError("BORG_PATROL_OUTPUT_DIR is required")
+    state = load_state()
+    files = sorted(PATROLS.glob("*.out"))
+    stored = processed = skipped = failed = sites = 0
+    errors: list[str] = []
+    for path in files:
+        if path.name in state:
+            skipped += 1
+            continue
+        try:
+            count, site_count = process(path)
+        except Exception as exc:
+            failed += 1
+            errors.append(f"{path.name}: {exc}")
+            # A transcript whose lane has exited can never gain a report.
+            # Record it so daily failed-counts reflect fresh problems, not
+            # the same dead file re-failing forever.
+            if "no parseable final PATROL-REPORT" in str(exc) and time.time() - path.stat().st_mtime > 3600:
+                state[path.name] = {"failed": "no parseable final PATROL-REPORT",
+                                    "noted_at": date.today().isoformat()}
+                save_state(state)
+            continue
+        stored += count
+        sites += site_count
+        processed += 1
+        state[path.name] = {
+            "ingested_at": date.today().isoformat(),
+            "facts_stored": count,
+            "sites": site_count,
+        }
+        save_state(state)
+
+    summary = (
+        f"{date.today().isoformat()}: processed {processed} report(s), {sites} site(s), "
+        f"stored {stored} fact(s), skipped {skipped} previously ingested, failed {failed}."
+    )
+    with LOG_PATH.open("a") as log:
+        log.write(summary + "\n")
+    print(summary)
+    for error in errors:
+        print(f"ERROR {error}", file=sys.stderr)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -17,7 +17,7 @@ Two retrieval modes:
             three legs (active programs / standing rules / open commitments),
             merge, de-duplicate and recency-weight them.
 
-Gate: RELEVANCE_FLOOR is 0.62. Measured 2026-08-21 on collection `studio0`
+Gate: RELEVANCE_FLOOR is a calibrated per-store threshold.
 (48,681 points, nomic-embed-text 768d, cosine): eight deliberately off-topic
 queries peaked at 0.5738 and averaged 0.5400, while genuine hits ran 0.62-0.84.
 An ANN index always returns k results, so without a floor above the noise band
@@ -27,7 +27,7 @@ Miss behaviour: if nothing clears the floor, or a backing service is down, any
 existing digest is DELETED and nothing is written. A header-only or "no hits"
 file is itself indexable noise, and a stale digest is worse than none.
 
-Kill switch: touch ~/Library/Memory/mem0/HOOK_OFF
+Kill switch: touch ``BORG_HOME/mem0/HOOK_OFF``
 Always exit 0.
 """
 
@@ -42,20 +42,26 @@ import time
 import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
+import importlib.machinery
 
-BASE = Path(__file__).resolve().parent.parent
-OUT = Path.home() / ".grok" / "memory" / "mem0-live.md"
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_grok_inject", str(Path(__file__).resolve().parent / "borg_config.py")
+).load_module().CONFIG
+BASE = CONFIG.mem0_root
+OUT = Path(os.environ.get(
+    "BORG_GROK_MEMORY_FILE", str(CONFIG.data_root / "grok-live.md")
+)).expanduser().resolve()
 LOG = BASE / "data" / "grok-inject.log"
 
-OLLAMA_URL = os.environ.get("MEM0_OLLAMA_URL", "http://127.0.0.1:11434")
-QDRANT_URL = os.environ.get("MEM0_QDRANT_URL", "http://127.0.0.1:6333")
-COLLECTION = os.environ.get("MEM0_COLLECTION", "studio0")
-EMBED_MODEL = "nomic-embed-text:latest"
-USER_ID = "james"
+OLLAMA_URL = os.environ.get("MEM0_OLLAMA_URL", str(CONFIG.values["BORG_OLLAMA_URL"]))
+QDRANT_URL = os.environ.get("MEM0_QDRANT_URL", str(CONFIG.values["BORG_QDRANT_URL"]))
+COLLECTION = os.environ.get("MEM0_COLLECTION", str(CONFIG.values["BORG_QDRANT_COLLECTION"]))
+EMBED_MODEL = str(CONFIG.values["BORG_EMBED_MODEL"])
+USER_ID = str(CONFIG.values["BORG_OWNER_ID"])
 
 # Default-closed scope boundary (FINDING A1). Every direct Qdrant read this
 # hook performs is constrained to scopes explicitly granted here. Rows whose
-# payload has no `scope` field are personal:james by policy and cannot match
+# payload has no `scope` field are owner-only by policy and cannot match
 # a MatchAny on scope, so they are excluded structurally. Unset/empty grants
 # ZERO scopes: the hook must retrieve nothing at all.
 HOOK_ALLOWED_SCOPES = frozenset(
@@ -84,7 +90,7 @@ HTTP_TIMEOUT = 10.0
 # the deadline passes, retrieval stops and whatever already cleared the floor is
 # written.
 #
-# Why 10 s and not 4 s: Studio0 runs a real fleet. Measured 2026-08-21 17:04 MDT
+# Why 10 s and not 4 s: a busy host can make an otherwise local embedding slow.
 # at load average 131, with qwen3.8:27b (19 GB) and qwen3.8:27b-mlx (35 GB) both
 # resident, a single nomic-embed-text call took 14.98 s — the same call took
 # 45-95 ms on the same machine at 12:50. Embedding latency here is a function of
@@ -137,7 +143,7 @@ _FAST_EMBED = "unset"
 def _fast_embed():
     """Use the sibling fast-recall module for embedding when it exists.
 
-    A parallel lane may land ~/Library/Memory/mem0/bin/mem0_recall_fast.py. Adopt
+    The installed sibling may provide ``mem0_recall_fast.py``. Adopt
     it only if it exposes a callable `embed`; any failure falls back to the inline
     path below, which is already at the measured latency floor.
     """
@@ -315,10 +321,10 @@ def is_rootish(cwd: str) -> bool:
     if not cwd:
         return True
     p = str(Path(cwd))
-    home = str(Path.home())
+    home = str(CONFIG.home)
     if p in ROOTISH or p == home:
         return True
-    # An ancestor of $HOME (for example /Users) carries no project signal.
+    # An ancestor of BORG_HOME carries no project signal.
     return home.startswith(p + os.sep) and p != home
 
 
@@ -357,7 +363,7 @@ def root_legs(since_recent: str, since_month: str) -> list[tuple[str, str, str]]
         ),
         (
             "rules",
-            "James standing rules and operating defaults: approval gates, done-state "
+            f"{USER_ID} standing rules and operating defaults: approval gates, done-state "
             "language, evidence before completion claims, reporting style",
             "",
         ),

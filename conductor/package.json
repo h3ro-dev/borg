@@ -1,0 +1,14 @@
+{
+  "name": "borg-conductor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.21.0"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs providers/*.test.mjs",
+    "test:native": "BORG_TEST_CODEX_BIN=$BORG_HOME/runtime/npm/node_modules/.bin/codex $BORG_TEST_NODE_BIN --test tests/native-app-server.test.mjs",
+    "check": "node --check borg-conductor.mjs && node --check conductor.mjs && node --check config.mjs && node --check router/router.mjs"
+  }
+}

@@ -1,0 +1,10 @@
+#!/bin/bash
+# Grok injection wrapper bound only to the configured BORG installation.
+set -euo pipefail
+: "${BORG_HOME:?BORG_HOME is required}"
+: "${BORG_MEMORY_SCOPE:?BORG_MEMORY_SCOPE is required}"
+: "${BORG_OLLAMA_URL:?BORG_OLLAMA_URL is required}"
+
+export MEM0_GROK_SCOPES="${MEM0_GROK_SCOPES:-$BORG_MEMORY_SCOPE}"
+export MEM0_OLLAMA_URL="${MEM0_OLLAMA_URL:-$BORG_OLLAMA_URL}"
+exec "$BORG_HOME/mem0/bin/mem0-grok-inject" "$@"

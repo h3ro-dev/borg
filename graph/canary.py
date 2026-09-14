@@ -1,11 +1,32 @@
 #!/usr/bin/env python3
-"""Graphiti canary — does local qwen 3.8 27B build a valid temporal knowledge
-graph? Feeds real domain facts (incl. a temporal supersession) into Graphiti
-on the dedicated FalkorDB, measures success/failure per episode, then queries.
+"""Graphiti canary for a configured local model and isolated synthetic facts.
+
+Feeds reserved synthetic facts, including temporal supersession, into the
+configured FalkorDB, measures each episode, then queries the result.
 """
 import asyncio
+import importlib.machinery
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+# Portable canaries use only the native reserved synthetic feed contract.
+import os
+if os.environ.get("BORG_HOME"):
+    import argparse
+    import subprocess
+    config = importlib.machinery.SourceFileLoader(
+        "borg_config_canary_dispatch", str(Path(__file__).resolve().parent / "bin/borg_config.py")
+    ).load_module().CONFIG
+    parser = argparse.ArgumentParser(description="reserved synthetic graph feed canary")
+    parser.add_argument("--run", action="store_true", help="write the reserved synthetic canary collection/graphs")
+    args = parser.parse_args()
+    if not args.run:
+        parser.exit(2, "optional canary not run: use --run on a coordinated disposable installation\n")
+    raise SystemExit(subprocess.call([
+        str(config.mem0_root / "venv/bin/python"), str(config.graph_root / "backfill.py"),
+        "--canary", "--json",
+    ]))
 
 from graphiti_core import Graphiti
 from graphiti_core.driver.falkordb_driver import FalkorDriver
@@ -16,14 +37,17 @@ from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerCli
 from graphiti_core.nodes import EpisodeType
 
 import os
-OLLAMA = os.environ.get("GRAPH_LLM_URL", "http://127.0.0.1:11500/v1")  # schema-shim: grammar-enforced
-QWEN = os.environ.get("GRAPH_LLM_MODEL", "llama3.1:8b")  # MLX engine ignores format grammars; use a llama.cpp-engine model
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_graph_canary", str(Path(__file__).resolve().parent / "bin" / "borg_config.py")
+).load_module().CONFIG
+OLLAMA = str(CONFIG.values["BORG_GRAPH_LLM_URL"])
+QWEN = str(CONFIG.values["BORG_GRAPH_MODEL"])
 
 EPISODES = [
-    ("ownership", "James owns four machines: Studio0, second-machine, worker-machine, and Cody's Mac mini. He does not own Emily's Mac Studio."),
-    ("fleet", "worker-machine runs a qwen 3.8 27B model that mines chat threads into James's shared memory system. second-machine runs another qwen that handles the email mine."),
-    ("dashboard-v1", "On 2026-08-14, the NROS dashboard ran on port 3005."),
-    ("dashboard-v2", "On 2026-08-20, the NROS dashboard was moved from port 3005 to port 3007 to resolve a port conflict."),
+    ("ownership", "Example Company owns two synthetic compute nodes, node-a and node-b."),
+    ("fleet", "Node-a runs a local extraction model for Example Company synthetic memory."),
+    ("dashboard-v1", "On 2026-01-14, the example dashboard ran on port 3005."),
+    ("dashboard-v2", "On 2026-01-20, the example dashboard moved from port 3005 to port 3007."),
 ]
 
 
@@ -47,9 +71,9 @@ def nothink_client():
 async def main():
     shared = nothink_client()
     llm = OpenAIGenericClient(config=LLMConfig(api_key="ollama", model=QWEN, small_model=QWEN, base_url=OLLAMA), client=shared)
-    embedder = OpenAIEmbedder(config=OpenAIEmbedderConfig(embedding_model="nomic-embed-text:latest", embedding_dim=768, api_key="ollama", base_url=OLLAMA))
+    embedder = OpenAIEmbedder(config=OpenAIEmbedderConfig(embedding_model=str(CONFIG.values["BORG_EMBED_MODEL"]), embedding_dim=int(CONFIG.values["BORG_EMBED_DIMS"]), api_key="ollama", base_url=OLLAMA))
     reranker = OpenAIRerankerClient(config=LLMConfig(api_key="ollama", model=QWEN, base_url=OLLAMA), client=shared)
-    driver = FalkorDriver(host="127.0.0.1", port=6383)
+    driver = FalkorDriver(host=str(CONFIG.values["BORG_FALKORDB_HOST"]), port=int(CONFIG.values["BORG_FALKORDB_PORT"]))
     g = Graphiti(graph_driver=driver, llm_client=llm, embedder=embedder, cross_encoder=reranker)
 
     await g.build_indices_and_constraints()
@@ -63,7 +87,7 @@ async def main():
                 name=name, episode_body=body,
                 source_description="canary", source=EpisodeType.text,
                 reference_time=datetime.now(timezone.utc),
-                group_id="canary",
+                group_id=str(CONFIG.values["BORG_FALKORDB_GRAPH"]),
             )
             nodes = len(getattr(r, "nodes", []) or [])
             edges = len(getattr(r, "edges", []) or [])
@@ -77,8 +101,8 @@ async def main():
 
     # Query: what is the CURRENT dashboard port? (temporal test)
     try:
-        res = await g.search("what port does the NROS dashboard run on", num_results=5)
-        print("\nsearch 'NROS dashboard port' — edges returned:")
+        res = await g.search("what port does the example dashboard run on", num_results=5)
+        print("\nsearch 'example dashboard port' — edges returned:")
         for e in res:
             valid = getattr(e, "valid_at", None)
             invalid = getattr(e, "invalid_at", None)

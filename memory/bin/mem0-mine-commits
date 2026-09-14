@@ -1,0 +1,731 @@
+#!/usr/bin/env python3
+"""mem0-mine-commits — mine local git history into supersession-aware memory.
+
+The other miners read what people *said* (threads, email). This one reads what
+the code *did*: which decision replaced which, when, and in which repo. That is
+the durable signal: newest relationships, how decisions evolved, and current state.
+
+Design
+------
+Universe   Local clones only, read-only. Never fetches, never mutates, never
+           touches the network. Many clones share one remote (29 clones of
+           duplicate checkouts on one machine), so `--census` dedupes by remote
+           and names one canonical clone per remote.
+
+Unit       A *commit window*, not a commit. Windows are cut oldest-first so
+           boundaries never renumber when new commits land: fill until
+           --window-commits OR --window-days, whichever comes first. In a
+           merge-heavy repo (>=50% of first-parent commits are merges) the
+           walk is `--first-parent` and each entry is one PR merge, unpacked
+           into its branch subjects. The trailing partial window is left OPEN
+           and skipped, so a half-window is never stored and later contradicted.
+
+Digest     Window date span + shortlog + aggregate diffstat + top paths + the
+           per-PR change log, capped at --max-digest chars (default 8000
+           ~= 2k tokens, inside Graphiti's 1000-3000 token episode target).
+
+Extract    Ollama native /api/chat with format=<json schema> on the GGUF model
+           qwen3.8:27b. The GGUF path compiles the schema to a real grammar;
+           the -mlx tag cannot enforce one (measured, 2026-08-21), so this
+           miner pins GGUF and does not fall back to mlx.
+           Facts: {claim, kind, supersedes, as_of_date, confidence}.
+           `supersedes` is the prize field — "X replaced Y on date D".
+
+Land       Ledger FIRST, store second. Every fact is appended to
+           data/repo-miner/<repo>.jsonl before anything reaches mem0, and
+           facts killed by the shared DROP filter are kept in the ledger with
+           the pattern that killed them (never thrown away).
+
+           Storage goes through the house path — CTL.novelty_add — so the
+           novelty gate (cosine >= 0.92) and its receipts apply. Every skip is
+           logged here and in data/novelty-skipped.jsonl.
+           Tags: agent=repo-miner, run_id=repohist-<repo>, kind=repo-evolution,
+           plus fact_kind / supersedes / as_of_date / confidence per row.
+
+           DEFAULT IS infer=False. `--house-links` opts into Wave 2A's
+           infer=True path (grammar-emitted `linked_memory_ids` +
+           auto-tombstone of the linked rows). MEASURED 2026-08-21, do not turn
+           it on until fixed: that path produced a FALSE supersession on this
+           miner's very first window — a 2026-07-27 "CI uses affected-suites
+           selection" decision was tombstoned as superseded by an unrelated
+           2026-07-28 "finding-review gate is live" milestone. Cause: the
+           extraction schema makes `linked_memory_ids` a REQUIRED array, the
+           candidate list is just the top-k nearest rows, and a small model
+           handed a required array plus plausible neighbours fills it;
+           `_apply_supersession_links` then retires every linked row with no
+           second check. Dense same-repo facts are the worst case, so this
+           miner is the most likely thing on the box to trigger it.
+           Supersession is NOT lost by defaulting to raw: the claim text
+           carries "This superseded: X" and the `supersedes` metadata field is
+           stored either way. Only the automatic retirement is deferred.
+
+Graph      Design-only in this pilot. Each window also emits a replayable
+           Graphiti episode spec to <repo>.episodes.jsonl with
+           reference_time = window end date. NOTHING is written to the graph.
+
+Usage
+  mem0-mine-commits --census [--roots A,B]
+  mem0-mine-commits --repo PATH [--windows 10] [--oldest-first]
+                    [--window-commits 30] [--window-days 14]
+                    [--dry-run] [--no-store] [--max-digest 8000]
+"""
+
+import os
+
+os.environ["MEM0_TELEMETRY"] = "false"  # must precede any mem0 import
+
+import argparse
+import hashlib
+import importlib.machinery
+import json
+import re
+import subprocess
+import sys
+import time
+from datetime import date, datetime
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BASE / "bin/mem0ctl")).load_module()
+HOOK = importlib.machinery.SourceFileLoader("mem0hook_mod", str(BASE / "bin/mem0-capture-hook")).load_module()
+
+OUT_DIR = BASE / "data/repo-miner"
+STATE_F = OUT_DIR / "state.json"
+LOG_F = OUT_DIR / "miner.log"
+
+# GGUF, NOT the -mlx tag: format=<schema> is compiled to a grammar only on the
+# llama.cpp path. Measured 2026-08-21 — on mlx the schema is advisory at best.
+MODEL = "qwen3.8:27b"
+OLLAMA = os.environ.get("MEM0_OLLAMA_URL", str(CTL.CONFIG.values["BORG_OLLAMA_URL"]))
+
+DEFAULT_ROOTS = [
+    Path(value).expanduser().resolve()
+    for value in os.environ.get("BORG_REPOSITORY_ROOTS", "").split(os.pathsep)
+    if value.strip()
+]
+
+# Read-only verbs only. Anything not on this list cannot be run by this miner.
+# `status` is deliberately absent: it refreshes (writes) .git/index.
+GIT_READONLY = {
+    "log", "show", "diff", "rev-list", "rev-parse",
+    "for-each-ref", "shortlog", "remote", "cat-file",
+}
+
+FACT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "facts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["decision", "supersession", "architecture", "convention", "milestone"],
+                    },
+                    "supersedes": {"type": "string"},
+                    "as_of_date": {"type": "string"},
+                    "confidence": {"type": "number"},
+                },
+                # All five required: an optional property makes Ollama's
+                # schema->grammar conversion unreliable. "" means "none".
+                "required": ["claim", "kind", "supersedes", "as_of_date", "confidence"],
+            },
+        }
+    },
+    "required": ["facts"],
+}
+
+PROMPT = """You are reading a digest of ONE window of git history from an internal engineering repository.
+
+Extract durable facts about how this system EVOLVED. Each fact is one plain, self-contained sentence that a future engineer could act on without ever seeing this digest.
+
+Kinds:
+- supersession — something REPLACED, removed, renamed, raised, lowered, migrated, retired, or unpinned something earlier. THIS IS THE MOST VALUABLE KIND. Look hard for it.
+- decision — a choice that was made and now governs the code.
+- architecture — a structural fact: components, boundaries, data flow, where a responsibility lives.
+- convention — a rule contributors must follow: naming, gates, required checks, process.
+- milestone — something that became live, merged, sealed, closed, or shipped.
+
+Rules:
+- Name the exact thing. Use the real file paths, branch names, PR numbers, flags, ports, and identifiers that appear in the digest.
+- Write a supersession as "<new> replaced <old>" and put the OLD thing alone in the `supersedes` field. Use "" for supersedes when nothing was replaced.
+- `as_of_date` is the date the change landed. Use a date from the digest. Format YYYY-MM-DD.
+- `confidence` is 0.0-1.0. Use 0.9 or higher only when the digest states the fact directly.
+- NEVER output credentials, API keys, tokens, passwords, email addresses, phone numbers, or full 40-character commit hashes. Short 7-character hashes are fine.
+- Do not restate code. Do not guess intent the digest does not evidence. Skip routine churn ("updated tests", "fixed a typo") unless it changed a rule.
+- Return 0 to 10 facts. Few good facts beat many weak ones."""
+
+
+# ---------------------------------------------------------------- plumbing
+
+
+def log(msg):
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LOG_F, "a") as f:
+        f.write(f"{CTL.now_mdt()} {msg}\n")
+
+
+def git(repo, *args, check=True):
+    """Run one read-only git command. Refuses any verb not on the allowlist."""
+    if not args or args[0] not in GIT_READONLY:
+        raise RuntimeError(f"refusing non-read-only git verb: {args[:1]}")
+    r = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True, errors="ignore",
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"},
+    )
+    if check and r.returncode:
+        raise RuntimeError(f"git {' '.join(args[:3])} failed: {r.stderr.strip()[:200]}")
+    return r.stdout
+
+
+def load_state():
+    if STATE_F.exists():
+        try:
+            return json.loads(STATE_F.read_text())
+        except Exception:
+            pass
+    return {"repos": {}}
+
+
+def save_state(st):
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_F.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, indent=1))
+    tmp.replace(STATE_F)
+
+
+def append_jsonl(path: Path, rows):
+    """Append rows and fsync. Used for the ledger BEFORE any store happens."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def drop_reason(text):
+    """Return the index of the first house DROP pattern that matches, else None."""
+    for i, p in enumerate(HOOK.DROP_PATTERNS):
+        if p.search(text):
+            return i
+    return None
+
+
+# ---------------------------------------------------------------- census
+
+
+def find_clones(roots, max_depth=3):
+    seen = set()
+    for root in roots:
+        root = Path(root).expanduser()
+        if not root.is_dir():
+            continue
+        r = subprocess.run(
+            ["find", str(root), "-maxdepth", str(max_depth), "-name", ".git", "-print"],
+            capture_output=True, text=True, errors="ignore",
+        )
+        for line in r.stdout.splitlines():
+            repo = Path(line).parent
+            if repo not in seen:
+                seen.add(repo)
+                yield repo
+
+
+def clone_info(repo):
+    try:
+        n = int(git(repo, "rev-list", "--count", "HEAD").strip())
+    except Exception:
+        return None
+    def safe(*a, d=""):
+        try:
+            return git(repo, *a).strip() or d
+        except Exception:
+            return d
+    remote = safe("remote", "get-url", "origin")
+    if remote:
+        m = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?$", remote)
+        remote = m.group(1) if m else remote
+    return {
+        "path": str(repo),
+        "commits": n,
+        "remote": remote or "(none)",
+        "branch": safe("rev-parse", "--abbrev-ref", "HEAD"),
+        "first": safe("log", "--reverse", "--format=%ad", "--date=short").split("\n")[0],
+        "last": safe("log", "-1", "--format=%ad", "--date=short"),
+    }
+
+
+def census(roots):
+    rows = [i for i in (clone_info(r) for r in find_clones(roots)) if i]
+    by_remote = {}
+    for row in rows:
+        cur = by_remote.get(row["remote"])
+        # Canonical clone = most commits; tie broken by freshest last commit.
+        if cur is None or (row["commits"], row["last"]) > (cur["commits"], cur["last"]):
+            by_remote[row["remote"]] = row
+    for row in rows:
+        by_remote[row["remote"]].setdefault("clones", 0)
+        by_remote[row["remote"]]["clones"] += 1
+    return rows, sorted(by_remote.values(), key=lambda r: -r["commits"])
+
+
+# ---------------------------------------------------------------- windowing
+
+
+def resolve_ref(repo, want=None):
+    """Prefer the remote default branch; fall back to local, then HEAD."""
+    if want:
+        return want
+    refs = git(repo, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes").split()
+    for cand in ("refs/remotes/origin/master", "refs/remotes/origin/main",
+                 "refs/heads/master", "refs/heads/main"):
+        if cand in refs:
+            return cand
+    return "HEAD"
+
+
+def is_merge_heavy(repo, ref, sample=200):
+    fp = git(repo, "rev-list", "--first-parent", f"-n{sample}", ref).split()
+    if not fp:
+        return False
+    mg = git(repo, "rev-list", "--first-parent", "--merges", f"-n{sample}", ref).split()
+    return len(mg) / len(fp) >= 0.5
+
+
+def commit_list(repo, ref, first_parent):
+    """Oldest-first list of {sha, date, subject}."""
+    args = ["log", "--reverse", "--date=short", "--format=%H%x1f%ad%x1f%s"]
+    if first_parent:
+        args.append("--first-parent")
+    args.append(ref)
+    out = []
+    for line in git(repo, *args).splitlines():
+        parts = line.split("\x1f")
+        if len(parts) == 3:
+            out.append({"sha": parts[0], "date": parts[1], "subject": parts[2]})
+    return out
+
+
+def cut_windows(commits, max_commits, max_days):
+    """Oldest-first greedy cut. Boundaries are stable as history grows."""
+    wins, cur = [], []
+    for c in commits:
+        if cur:
+            span = (date.fromisoformat(c["date"]) - date.fromisoformat(cur[0]["date"])).days
+            if len(cur) >= max_commits or span > max_days:
+                wins.append(cur)
+                cur = []
+        cur.append(c)
+    if cur:
+        wins.append(cur)
+    return wins
+
+
+def window_is_open(win, max_commits, max_days, grace_days=3):
+    """A trailing window that can still grow — skip it rather than store half."""
+    if len(win) >= max_commits:
+        return False
+    span = (date.fromisoformat(win[-1]["date"]) - date.fromisoformat(win[0]["date"])).days
+    if span > max_days:
+        return False
+    age = (date.today() - date.fromisoformat(win[-1]["date"])).days
+    return age <= grace_days
+
+
+def sha_digest(win):
+    h = hashlib.sha256("".join(c["sha"] for c in win).encode()).hexdigest()
+    return h[:12]
+
+
+# ---------------------------------------------------------------- digest
+
+
+def build_digest(repo, info, ref, win, idx, total_windows, total_commits, first_parent, cap):
+    first, last = win[0], win[-1]
+    rng = f"{first['sha']}^..{last['sha']}"
+
+    def safe(*a, d=""):
+        try:
+            return git(repo, *a)
+        except Exception:
+            return d
+
+    stat = safe("diff", "--shortstat", f"{first['sha']}^", last["sha"]).strip()
+    numstat = safe("diff", "--numstat", f"{first['sha']}^", last["sha"])
+    top = {}
+    for line in numstat.splitlines():
+        p = line.split("\t")
+        if len(p) == 3 and p[0].isdigit():
+            parts = p[2].split("/")
+            key = "/".join(parts[:2]) if len(parts) > 2 else (parts[0] if len(parts) == 1 else p[2])
+            top[key] = top.get(key, 0) + int(p[0]) + (int(p[1]) if p[1].isdigit() else 0)
+    top_s = ", ".join(f"{k} ({v})" for k, v in sorted(top.items(), key=lambda kv: -kv[1])[:8])
+    authors = " | ".join(l.strip() for l in safe("shortlog", "-sn", "--no-merges", rng).splitlines()[:6])
+
+    head = (
+        f"REPO: {info['remote']}  (local clone {Path(repo).name})\n"
+        f"REF: {ref}\n"
+        f"WINDOW: w{idx:04d} of {total_windows}  —  {len(win)} of {total_commits} "
+        f"{'PR merges' if first_parent else 'commits'}\n"
+        f"DATE SPAN: {first['date']} .. {last['date']}\n"
+        f"HEAD SHA: {last['sha'][:7]}\n"
+        f"AUTHORS: {authors or 'unknown'}\n"
+        f"NET CHANGE: {stat or 'unknown'}\n"
+        f"TOP PATHS: {top_s or 'unknown'}\n\n"
+        f"CHANGE LOG (oldest first):\n"
+    )
+
+    lines = []
+    for c in win:
+        entry = f"- {c['date']} {c['sha'][:7]} {c['subject']}"
+        if first_parent:
+            # Unpack the PR: the merge subject alone hides what actually changed.
+            try:
+                subs = [s for s in git(repo, "log", f"{c['sha']}^1..{c['sha']}^2",
+                                       "--format=%s", check=False).splitlines() if s]
+            except Exception:
+                subs = []
+            if subs:
+                entry += "\n    " + "; ".join(subs[:6])
+        lines.append(entry)
+
+    body = "\n".join(lines)
+    budget = cap - len(head)
+    if len(body) > budget:  # trim the log, never the header
+        body = body[:budget - 40].rstrip() + "\n- [change log truncated]"
+    return head + body
+
+
+# ---------------------------------------------------------------- extraction
+
+
+def extract(digest, timeout=600):
+    import urllib.request
+
+    payload = {
+        "model": MODEL,
+        "think": False,
+        "stream": False,
+        "options": {"temperature": 0, "num_predict": 1200, "num_ctx": 8192},
+        "format": FACT_SCHEMA,
+        "messages": [
+            {"role": "user", "content": PROMPT + "\n\n--- DIGEST ---\n" + digest},
+        ],
+    }
+    req = urllib.request.Request(
+        f"{OLLAMA}/api/chat",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        body = json.loads(r.read())
+    content = (body.get("message") or {}).get("content", "").strip()
+    if not content:
+        return []
+    facts = json.loads(content).get("facts", [])
+    out = []
+    for f in facts:
+        claim = str(f.get("claim", "")).strip()
+        if len(claim) < 15:
+            continue
+        kind = str(f.get("kind", "")).strip()
+        if kind not in ("decision", "supersession", "architecture", "convention", "milestone"):
+            kind = "decision"
+        try:
+            conf = float(f.get("confidence", 0))
+        except Exception:
+            conf = 0.0
+        out.append({
+            "claim": claim,
+            "kind": kind,
+            "supersedes": str(f.get("supersedes", "")).strip(),
+            "as_of_date": str(f.get("as_of_date", ""))[:10],
+            "confidence": round(max(0.0, min(1.0, conf)), 2),
+        })
+    return out
+
+
+# ---------------------------------------------------------------- landing
+
+
+def fact_text(info, f):
+    """One self-contained, date-stamped sentence — house recall style."""
+    d = f["as_of_date"] or "unknown date"
+    s = f"As of {d}, {info['remote']}: {f['claim'].rstrip('.')}."
+    if f["kind"] == "supersession" and f["supersedes"]:
+        s += f" This superseded: {f['supersedes'].rstrip('.')}."
+    return s
+
+
+# Passed as mem0's custom_instructions. The house ADDITIVE_EXTRACTION_PROMPT
+# stays as the system prompt, so the "Memory Extractor" grammar reroute and the
+# linked_memory_ids request both still fire.
+STORE_INSTRUCTIONS = """The input is already ONE distilled, self-contained fact mined from git history.
+Keep it as a single memory and keep it close to verbatim. Never drop the leading date, the repository name, or any PR number, file path, branch name, flag, or port it contains.
+If this fact supersedes an existing memory — it replaces, retires, renames, raises, lowers, or migrates what that memory states — put that memory's id in linked_memory_ids."""
+
+
+def episode_spec(info, ref, wid, win, digest):
+    """Replayable Graphiti add_episode kwargs. NOT written to the graph here."""
+    return {
+        "event": "episode-spec",
+        "name": f"{Path(info['path']).name} {wid} {win[0]['date']}..{win[-1]['date']}",
+        "episode_body": digest,
+        "source": "text",
+        "source_description": f"git commit window {wid} of {info['remote']} ({ref})",
+        # reference_time is load-bearing: it becomes episode.valid_at and is the
+        # anchor Graphiti uses to date-resolve facts. No valid_at => no
+        # invalidation => no supersession. Window END = when the change landed.
+        "reference_time": f"{win[-1]['date']}T12:00:00-06:00",
+        "group_id": "backfill-v1",  # ONE group; a group is a separate FalkorDB graph
+        "approx_tokens": len(digest) // 4,
+        "graph_written": False,
+    }
+
+
+def mine_repo(args):
+    repo = Path(args.repo).expanduser().resolve()
+    info = clone_info(repo)
+    if not info:
+        print(f"not a git repo: {repo}", file=sys.stderr)
+        return 1
+    name = repo.name
+    ledger = OUT_DIR / f"{name}.jsonl"
+    episodes = OUT_DIR / f"{name}.episodes.jsonl"
+    lock = OUT_DIR / f"{name}.lock"
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    if lock.exists():
+        try:
+            os.kill(int(lock.read_text()), 0)
+            print(f"already mining {name} (pid {lock.read_text()}); exiting")
+            return 0
+        except (ProcessLookupError, ValueError):
+            pass
+    lock.write_text(str(os.getpid()))
+    import atexit
+    atexit.register(lambda: lock.unlink(missing_ok=True))
+
+    ref = resolve_ref(repo, args.ref)
+    fp = is_merge_heavy(repo, ref)
+    commits = commit_list(repo, ref, fp)
+    wins = cut_windows(commits, args.window_commits, args.window_days)
+    open_tail = bool(wins) and window_is_open(wins[-1], args.window_commits, args.window_days)
+    closed = wins[:-1] if open_tail else wins
+
+    print(f"repo={name} remote={info['remote']} ref={ref}")
+    print(f"mode={'PR-merge (first-parent)' if fp else 'plain commits'}  "
+          f"units={len(commits)}  windows={len(wins)} ({len(closed)} closed"
+          f"{', 1 open/skipped' if open_tail else ''})")
+
+    st = load_state()
+    rst = st["repos"].setdefault(str(repo), {"remote": info["remote"], "ref": ref, "windows": {}})
+    rst["remote"], rst["ref"] = info["remote"], ref
+
+    todo = []
+    for idx, w in enumerate(closed):
+        wid = f"w{idx:04d}"
+        prev = rst["windows"].get(wid)
+        if prev and prev.get("sha_digest") == sha_digest(w) and not args.force:
+            continue
+        todo.append((idx, wid, w, bool(prev)))
+    if not args.oldest_first:
+        todo = todo[::-1]          # newest windows first
+    if args.windows:
+        todo = todo[: args.windows]
+    todo.sort(key=lambda t: t[0])  # mine in chronological order
+
+    print(f"to mine: {len(todo)} windows\n")
+    log(f"RUN-START repo={name} ref={ref} fp={fp} windows={len(wins)} todo={len(todo)}")
+
+    mem = None
+    if not (args.dry_run or args.no_store):
+        # MUST be the qwen key: mem0ctl's grammar reroute + supersession patch
+        # only fire for MODELS["qwen"]/EXTRACTION_MODEL. llama would store the
+        # fact but emit no links and tombstone nothing.
+        mem = CTL.get_memory("qwen")
+
+    tot_kept = tot_dropped = tot_skipped = 0
+    times = []
+    for n, (idx, wid, w, remined) in enumerate(todo, 1):
+        t0 = time.time()
+        digest = build_digest(repo, info, ref, w, idx, len(wins), len(commits), fp, args.max_digest)
+        if args.dry_run:
+            print(f"--- {wid} ({len(digest)} chars) ---\n{digest[:1400]}\n")
+            continue
+        try:
+            facts = extract(digest)
+        except Exception as e:
+            log(f"{wid} EXTRACT-ERROR {type(e).__name__}: {e}")
+            print(f"  {wid}  EXTRACT-ERROR {type(e).__name__}")
+            continue
+        dt = time.time() - t0
+        times.append(dt)
+
+        base = {
+            "ts": CTL.now_mdt(), "repo": name, "remote": info["remote"], "ref": ref,
+            "window_id": wid, "window_index": idx,
+            "window_start": w[0]["date"], "window_end": w[-1]["date"],
+            "head_sha": w[-1]["sha"][:12], "commit_count": len(w),
+            "sha_digest": sha_digest(w), "digest_chars": len(digest),
+            "remined": remined,
+        }
+
+        # ---- LEDGER FIRST -------------------------------------------------
+        rows, keep = [], []
+        for f in facts:
+            di = drop_reason(f["claim"] + " " + f["supersedes"])
+            row = {"event": "fact", **base, **f,
+                   "dropped": di is not None,
+                   "drop_pattern": (HOOK.DROP_PATTERNS[di].pattern if di is not None else None)}
+            rows.append(row)
+            if di is None:
+                keep.append(f)
+        rows.append(episode_spec(info, ref, wid, w, digest))
+        append_jsonl(ledger, [r for r in rows if r.get("event") != "episode-spec"])
+        append_jsonl(episodes, [r for r in rows if r.get("event") == "episode-spec"])
+
+        # ---- STORE SECOND (house Wave 2A path) ----------------------------
+        ids, skipped, store_rows = [], 0, []
+        if mem is not None:
+            for f in keep:
+                text = fact_text(info, f)
+                try:
+                    res = CTL.novelty_add(
+                        mem,
+                        [{"role": "user", "content": text}],
+                        user_id=str(CTL.CONFIG.values["BORG_OWNER_ID"]), agent_id="repo-miner",
+                        run_id=f"repohist-{name}",
+                        metadata={
+                            "kind": "repo-evolution", "fact_kind": f["kind"],
+                            "repo": name, "remote": info["remote"], "ref": ref,
+                            "window_id": wid, "window_start": w[0]["date"],
+                            "window_end": w[-1]["date"], "head_sha": w[-1]["sha"][:12],
+                            "supersedes": f["supersedes"], "as_of_date": f["as_of_date"],
+                            "confidence": f["confidence"],
+                            "source": f"git:{info['remote']}@{w[-1]['sha'][:7]}",
+                            "added_mdt": CTL.now_mdt(),
+                        },
+                        # infer=True arms Wave 2A's grammar-link + auto-tombstone
+                        # patch. Off by default — it false-linked on window one
+                        # (see module docstring). Raw keeps the fact and its
+                        # `supersedes` metadata; only auto-retirement is deferred.
+                        infer=bool(args.house_links),
+                        **({"prompt": STORE_INSTRUCTIONS} if args.house_links else {}),
+                    )
+                except Exception as e:
+                    log(f"{wid} STORE-ERROR {type(e).__name__}: {e}")
+                    store_rows.append({"event": "store-error", **base, "claim": f["claim"],
+                                       "error": f"{type(e).__name__}: {e}"})
+                    continue
+                if isinstance(res, dict) and res.get("novelty_skipped"):
+                    skipped += 1
+                    store_rows.append({"event": "novelty-skip", **base, "claim": f["claim"],
+                                       "matched_id": res.get("matched_id"),
+                                       "score": res.get("score")})
+                    continue
+                ev = res.get("results", res) if isinstance(res, dict) else res
+                new = [e.get("id") for e in (ev or []) if isinstance(e, dict) and e.get("id")]
+                ids += new
+                store_rows.append({"event": "stored", **base, "claim": f["claim"],
+                                   "memory_ids": new,
+                                   "stored_text": [e.get("memory") for e in (ev or [])
+                                                   if isinstance(e, dict)]})
+        append_jsonl(ledger, store_rows + [{"event": "window-stored", **base,
+                                            "facts": len(facts), "kept": len(keep),
+                                            "dropped": len(facts) - len(keep),
+                                            "novelty_skipped": skipped,
+                                            "memory_ids": ids, "secs": round(dt, 1)}])
+        tot_skipped += skipped
+
+        # Only a real store run marks a window done. Under --no-store the facts
+        # are mined and ledgered but never land, so recording state here would
+        # make the next real run skip a window that was never stored.
+        if mem is not None:
+            rst["windows"][wid] = {"sha_digest": sha_digest(w), "facts": len(facts),
+                                   "kept": len(keep), "dropped": len(facts) - len(keep),
+                                   "novelty_skipped": skipped,
+                                   "at": CTL.now_mdt(), "secs": round(dt, 1),
+                                   "start": w[0]["date"], "end": w[-1]["date"]}
+            rst["last_head"] = commits[-1]["sha"]
+            save_state(st)
+        tot_kept += len(keep)
+        tot_dropped += len(facts) - len(keep)
+        sup = sum(1 for f in keep if f["kind"] == "supersession")
+        print(f"  [{n}/{len(todo)}] {wid} {w[0]['date']}..{w[-1]['date']} "
+              f"{len(w)}u {len(digest)}c -> {len(facts)} facts "
+              f"({len(keep)} kept, {sup} supersession, {skipped} novelty-skip) {dt:.0f}s")
+        log(f"{wid} ok facts={len(facts)} kept={len(keep)} "
+            f"dropped={len(facts)-len(keep)} skipped={skipped} {dt:.0f}s")
+
+    if mem is not None:
+        suppress_consolidate()
+    if times:
+        print(f"\ndone: {len(times)} windows, {tot_kept} facts kept, "
+              f"{tot_dropped} dropped by filter, {tot_skipped} skipped by novelty gate")
+        print(f"extraction per window: min {min(times):.0f}s  median "
+              f"{sorted(times)[len(times)//2]:.0f}s  max {max(times):.0f}s  total {sum(times):.0f}s")
+    log(f"RUN-END repo={name} kept={tot_kept} dropped={tot_dropped} skipped={tot_skipped}")
+    return 0
+
+
+def suppress_consolidate():
+    """Same house courtesy as the other miners: don't trip the auto-consolidate."""
+    try:
+        count = CTL.qdrant_client().count(CTL.COLLECTION).count
+        (BASE / "data/consolidate-state.json").write_text(
+            json.dumps({"count_at_last_run": count, "at": CTL.now_mdt(), "note": "repo-miner-suppression"})
+        )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------- main
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--census", action="store_true", help="enumerate local clones, dedupe by remote, exit")
+    ap.add_argument("--roots", help="comma-separated scan roots for --census")
+    ap.add_argument("--repo", help="path to the clone to mine")
+    ap.add_argument("--ref", help="ref to mine (default: origin/master, origin/main, master, main, HEAD)")
+    ap.add_argument("--windows", type=int, default=10, help="max windows this run (0 = all)")
+    ap.add_argument("--window-commits", type=int, default=30)
+    ap.add_argument("--window-days", type=int, default=14)
+    ap.add_argument("--max-digest", type=int, default=8000)
+    ap.add_argument("--oldest-first", action="store_true", help="mine the oldest unmined windows first")
+    ap.add_argument("--force", action="store_true", help="re-mine windows already in state")
+    ap.add_argument("--dry-run", action="store_true", help="print digests, no model, no store")
+    ap.add_argument("--no-store", action="store_true", help="extract + ledger, skip mem0")
+    ap.add_argument("--house-links", action="store_true",
+                    help="store with infer=True so Wave 2A emits linked_memory_ids and "
+                         "auto-tombstones superseded rows. OFF by default: measured to "
+                         "produce false supersessions on dense repo facts (2026-08-21).")
+    args = ap.parse_args()
+
+    if args.census:
+        roots = [Path(p) for p in args.roots.split(",")] if args.roots else DEFAULT_ROOTS
+        if not roots:
+            ap.error("--roots or BORG_REPOSITORY_ROOTS is required for --census")
+        rows, canon = census(roots)
+        print(f"{'REMOTE':<58} {'COMMITS':>8} {'CLONES':>6}  {'FIRST':<11}{'LAST':<11} CANONICAL CLONE")
+        for c in canon:
+            print(f"{c['remote']:<58} {c['commits']:>8} {c.get('clones', 1):>6}  "
+                  f"{c['first']:<11}{c['last']:<11} {c['path']}")
+        tot = sum(c["commits"] for c in canon)
+        print(f"\nclones found: {len(rows)}   distinct remotes: {len(canon)}")
+        print(f"canonical commits: {tot}   naive all-clone sum: {sum(r['commits'] for r in rows)} "
+              f"({100 - 100 * tot / max(1, sum(r['commits'] for r in rows)):.0f}% saved by deduping)")
+        return 0
+
+    if not args.repo:
+        ap.error("--repo is required (or use --census)")
+    return mine_repo(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

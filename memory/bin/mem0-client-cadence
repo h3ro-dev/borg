@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Per-client relationship cadence from the memory store.
+
+Scans every organic fact, matches explicitly configured client aliases, and computes
+per client: last touch, last outbound-looking touch, 30-day activity, recent
+facts. The registry and output paths are required configuration. With --nudge,
+an explicitly configured notification command receives destination and message
+arguments. Outreach itself remains outside this helper.
+"""
+
+import os
+
+os.environ["MEM0_TELEMETRY"] = "false"
+
+import argparse
+import json
+import re
+import shlex
+import subprocess
+import tomllib
+from datetime import datetime, date
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import httpx
+from borg_config import CONFIG, BorgConfigError
+
+REGISTRY = Path(os.environ["BORG_CLIENT_REGISTRY"]).expanduser() if os.environ.get("BORG_CLIENT_REGISTRY") else None
+BOARD = Path(os.environ["BORG_CLIENT_CADENCE_OUTPUT"]).expanduser() if os.environ.get("BORG_CLIENT_CADENCE_OUTPUT") else None
+QDRANT = CONFIG.qdrant_url
+COLLECTION = CONFIG.qdrant_collection
+OUTBOUND = re.compile(r"(?i)\b(sent|delivered|emailed|shared|proposal|report sent|sent to|replied to)\b")
+
+
+def today_mdt() -> date:
+    return datetime.now(ZoneInfo("America/Denver")).date()
+
+
+def fetch_facts():
+    rows, offset = [], None
+    with httpx.Client(timeout=30) as c:
+        while True:
+            body = {"limit": 1000, "with_payload": True, "with_vector": False,
+                    "filter": {"must_not": [{"key": "run_id", "match": {"value": "corpus-seed"}}]}}
+            if offset:
+                body["offset"] = offset
+            r = c.post(f"{QDRANT}/collections/{COLLECTION}/points/scroll", json=body).json()["result"]
+            for p in r["points"]:
+                pay = p.get("payload") or {}
+                text = pay.get("data") or pay.get("memory") or ""
+                if not text:
+                    continue
+                d = (pay.get("thread_date") or pay.get("added_mdt") or "")[:10]
+                subj = (pay.get("subject") or "")
+                rows.append({"text": text, "subject": subj, "date": d, "kind": pay.get("kind") or pay.get("agent_id") or ""})
+            offset = r.get("next_page_offset")
+            if not offset:
+                return rows
+
+
+def parse_date(s):
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--nudge", action="store_true", help="notify the configured destination when a client is past cadence")
+    args = ap.parse_args()
+
+    if REGISTRY is None or BOARD is None:
+        raise BorgConfigError("BORG_CLIENT_REGISTRY and BORG_CLIENT_CADENCE_OUTPUT are required")
+
+    reg = tomllib.load(open(REGISTRY, "rb"))["clients"]
+    matchers = {
+        key: re.compile(r"(?i)\b(" + "|".join(re.escape(a) for a in c.get("aliases", [])) + r")\b")
+        for key, c in reg.items()
+        if c.get("aliases")
+    }
+
+    facts = fetch_facts()
+    per = {k: {"touches": [], "outbound": []} for k in reg}
+    for f in facts:
+        blob = f["text"] + " " + f["subject"]
+        d = parse_date(f["date"])
+        for key, rx in matchers.items():
+            if rx.search(blob):
+                per[key]["touches"].append((d, f))
+                if d and OUTBOUND.search(blob):
+                    per[key]["outbound"].append((d, f))
+
+    t = today_mdt()
+    lines = [f"# Client cadence board — {datetime.now(ZoneInfo('America/Denver')).strftime('%Y-%m-%d %H:%M MDT')}",
+             "", "| Client | Status | Last touch | Days | Cadence | State | 30d facts |", "|---|---|---|---|---|---|---|"]
+    due = []
+    detail = ["", "## Recent context per client", ""]
+    for key, c in sorted(reg.items(), key=lambda kv: kv[1]["name"]):
+        touches = [x for x in per[key]["touches"] if x[0]]
+        dated = sorted(touches, key=lambda x: x[0], reverse=True)
+        last = dated[0][0] if dated else None
+        days = (t - last).days if last else None
+        n30 = sum(1 for d0, _ in touches if (t - d0).days <= 30)
+        if not all(k in c for k in ("cadence_days", "status", "name")):
+            # Wave-0 registry entries carry a minimal schema; skip them with a
+            # visible marker instead of crashing the whole cadence run.
+            lines.append(f"| {c.get('name', key)} | {c.get('status', 'minimal-entry')} | — | — | — | NO SCHEMA | — |")
+            continue
+        cad = c["cadence_days"]
+        state = "NO DATA" if last is None else ("OVERDUE" if days > cad else ("DUE SOON" if days >= cad - 1 else "OK"))
+        if state in ("OVERDUE", "DUE SOON") and c["status"] in ("customer", "prospect", "project"):
+            due.append((state, c["name"], days, cad, dated[:2]))
+        lines.append(f"| {c['name']} | {c['status']} | {last or '—'} | {days if days is not None else '—'} | {cad}d | {state} | {n30} |")
+        if dated:
+            detail.append(f"### {c['name']} — last touch {last} ({days}d ago)")
+            for d0, f in dated[:3]:
+                detail.append(f"- ({d0}) {f['text'][:160]}")
+            detail.append("")
+
+    BOARD.parent.mkdir(parents=True, exist_ok=True)
+    BOARD.write_text("\n".join(lines + detail))
+    print("\n".join(lines))
+
+    if args.nudge and due:
+        due.sort(key=lambda x: (x[0] != "OVERDUE", -(x[2] or 0)))
+        msg_lines = ["Client cadence check:"]
+        for state, name, days, cad, recent in due[:6]:
+            hint = recent[0][1]["text"][:80] if recent else ""
+            msg_lines.append(f"• {name}: {days}d since last touch ({state.lower()}, cadence {cad}d). Latest: {hint}")
+        msg_lines.append(f"Board: {BOARD}")
+        msg = "\n".join(msg_lines)[:1500]
+        command = os.environ.get("BORG_NOTIFICATION_COMMAND")
+        destination = os.environ.get("BORG_NOTIFICATION_DESTINATION")
+        if not command or not destination:
+            raise BorgConfigError(
+                "--nudge requires BORG_NOTIFICATION_COMMAND and BORG_NOTIFICATION_DESTINATION"
+            )
+        try:
+            subprocess.run(
+                [*shlex.split(command), destination, msg],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+            print(f"\nnudge sent to configured destination ({len(due)} clients due)")
+        except Exception as e:
+            print(f"\nnudge FAILED: {e}")
+    elif args.nudge:
+        print("\nnudge skipped: no clients past cadence")
+    else:
+        print("\nnudge skipped: run with --nudge to use the configured notification command")
+
+
+if __name__ == "__main__":
+    main()

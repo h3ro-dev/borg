@@ -1,0 +1,14 @@
+#!/bin/bash
+# Owner-seat wrapper. Scope and model routing come only from this installation.
+set -euo pipefail
+: "${BORG_HOME:?BORG_HOME is required}"
+: "${BORG_MEMORY_SCOPE:?BORG_MEMORY_SCOPE is required}"
+: "${BORG_OLLAMA_URL:?BORG_OLLAMA_URL is required}"
+
+export MEM0_GRAPH_IN_SEARCH="${MEM0_GRAPH_IN_SEARCH:-0}"
+export MEM0_HOOK_SCOPES="${MEM0_HOOK_SCOPES:-$BORG_MEMORY_SCOPE}"
+export MEM0_OLLAMA_URL="${MEM0_OLLAMA_URL:-$BORG_OLLAMA_URL}"
+# Optional capture adapter routing is off unless the installer or owner sets it.
+export MEM0_EXTRACT_MAX_EVIDENCE="${MEM0_EXTRACT_MAX_EVIDENCE:-0}"
+
+exec "$BORG_HOME/mem0/bin/mem0-codex-hook" "$@"

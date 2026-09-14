@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the graphiti-extraction distillation dataset from harvested pairs.
+"""Build a graph-extraction distillation dataset from explicitly supplied pairs.
 
 Sources: training-pairs-ox.jsonl + training-pairs-qwen.jsonl (bulk teachers).
 Luna/terra slices and the live nodes-only file are excluded: luna's superset
@@ -10,17 +10,15 @@ Target = the teacher's `rich` object re-serialized to the exact schema the
 harvest PROMPT specifies. The user turn is the harvest PROMPT verbatim, so a
 trained student is a drop-in replacement at the same callsites.
 
-Output: data/train.jsonl, data/valid.jsonl, data/test.jsonl in mlx-lm
+Output: train.jsonl, valid.jsonl, test.jsonl in mlx-lm
 messages format, plus data/BUILD-REPORT.json with kept/dropped counts.
 """
-import os
+import argparse
 import hashlib
 import json
 import random
 from pathlib import Path
 
-SRC = Path(os.path.expanduser("~/Library/Memory/graphiti/data"))
-OUT = Path(os.path.expanduser("~/Library/Memory/graphiti/training/data"))
 FILES = ["training-pairs-qwen.jsonl", "training-pairs-ox.jsonl"]  # qwen first: preferred on dupes
 MAX_CHARS = 14000   # prompt+target ceiling, keeps sequences inside 4096 tokens
 VALID_N = 400
@@ -61,13 +59,15 @@ def canonical_target(rich):
     return json.dumps({"entities": out_e, "relations": out_r}, ensure_ascii=False)
 
 
-def main():
-    OUT.mkdir(parents=True, exist_ok=True)
+def build(source_dir, out, files=FILES, *, valid_count=VALID_N, test_count=TEST_N):
+    source_dir = Path(source_dir)
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
     seen = {}
-    stats = {f: {"read": 0, "no_rich": 0, "bad_rich": 0, "too_long": 0, "dup": 0, "kept": 0} for f in FILES}
-    for fname in FILES:
+    stats = {f: {"read": 0, "no_rich": 0, "bad_rich": 0, "too_long": 0, "dup": 0, "kept": 0} for f in files}
+    for fname in files:
         st = stats[fname]
-        with (SRC / fname).open() as fh:
+        with (source_dir / fname).open(encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -106,14 +106,44 @@ def main():
 
     rows = list(seen.values())
     random.Random(13).shuffle(rows)
-    test, valid, train = rows[:TEST_N], rows[TEST_N:TEST_N + VALID_N], rows[TEST_N + VALID_N:]
+    test = rows[:test_count]
+    valid = rows[test_count:test_count + valid_count]
+    train = rows[test_count + valid_count:]
     for name, part in (("train", train), ("valid", valid), ("test", test)):
-        with (OUT / f"{name}.jsonl").open("w") as fh:
+        with (out / f"{name}.jsonl").open("w", encoding="utf-8") as fh:
             for row in part:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     report = {"per_file": stats, "total_kept": len(rows),
               "train": len(train), "valid": len(valid), "test": len(test)}
-    (OUT / "BUILD-REPORT.json").write_text(json.dumps(report, indent=2) + "\n")
+    (out / "BUILD-REPORT.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    return report
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--source-dir", type=Path, required=True,
+                        help="explicit directory containing approved pair files")
+    parser.add_argument("--out", type=Path, required=True,
+                        help="explicit private output directory")
+    parser.add_argument("--file", action="append", dest="files",
+                        help="input filename relative to --source-dir; repeatable")
+    parser.add_argument("--valid-count", type=int, default=VALID_N)
+    parser.add_argument("--test-count", type=int, default=TEST_N)
+    args = parser.parse_args(argv)
+    if args.valid_count < 0 or args.test_count < 0:
+        parser.error("split counts must be non-negative")
+    return args
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    report = build(
+        args.source_dir,
+        args.out,
+        args.files or FILES,
+        valid_count=args.valid_count,
+        test_count=args.test_count,
+    )
     print(json.dumps(report, indent=2))
 
 

@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Read-only StudentClassifier shadow over a deterministic Qdrant scroll."""
+import argparse, importlib.util, json, statistics, sys, time
+from pathlib import Path
+from borg_config import CONFIG
+BIN=CONFIG.mem0_root/'bin'
+s=importlib.util.spec_from_file_location('student',BIN/'mem0_scope_student.py'); m=importlib.util.module_from_spec(s); s.loader.exec_module(m)
+def main():
+ ap=argparse.ArgumentParser(); ap.add_argument('--n',type=int,default=300); ap.add_argument('--seed',type=int,default=0); ap.add_argument('--out',type=Path,required=True); ap.add_argument('--summary',type=Path,required=True); ap.add_argument('--url',default=m.STUDENT_URL); a=ap.parse_args()
+ if a.n<1: raise SystemExit('--n must be positive')
+ from qdrant_client import QdrantClient
+ q=QdrantClient(url=CONFIG.qdrant_url,timeout=120); points=[]; offset=None; skip=a.seed%1000
+ while len(points)<skip+a.n:
+  page,offset=q.scroll(CONFIG.qdrant_collection,limit=min(2000,skip+a.n-len(points)),offset=offset,with_payload=True,with_vectors=False)
+  if not page: break
+  points.extend(page)
+  if offset is None: break
+ selected=points[skip:skip+a.n]; clf=m.StudentClassifier(endpoints=[a.url]); lat=[]; records=[]
+ for p in selected:
+  payload=p.payload or {}; row={'id':str(p.id),'data':payload.get('data',payload.get('memory','')) or ''}; t=time.perf_counter(); g=clf.classify_batch([row],a.url)[0]; ms=(time.perf_counter()-t)*1000; lat.append(ms)
+  records.append({'id':str(p.id),'stored_scope':payload.get('scope'),'student_scope':g['scope'],'cat':g['cat'],'slug':g['slug'],'p':g['sensitive'],'reason':g['reason'],'quarantined':g['quarantined'],'latency_ms':round(ms,2)})
+ a.out.parent.mkdir(parents=True,exist_ok=True); a.out.write_text(''.join(json.dumps(r,ensure_ascii=False)+'\n' for r in records))
+ agree=sum(r['stored_scope']==r['student_scope'] for r in records); classes={}
+ for r in records:
+  x=classes.setdefault(r['stored_scope'],[0,0]); x[0]+=1; x[1]+=r['stored_scope']==r['student_scope']
+ p50=statistics.median(lat) if lat else None; p95=sorted(lat)[max(0,int(len(lat)*.95)-1)] if lat else None
+ lines=['# SHADOW-SUMMARY','',f'- rows: {len(records)}',f'- agreement: {agree}/{len(records)} ({agree/len(records):.1%})' if records else '- agreement: NOT_RUN',f'- quarantine: {sum(r["quarantined"] for r in records)}',f'- p=1 rate: {sum(r["p"] for r in records)}/{len(records)}' if records else '- p=1 rate: NOT_RUN',f'- latency p50/p95 ms: {p50:.2f}/{p95:.2f}' if lat else '- latency p50/p95 ms: NOT_RUN','','## Agreement by stored class','']
+ lines += [f'- `{k}`: {v[1]}/{v[0]} ({v[1]/v[0]:.1%})' for k,v in sorted(classes.items(),key=lambda x:str(x[0]))]; a.summary.write_text('\n'.join(lines)+'\n')
+if __name__=='__main__': sys.exit(main())

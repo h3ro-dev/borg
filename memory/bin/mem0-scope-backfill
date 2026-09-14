@@ -25,6 +25,7 @@ import argparse
 import hashlib
 import importlib.machinery
 import json
+import os
 import random
 import sys
 import time
@@ -32,13 +33,15 @@ from collections import Counter
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent
-BASE = BIN.parent
+CONFIG = importlib.machinery.SourceFileLoader("borg_config_scope_backfill", str(BIN / "borg_config.py")).load_module().CONFIG
+BASE = CONFIG.mem0_root
 LIB = importlib.machinery.SourceFileLoader("mem0_scope_lib", str(BIN / "mem0_scope_lib.py")).load_module()
 CTL = importlib.machinery.SourceFileLoader("mem0ctl_mod", str(BIN / "mem0ctl")).load_module()
 
 LOG = BASE / "data/scope-backfill.log"
 CURSOR = BASE / "data/scope-backfill-cursor.json"
-LABELS = BASE / "data/scope-backfill-labels.jsonl"
+LABELS = Path(os.environ.get("SCOPE_LABELS_PATH", str(BASE / "data/scope-backfill-labels.jsonl")))
+QUARANTINE = BASE / "data/scope-backfill-quarantine.jsonl"  # failed inferences: runtime scope applied, never stored as a label
 PAGE = 200
 
 
@@ -77,6 +80,7 @@ def qdrant_retry(what, fn):
         except Exception as e:
             name = type(e).__name__
             transient = ("Timeout" in name or "Connection" in name
+                         or "ResponseHandling" in name or "timed out" in str(e).lower()
                          or any(s in str(e) for s in ("408", "429", "502", "503", "504")))
             if not transient or attempt == 4:
                 raise
@@ -87,7 +91,17 @@ def qdrant_retry(what, fn):
 
 def cmd_run(args):
     q = LIB.qdrant()
-    clf = LIB.Classifier(log=log, origin_default=args.origin_default)
+    # Cutover switch (owner-gated): SCOPE_CLASSIFIER=student routes labelling to the local 4B student
+    # (mem0_scope_student.StudentClassifier, server on STUDENT_URL, adapter set on the server launcher);
+    # anything else keeps the 27B Classifier. Same record contract; failed inferences are quarantined.
+    if os.environ.get("SCOPE_CLASSIFIER", "").lower() == "student":
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("mem0_scope_student", str(BASE / "bin/mem0_scope_student.py"))
+        _mod = _ilu.module_from_spec(_spec); _spec.loader.exec_module(_mod)
+        clf = _mod.StudentClassifier(log=log, origin_default=args.origin_default)
+        log("classifier=student (adapter served on STUDENT_URL)")
+    else:
+        clf = LIB.Classifier(log=log, origin_default=args.origin_default)
     floors = LIB.identifier_floors(reload=True)
     if floors:
         log(f"identifier floors active: {[f['name'] for f in floors]}")
@@ -99,6 +113,16 @@ def cmd_run(args):
     if not c["started_mdt"]:
         c["started_mdt"] = CTL.now_mdt()
     offset = c["offset"]
+    ids_only = None
+    if getattr(args, "ids_file", ""):
+        raw = Path(args.ids_file).read_text()
+        try:
+            ids_only = list(json.loads(raw).get("ids", []))
+        except Exception:
+            ids_only = [l.strip() for l in raw.splitlines() if l.strip()]
+        log(f"ids-file mode: {len(ids_only)} ids from {args.ids_file} (forced re-classify, cursor untouched)")
+        offset = None
+        c = dict(c, offset=c["offset"])  # work on a copy; the real cursor is never advanced in ids mode
     processed = 0
     scope_counts = Counter()
     t0 = time.time()
@@ -109,9 +133,19 @@ def cmd_run(args):
             if args.limit and processed >= args.limit:
                 log(f"limit {args.limit} reached")
                 break
-            pts, next_off = qdrant_retry("scroll", lambda: q.scroll(
-                LIB.COLLECTION, limit=PAGE, offset=offset, with_payload=True, with_vectors=False
-            ))
+            if ids_only is not None:
+                chunk, ids_only = ids_only[:PAGE], ids_only[PAGE:]
+                if not chunk:
+                    log("end of ids-file")
+                    break
+                pts = qdrant_retry("retrieve", lambda: q.retrieve(
+                    LIB.COLLECTION, ids=chunk, with_payload=True, with_vectors=False
+                ))
+                next_off = None if not ids_only else "ids-file"
+            else:
+                pts, next_off = qdrant_retry("scroll", lambda: q.scroll(
+                    LIB.COLLECTION, limit=PAGE, offset=offset, with_payload=True, with_vectors=False
+                ))
             if not pts:
                 log("end of collection")
                 offset = None
@@ -122,7 +156,7 @@ def cmd_run(args):
                 pay = p.payload or {}
                 pid = str(p.id)
                 c["seen"] += 1
-                if pay.get("scope") and not args.force:
+                if pay.get("scope") and not args.force and ids_only is None:
                     c["skipped"] += 1
                     continue
                 rows.append({"id": pid, "data": pay.get("data") or pay.get("memory") or "",
@@ -141,10 +175,18 @@ def cmd_run(args):
                 # fan-out inline.
                 recs = _classify_inline(clf, rows, args.batch)
 
-                for rec in recs:
-                    labels_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                    scope_counts[rec["scope"]] += 1
+                n_quar = 0
+                with open(QUARANTINE, "a") as quar_fh:
+                    for rec in recs:
+                        if rec.get("quarantined"):
+                            quar_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                            n_quar += 1
+                        else:
+                            labels_fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                        scope_counts[rec["scope"]] += 1
                 labels_fh.flush()
+                if n_quar:
+                    log(f"quarantined {n_quar}/{len(recs)} failed inferences (runtime default-closed, not stored as labels)")
 
                 if not args.dry_run:
                     pairs = [(r["id"], r["scope"]) for r in recs]
@@ -168,20 +210,25 @@ def cmd_run(args):
                 processed += len(recs)
 
             offset = next_off
-            c["offset"] = str(offset) if offset is not None else None
-            save_cursor(c)
+            if ids_only is None:
+                c["offset"] = str(offset) if offset is not None else None
+                save_cursor(c)
             rate = processed / max(time.time() - t0, 1e-9)
             log(f"seen={c['seen']} written={c['written']} skipped={c['skipped']} "
                 f"this_run={processed} rate={rate*60:.0f}/min")
             if next_off is None:
-                log("end of collection")
+                log("end of collection" if ids_only is None else "end of ids-file")
                 break
     finally:
         labels_fh.close()
         c["runs"].append({"at": CTL.now_mdt(), "processed": processed, "dry_run": args.dry_run,
                           "scopes": dict(scope_counts)})
-        c["offset"] = str(offset) if offset is not None else None
-        save_cursor(c)
+        if ids_only is None:
+            c["offset"] = str(offset) if offset is not None else None
+            save_cursor(c)
+        else:
+            rc = load_cursor(); rc["runs"].append({"at": CTL.now_mdt(), "processed": processed, "dry_run": args.dry_run,
+                                                   "scopes": dict(scope_counts), "ids_file": args.ids_file}); save_cursor(rc)
         log(f"=== backfill stop  processed={processed}  scopes={dict(scope_counts)} ===")
 
 
@@ -235,7 +282,7 @@ def cmd_status(args):
     have = sum(scoped.values())
     print(f"collection rows : {total:,}")
     print(f"with scope      : {have:,}  ({have/total*100:.1f}%)")
-    print(f"without scope   : {total-have:,}  -> read as personal:james (default-closed)")
+    print(f"without scope   : {total-have:,}  -> read as {LIB.SCOPE_PERSONAL} (default-closed)")
     for k, v in sorted(scoped.items(), key=lambda kv: -kv[1]):
         print(f"   {k:26s} {v:,}")
     c = load_cursor()
@@ -300,10 +347,12 @@ def main():
     r.add_argument("--batch", type=int, default=20)
     r.add_argument("--dry-run", action="store_true")
     r.add_argument("--force", action="store_true", help="re-classify rows that already have a scope")
+    r.add_argument("--ids-file", default="", help="JSON {\"ids\": [...]} or one id per line: process ONLY these ids "
+                   "(fetched by id, forced re-classify, cursor untouched); same classify/quarantine/write/integrity path")
     r.add_argument("--origin-default", action="store_true",
                    help="file an unplaceable row mined from a teammate's own machine under "
-                        "person:<them> instead of personal:james. WIDENS who can read those "
-                        "rows — off unless James asks for it. Regex-floor and model-flagged "
+                        f"person:<them> instead of {LIB.SCOPE_PERSONAL}. WIDENS who can read those "
+                        "rows — off unless the configured owner enables it. Regex-floor and model-flagged "
                         "sensitive rows are never softened by this.")
     r.set_defaults(fn=cmd_run)
     sub.add_parser("status").set_defaults(fn=cmd_status)

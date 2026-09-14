@@ -3,6 +3,9 @@ import json
 import os
 import tempfile
 import unittest
+from borg_test_support import activate
+
+activate()
 from pathlib import Path
 
 
@@ -15,10 +18,12 @@ class FleetHookTests(unittest.TestCase):
         os.environ["MEM0_FLEET_BASE"] = self.tmp.name
         os.environ["MEM0_MACHINE"] = "test-studio"
         os.environ["MEM0_HARNESS"] = "codex"
+        os.environ["MEM0_FLEET_ENDPOINT"] = "http://127.0.0.1:18765/mcp"
         name = "fleet_hook_" + os.urandom(4).hex()
         self.mod = importlib.machinery.SourceFileLoader(name, str(SCRIPT)).load_module()
 
     def tearDown(self):
+        os.environ.pop("MEM0_FLEET_ENDPOINT", None)
         self.tmp.cleanup()
 
     def payload(self, **extra):

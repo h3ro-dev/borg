@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+"""Remove error/timeout entries from miner state files so failed items retry
+on the next run (e.g. after an infrastructure outage like the 2026-08-20
+Docker crash). Skips any state whose pipeline lock is held by a live process."""
+
+import json
+import os
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+PAIRS = [
+    ("ingest-state.json", "ingest.lock"),
+    ("email-ingest-state.json", "email-ingest.lock"),
+]
+try:
+    configured_pairs = json.loads(os.environ.get("BORG_MINER_STATE_PAIRS_JSON", "[]"))
+except json.JSONDecodeError as exc:
+    raise SystemExit("BORG_MINER_STATE_PAIRS_JSON must be valid JSON") from exc
+for pair in configured_pairs:
+    if not isinstance(pair, list) or len(pair) != 2 or not all(isinstance(value, str) for value in pair):
+        raise SystemExit("BORG_MINER_STATE_PAIRS_JSON must contain [state, lock] string pairs")
+    if any("/" in value or value in {"", ".", ".."} for value in pair):
+        raise SystemExit("configured miner state and lock names must be plain filenames")
+    PAIRS.append(tuple(pair))
+
+
+def lock_alive(p: Path) -> bool:
+    try:
+        os.kill(int(p.read_text()), 0)
+        return True
+    except (FileNotFoundError, ProcessLookupError, ValueError):
+        return False
+
+
+for state_name, lock_name in PAIRS:
+    sf, lf = BASE / "data" / state_name, BASE / "data" / lock_name
+    if not sf.exists():
+        continue
+    if lock_alive(lf):
+        print(f"{state_name}: SKIP (pipeline running)")
+        continue
+    st = json.loads(sf.read_text())
+    before = len(st.get("done", {}))
+    st["done"] = {
+        k: v for k, v in st.get("done", {}).items()
+        if "error" not in str(v.get("status", "")) and v.get("status") != "timeout"
+    }
+    removed = before - len(st["done"])
+    sf.write_text(json.dumps(st))
+    print(f"{state_name}: stripped {removed} error entries ({before} -> {len(st['done'])})")

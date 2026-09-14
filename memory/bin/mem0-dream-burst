@@ -1,0 +1,112 @@
+#!/bin/bash
+set -u
+: "${BORG_HOME:?BORG_HOME is required}"
+: "${BORG_QDRANT_URL:?BORG_QDRANT_URL is required}"
+: "${BORG_QDRANT_COLLECTION:?BORG_QDRANT_COLLECTION is required}"
+
+BASE="$BORG_HOME/mem0"
+DREAM="$BASE/bin/mem0-dream"
+DATA="$BASE/data"
+LEDGER_DIR="$DATA/dream-burst"
+LEDGER="$LEDGER_DIR/burst-ledger.jsonl"
+LOCK="$DATA/dream-burst.lock"
+LOG="$DATA/dream.log"
+SCOPE="${BURST_SCOPE:-}"
+MAX_CYCLES="${BURST_MAX_CYCLES:-6}"
+PAUSE="${BURST_PAUSE_S:-120}"
+TARGET="${GROK_BATCH_TARGET_SHARDS:-10}"
+CALLS="${GROK_BATCH_MAX_CALLS:-40}"
+MAX_CLUSTERS="${MEM0_DREAM_MAX_CLUSTERS:-40}"
+
+case "$MAX_CYCLES" in ''|*[!0-9]*) echo "BURST-REFUSE invalid BURST_MAX_CYCLES" >&2; exit 2;; esac
+case "$PAUSE" in ''|*[!0-9]*) echo "BURST-REFUSE invalid BURST_PAUSE_S" >&2; exit 2;; esac
+[ -n "$SCOPE" ] || { echo "BURST-REFUSE BURST_SCOPE is required (one scope per invocation)" >&2; exit 2; }
+[ "$MAX_CYCLES" -ge 1 ] || { echo "BURST-REFUSE BURST_MAX_CYCLES must be positive" >&2; exit 2; }
+[ -x "$DREAM" ] || { echo "BURST-REFUSE dream is not executable" >&2; exit 2; }
+mkdir -p "$LEDGER_DIR"
+
+release_lock() { rm -f "$LOCK"; }
+trap release_lock EXIT INT TERM
+
+acquire_lock() {
+  while true; do
+    if [ -e "$LOCK" ]; then
+      echo "BURST-REFUSE active lock=$LOCK; waiting" >&2
+      sleep 30
+      continue
+    fi
+    ( set -C; : > "$LOCK" ) 2>/dev/null && break
+    echo "BURST-REFUSE lock race; waiting" >&2
+    sleep 30
+  done
+  while pgrep -f '/mem0/bin/mem0-dream([[:space:]]|$)' >/dev/null 2>&1; do
+    echo "BURST-REFUSE scheduled mem0-dream active; waiting" >&2
+    rm -f "$LOCK"
+    sleep 30
+    ( set -C; : > "$LOCK" ) 2>/dev/null || true
+  done
+}
+
+prune_snapshots() {
+  local snapshots old
+  snapshots="$(curl -fsS --max-time 10 "$BORG_QDRANT_URL/collections/$BORG_QDRANT_COLLECTION/snapshots")" || return 1
+  old="$(printf '%s' "$snapshots" | python3 -c 'import json,sys
+d=json.load(sys.stdin); r=d.get("result") if isinstance(d,dict) else []
+names=sorted((x.get("name") for x in (r or []) if isinstance(x,dict) and x.get("name")), reverse=True)
+print("\n".join(names[2:]))')" || return 1
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    curl -fsS --max-time 20 -X DELETE "$BORG_QDRANT_URL/collections/$BORG_QDRANT_COLLECTION/snapshots/$name" >/dev/null || return 1
+    echo "BURST-SNAPSHOT-PRUNED name=$name"
+  done <<< "$old"
+}
+
+receipt() {
+  local cycle="$1" start_line="$2" journal_before="$3" started="$4" rc="$5"
+  python3 - "$cycle" "$start_line" "$journal_before" "$started" "$rc" "$SCOPE" "$LOG" "$LEDGER" "$DATA" <<'PY'
+import json, sys, time
+cycle, start, journal_before, started, rc, scope, log_path, ledger_path, data_path = sys.argv[1:]
+start, journal_before, started, rc = int(start), int(journal_before), float(started), int(rc)
+lines = open(log_path, errors="replace").read().splitlines()[start:]
+judged = sum(int(part.split("=", 1)[1]) for line in lines if "REVISE judges:" in line for part in line.split(":", 1)[1].split() if "=" in part and part.split("=", 1)[1].isdigit())
+merges = sum("  MERGED [" in line for line in lines)
+retires = sum("  RETIRE" in line for line in lines)
+journal = []
+journal_path = data_path + "/curation/decisions-" + time.strftime("%Y-%m-%d") + ".jsonl"
+try:
+    handle = open(journal_path, errors="replace")
+except FileNotFoundError:
+    handle = []
+for line in handle:
+    try: journal.append(json.loads(line))
+    except Exception: pass
+new = journal[journal_before:]
+keeps = sum(row.get("applied") == "keep" for row in new)
+row = {"cycle": int(cycle), "scope": scope, "shards_judged": judged, "journal_rows_added": len(new), "merges": merges, "retires": retires, "keeps": keeps, "duration_s": round(time.time()-started, 1), "exit_code": rc}
+with open(ledger_path, "a") as out: out.write(json.dumps(row, sort_keys=True) + "\n")
+print("BURST-RECEIPT " + json.dumps(row, sort_keys=True))
+PY
+}
+
+acquire_lock
+for ((cycle=1; cycle<=MAX_CYCLES; cycle++)); do
+  start_line=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+  journal_file="$DATA/curation/decisions-$(date +%Y-%m-%d).jsonl"
+  journal_before=0
+  [ -f "$journal_file" ] && journal_before=$(wc -l < "$journal_file")
+  started=$(date +%s)
+  set +e
+  env MEM0_DREAM_SCOPE="$SCOPE" MEM0_DREAM_MAX_CLUSTERS="$MAX_CLUSTERS" GROK_BATCH_TARGET_SHARDS="$TARGET" GROK_BATCH_MAX_CALLS="$CALLS" "$DREAM" --skip-threads --skip-email --skip-seed --skip-consolidate
+  rc=$?
+  set -e
+  receipt "$cycle" "$start_line" "$journal_before" "$started" "$rc"
+  segment=$(tail -n "+$((start_line + 1))" "$LOG")
+  if [ "$rc" -ne 0 ] || printf '%s\n' "$segment" | rg -q 'CANARY-FAIL|REVISE-BLOCKED|QDRANT-SNAPSHOT-FAILED|DREAM-ABORT'; then
+    echo "BURST-HALT cycle=$cycle rc=$rc safety-marker=present-or-nonzero" >&2
+    exit 1
+  fi
+  printf '%s\n' "$segment" | rg -q 'CANARY-PASS|canaries=PASS' || { echo "BURST-HALT cycle=$cycle missing CANARY-PASS" >&2; exit 1; }
+  prune_snapshots || { echo "BURST-HALT cycle=$cycle snapshot-prune-failed" >&2; exit 1; }
+  [ "$cycle" -lt "$MAX_CYCLES" ] && sleep "$PAUSE"
+done
+echo "BURST-COMPLETE scope=$SCOPE cycles=$MAX_CYCLES"

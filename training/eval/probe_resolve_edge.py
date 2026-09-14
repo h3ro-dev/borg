@@ -13,8 +13,8 @@ Same real graphiti prompt, three wirings, N samples each:
 READ-ONLY. Talks to the two model endpoints, writes nothing but its own report.
 """
 import asyncio
+import argparse
 import json
-import sys
 from collections import Counter
 
 from openai import AsyncOpenAI
@@ -22,19 +22,16 @@ from graphiti_core.prompts.dedupe_edges import resolve_edge
 from graphiti_core.prompts.models import Message
 from graphiti_core.utils.maintenance.edge_operations import EdgeDuplicate
 
-STUDENT = ("http://127.0.0.1:11440/v1", "mlx-community/Qwen3-4B-Instruct-2507-4bit")
-SHIM = ("http://127.0.0.1:11500/v1", "qwen3.8:27b")
-
 CTX = {
     "existing_edges": [
-        {"idx": 0, "fact": "James owns the machine Studio0"},
-        {"idx": 1, "fact": "The NROS dashboard ran on port 3005 on 2026-08-14"},
-        {"idx": 2, "fact": "second-machine runs a qwen model that handles the email mine"},
+        {"idx": 0, "fact": "Example Company owns node-a"},
+        {"idx": 1, "fact": "The example dashboard ran on port 3005 on 2026-01-14"},
+        {"idx": 2, "fact": "Node-b runs a local extraction model"},
     ],
     "edge_invalidation_candidates": [
-        {"idx": 3, "fact": "The NROS dashboard ran on port 3005"},
+        {"idx": 3, "fact": "The example dashboard ran on port 3005"},
     ],
-    "new_edge": "The NROS dashboard was moved from port 3005 to port 3007 on 2026-08-20",
+    "new_edge": "The example dashboard moved from port 3005 to port 3007 on 2026-01-20",
 }
 
 
@@ -105,12 +102,25 @@ async def run(label, url, model, mode, n):
             "outcomes": dict(outcomes), "samples": sample}
 
 
-async def main():
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 5
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--student-url", required=True)
+    parser.add_argument("--student-model", required=True)
+    parser.add_argument("--shim-url", required=True)
+    parser.add_argument("--shim-model", required=True)
+    parser.add_argument("--samples", type=int, default=5)
+    return parser.parse_args(argv)
+
+
+async def main(argv=None):
+    args = parse_args(argv)
+    n = args.samples
     out = []
-    out.append(await run("student-4b json_object (Arm B wiring)", *STUDENT, "json_object", n))
-    out.append(await run("student-4b json_schema (no schema in prompt)", *STUDENT, "json_schema", n))
-    out.append(await run("27b via grammar shim", *SHIM, "json_schema", n))
+    student = (args.student_url, args.student_model)
+    shim = (args.shim_url, args.shim_model)
+    out.append(await run("student json_object", *student, "json_object", n))
+    out.append(await run("student json_schema", *student, "json_schema", n))
+    out.append(await run("teacher via grammar shim", *shim, "json_schema", n))
     print("\n" + json.dumps({r["label"]: {"clean_pct": r["clean_pct"],
                                           "outcomes": r["outcomes"]} for r in out}, indent=1))
     from pathlib import Path

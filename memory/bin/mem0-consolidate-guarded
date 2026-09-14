@@ -1,0 +1,29 @@
+#!/bin/bash
+# Guarded standalone consolidate pass: snapshot -> consolidate (code keep-guard live) -> canary count -> receipt.
+# Halts (nonzero) if snapshot fails, consolidate fails, or canaries != 210. Never runs alongside a dream.
+set -u
+: "${BORG_HOME:?BORG_HOME is required}"
+: "${BORG_QDRANT_URL:?BORG_QDRANT_URL is required}"
+: "${BORG_QDRANT_COLLECTION:?BORG_QDRANT_COLLECTION is required}"
+: "${BORG_EXPECTED_CANARIES:?BORG_EXPECTED_CANARIES is required}"
+BASE="$BORG_HOME/mem0"
+OUT="$BASE/data/consolidate-guarded"
+LOG=$OUT/consolidate-guarded.log
+RECEIPT=$OUT/consolidate-receipts.jsonl
+LOCK=$BASE/data/dream-burst.lock
+mkdir -p "$OUT"
+log() { echo "$(date -Iseconds) $*" | tee -a "$LOG"; }
+if pgrep -f '/mem0/bin/mem0-dream([[:space:]]|$)' >/dev/null 2>&1 || [ -e "$LOCK" ]; then log "REFUSE dream/burst active"; exit 2; fi
+echo $$ > "$LOCK"; trap 'rm -f "$LOCK"; exit' INT TERM; trap 'rm -f "$LOCK"' EXIT
+SNAP=$(curl -s --max-time 180 -X POST "$BORG_QDRANT_URL/collections/$BORG_QDRANT_COLLECTION/snapshots" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',{}).get('name',''))" 2>/dev/null)
+[ -n "$SNAP" ] || { log "SNAPSHOT-FAILED destructive=NOT_RUN"; exit 3; }
+log "SNAPSHOT-PASS $SNAP"
+T0=$(date +%s)
+"$BASE/venv/bin/python" -u "$BASE/bin/mem0ctl" consolidate --threshold "${CONSOLIDATE_THRESHOLD:-0.90}" >> "$LOG" 2>&1
+RC=$?
+SUMMARY=$(grep -E "consolidate done" "$LOG" | tail -1)
+CAN=$(curl -s --max-time 8 -X POST "$BORG_QDRANT_URL/collections/$BORG_QDRANT_COLLECTION/points/count" -H "Content-Type: application/json" -d '{"filter":{"must":[{"key":"is_canary","match":{"value":true}}]},"exact":true}' | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['count'])" 2>/dev/null)
+log "CANARIES=$CAN rc=$RC duration=$(( $(date +%s) - T0 ))s :: $SUMMARY"
+printf '{"at":"%s","snapshot":"%s","rc":%s,"canaries":%s,"duration_s":%s,"summary":"%s"}\n' "$(date -Iseconds)" "$SNAP" "$RC" "${CAN:-null}" "$(( $(date +%s) - T0 ))" "$(echo "$SUMMARY" | sed 's/"/\\"/g')" >> "$RECEIPT"
+[ "$RC" -eq 0 ] && [ "${CAN:-0}" -eq "$BORG_EXPECTED_CANARIES" ] || { log "HALT rc=$RC canaries=$CAN"; exit 4; }
+log "CONSOLIDATE-GUARDED-PASS"

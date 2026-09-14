@@ -1,5 +1,9 @@
 # Codex app-server protocol — field notes
 
+Historical discovery record only. The distributable product runtime is pinned
+to Node `24.21.0` and Codex `0.146.0`; current installation commands and
+acceptance boundaries are in `../INTEGRATION.md`.
+
 Mapped 2026-06-12 against Codex CLI 0.137.0. Everything here was verified by
 probing a live server, not read from docs.
 

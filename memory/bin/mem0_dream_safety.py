@@ -14,6 +14,7 @@ consolidate``:
 from __future__ import annotations
 
 import json
+import importlib.machinery
 import math
 import os
 import urllib.error
@@ -22,6 +23,11 @@ import uuid
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Callable, Iterable, Sequence
+from pathlib import Path
+
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_dream_safety", str(Path(__file__).resolve().parent / "borg_config.py")
+).load_module().CONFIG
 
 # Input envelopes are deliberately lower than vendor context windows: output,
 # tokenizer drift, and the immutable judge instruction all need headroom.
@@ -44,7 +50,7 @@ ESTIMATED_TOKEN_SAFETY_MARGIN = 1.20
 
 CANARY_NAMESPACE = uuid.UUID("6ceff688-79d8-5ac2-99b3-9bd27c203b48")
 CANARY_VERSION = "dream-v2-wave1"
-CANARY_USER = "james"
+CANARY_USER = CONFIG.owner_id
 
 
 @dataclass(frozen=True)
@@ -122,7 +128,7 @@ def _local_qwen_token_count(serialized_prompt: str) -> int | None:
 
 def measure_serialized_prompt(serialized_prompt: str, *, ollama_url: str | None = None) -> TokenMeasurement:
     """Count a fully serialized prompt, with a conservative marked fallback."""
-    endpoint = ollama_url or os.environ.get("MEM0_OLLAMA_URL", "http://127.0.0.1:11434")
+    endpoint = ollama_url or os.environ.get("MEM0_OLLAMA_URL", CONFIG.ollama_url)
     if not os.environ.get("MEM0_TOKEN_GATE_FORCE_ESTIMATE"):
         exact = _ollama_token_count(QWEN_TOKENIZER_MODEL, serialized_prompt, endpoint)
         if exact is not None:

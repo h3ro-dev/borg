@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""Per-client breakout feed for the ops Client Sites panel.
+
+Merges, for every registry client with a site:
+  registry.toml            identity, status (customer/prospect/…)
+  CLIENT-CADENCE.md        where it is at: last touch, cadence state, 2 bullets
+  clients/patrols/*.out    latest PATROL-REPORT key data points
+  clients/patrols/AUDIT-*  latest audit accuracy + findings for review
+  favicon cache            each company's own mark, as a data URI
+
+Writes an explicitly configured private breakout feed. Cadence bullets may
+carry owner data, so the configured destination must remain private.
+
+Runs daily as step 4 of mem0-patrol-daily; safe to run any time.
+"""
+
+import base64
+import json
+import os
+import re
+import tomllib
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import httpx
+from borg_config import CONFIG, BorgConfigError
+
+REGISTRY = Path(os.environ["BORG_CLIENT_REGISTRY"]).expanduser() if os.environ.get("BORG_CLIENT_REGISTRY") else None
+CADENCE = Path(os.environ["BORG_CLIENT_CADENCE_OUTPUT"]).expanduser() if os.environ.get("BORG_CLIENT_CADENCE_OUTPUT") else None
+PATROLS = Path(os.environ["BORG_PATROL_OUTPUT_DIR"]).expanduser() if os.environ.get("BORG_PATROL_OUTPUT_DIR") else None
+OUTPUT = Path(os.environ["BORG_CLIENT_BREAKOUT_OUTPUT"]).expanduser() if os.environ.get("BORG_CLIENT_BREAKOUT_OUTPUT") else None
+FAV_CACHE = CONFIG.data_root / "favicon-cache.json"
+UPTIME = Path(os.environ["BORG_UPTIME_STATUS_FILE"]).expanduser() if os.environ.get("BORG_UPTIME_STATUS_FILE") else None
+UPTIME_EVENTS = Path(os.environ["BORG_UPTIME_EVENTS_FILE"]).expanduser() if os.environ.get("BORG_UPTIME_EVENTS_FILE") else None
+FETCH_FAVICONS = os.environ.get("BORG_CLIENT_FAVICON_FETCH") == "1"
+UA = {"User-Agent": "BORG-ClientBreakout/1.0"}
+
+
+def now_mdt():
+    return datetime.now(ZoneInfo("America/Denver")).strftime("%Y-%m-%d %H:%M MDT")
+
+
+def cadence():
+    """{client name: {status,last_touch,days,state,facts30,bullets[2]}}"""
+    f = CADENCE
+    if f is None:
+        return {}
+    if not f.exists():
+        return {}
+    text = f.read_text(errors="ignore")
+    out = {}
+    for m in re.finditer(r"^\| ([^|\n]+) \| (\w+) \| ([0-9-]+) \| (\d+) \| \S+ \| (\w+) \| (\d+) \|",
+                         text, re.M):
+        name = m.group(1).strip()
+        out[name] = {"status": m.group(2), "last_touch": m.group(3), "days_since": int(m.group(4)),
+                     "cadence_state": m.group(5), "facts_30d": int(m.group(6)), "bullets": []}
+    for m in re.finditer(r"^### (.+?) — last touch.*?\n((?:- .*\n?)+)", text, re.M):
+        name = m.group(1).strip()
+        if name in out:
+            out[name]["bullets"] = [b.strip("- ").strip()[:220]
+                                    for b in m.group(2).splitlines()[:2] if b.strip()]
+    return out
+
+
+def latest_patrol(key):
+    """Newest patrol report + audit lines for one client key."""
+    if PATROLS is None:
+        return None
+    outs = sorted(PATROLS.glob(f"{key}-*.out"))
+    if not outs:
+        return None
+    path = outs[-1]
+    checked = datetime.fromtimestamp(path.stat().st_mtime, ZoneInfo("America/Denver"))
+    date = re.search(r"(20\d\d-\d\d-\d\d)", path.name)
+    text = path.read_text(errors="ignore")
+    i = text.rfind("PATROL-REPORT")
+    rep = None
+    if i >= 0:
+        m = re.search(r"\{.*\}", text[i + len("PATROL-REPORT"):], re.S)
+        if m:
+            try:
+                rep = json.loads(m.group(0)).get("sites", [{}])[0]
+            except Exception:
+                rep = None
+    audit = {"accuracy_pct": None, "findings": []}
+    audits = sorted(PATROLS.glob("AUDIT-*.txt"))
+    if audits and rep:
+        at = audits[-1].read_text(errors="ignore")
+        site = rep.get("site", "\x00")
+        sec = re.search(rf"=== {re.escape(site)}\s+\[.*?accuracy (\d+)/(\d+) \((\d+)%\) ===\n(.*?)(?=\n=== |\Z)",
+                       at, re.S)
+        if sec:
+            audit["accuracy_pct"] = int(sec.group(3))
+            audit["findings"] = [f.strip()[:160] for f in
+                                 re.findall(r"REVIEW\s+finding:\s*(.+)", sec.group(4))][:4]
+    if not rep:
+        return {"patrol_date": date.group(1) if date else None,
+                "patrol_checked_at": checked.strftime("%Y-%m-%d %H:%M MDT"),
+                "patrol_epoch": checked.timestamp(), "report": None, **audit}
+    return {"patrol_date": date.group(1) if date else None,
+            "patrol_checked_at": checked.strftime("%Y-%m-%d %H:%M MDT"),
+            "patrol_epoch": checked.timestamp(),
+            "response_ms": rep.get("response_ms"),
+            "sitemap_urls": rep.get("sitemap_urls"),
+            "schema_types": len(rep.get("schema_types") or []),
+            "ai_crawlers_blocked": rep.get("ai_crawlers_blocked") or [],
+            "meta_description_chars": rep.get("meta_description_chars"),
+            "has_canonical": bool(rep.get("canonical")),
+            "title": (rep.get("title") or "")[:90], **audit}
+
+
+def favicon(key, site, cache):
+    """Company mark as a data URI, cached 14 days. None when unusable."""
+    row = cache.get(key)
+    if row and (datetime.now().timestamp() - row.get("at", 0)) < 14 * 86400:
+        return row.get("data")
+    data = None
+    if not FETCH_FAVICONS:
+        return row.get("data") if row else None
+    try:
+        r = httpx.get(site, headers=UA, follow_redirects=True, timeout=12)
+        base = str(r.url)
+        m = re.search(r'<link[^>]+rel=["\'](?:shortcut )?icon["\'][^>]*href=["\']([^"\']+)', r.text, re.I) or \
+            re.search(r'<link[^>]+href=["\']([^"\']+)["\'][^>]*rel=["\'](?:shortcut )?icon', r.text, re.I)
+        url = httpx.URL(base).join(m.group(1)) if m else httpx.URL(base).join("/favicon.ico")
+        fr = httpx.get(str(url), headers=UA, follow_redirects=True, timeout=12)
+        ct = fr.headers.get("content-type", "").split(";")[0].strip()
+        if fr.status_code == 200 and fr.content and len(fr.content) <= 60_000 and (
+                ct.startswith("image/") or str(url).endswith(".ico")):
+            data = f"data:{ct or 'image/x-icon'};base64," + base64.b64encode(fr.content).decode()
+    except Exception:
+        data = None
+    cache[key] = {"at": datetime.now().timestamp(), "data": data}
+    return data
+
+
+def main():
+    if REGISTRY is None or OUTPUT is None:
+        raise BorgConfigError("BORG_CLIENT_REGISTRY and BORG_CLIENT_BREAKOUT_OUTPUT are required")
+    reg = tomllib.load(open(REGISTRY, "rb"))["clients"]
+    cad = cadence()
+    cache = json.loads(FAV_CACHE.read_text()) if FAV_CACHE.exists() else {}
+    uptime = {}
+    up_f = UPTIME
+    if up_f and up_f.exists():
+        for s in json.loads(up_f.read_text()).get("sites", []):
+            uptime[s["name"]] = s
+    # per-site incident history — how it broke, when, for how long
+    incidents = {}
+    ev_f = UPTIME_EVENTS
+    if ev_f and ev_f.exists():
+        for line in ev_f.read_text(errors="ignore").splitlines():
+            try:
+                e = json.loads(line)
+                incidents.setdefault(e.get("site"), []).append(
+                    {k: e.get(k) for k in ("at", "event", "detail", "class", "down_min", "source") if e.get(k)})
+            except Exception:
+                pass
+    rows = []
+    for key, c in reg.items():
+        if not c.get("site"):
+            continue
+        cd = cad.get(c["name"], {})
+        patrol = latest_patrol(key)
+        recovery_epochs = []
+        for event in incidents.get(c["site"], []):
+            if event.get("event") != "recovered" or not event.get("at"):
+                continue
+            try:
+                recovery_epochs.append(datetime.strptime(event["at"], "%Y-%m-%d %H:%M")
+                                       .replace(tzinfo=ZoneInfo("America/Denver")).timestamp())
+            except ValueError:
+                pass
+        if patrol:
+            patrol["stale_after_recovery"] = bool(
+                recovery_epochs and max(recovery_epochs) > (patrol.get("patrol_epoch") or 0)
+            )
+            patrol.pop("patrol_epoch", None)
+        rows.append({
+            "key": key, "name": c["name"], "site": c["site"],
+            "status": c.get("status") or cd.get("status") or "UNKNOWN",
+            "logo": favicon(key, c["site"], cache),
+            "uptime": {k: uptime.get(key, {}).get(k) for k in ("ok", "detail", "down_min")},
+            "where": {k: cd.get(k) for k in ("last_touch", "days_since", "cadence_state", "facts_30d")},
+            "bullets": cd.get("bullets") or [],
+            "patrol": patrol,
+            "incidents": (incidents.get(c["site"]) or [])[-5:][::-1],
+        })
+    FAV_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    FAV_CACHE.write_text(json.dumps(cache))
+    out = {"generated": now_mdt(), "clients": sorted(rows, key=lambda r: r["name"].lower())}
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    tmp = OUTPUT.with_suffix(OUTPUT.suffix + ".tmp")
+    tmp.write_text(json.dumps(out, indent=1))
+    tmp.replace(OUTPUT)
+    logos = sum(1 for r in rows if r["logo"])
+    print(f"breakout: {len(rows)} clients, {logos} logos, cadence rows {sum(1 for r in rows if r['where']['last_touch'])}, "
+          f"patrol data {sum(1 for r in rows if r['patrol'] and r['patrol'].get('patrol_date'))}")
+
+
+if __name__ == "__main__":
+    main()

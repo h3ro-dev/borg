@@ -1,13 +1,13 @@
 # The Borg
 
-One brain, many hands. The Borg is a local-first shared memory system for AI agents: every
-agent session on the machine — Claude Code, Codex, Grok — reads from and writes to the same
-memory, so anything one agent learns, every agent knows. The collective grows every session.
+BORG gives your AI agents a shared local brain and native tools. Each installation has
+its own memory, temporal graph, computer and browser tools, conductor, Agent Inbox,
+Beads project, provider profile and credentials. It does not connect to the author's fleet.
 
-It is not a framework you adopt. It is the working machinery of a real single-operator
-estate, extracted, scrubbed, and published: the recall layer, the temporal knowledge graph,
-the fine-tuned local extraction models, the promotion gates that keep them honest, and the
-conductor that turns ChatGPT-account Codex seats into a steerable worker fleet.
+The installer provisions the real component implementations and pinned runtimes in a
+private BORG home. Codex gets native recall and capture hooks automatically. Claude and
+Grok integrations are included for owner configuration. ChatGPT on the web can connect
+through your own Cloudflare Access application and tunnel.
 
 ```
         ┌────────────┐  ┌────────────┐  ┌────────────┐
@@ -37,9 +37,12 @@ conductor that turns ChatGPT-account Codex seats into a steerable worker fleet.
 |---|---|
 | `adapters/` | Trained LoRA adapters (weights included) for local extraction students, with honest model cards — including the predecessor that failed its promotion canary and why |
 | `memory/` | The mem0 layer: CLI, MCP servers (v1 + scoped v2), session hooks for Claude Code / Codex / Grok, nightly consolidation ("dream"), ingestion tools, tests |
-| `graph/` | The Graphiti layer: episode backfill, canary smoke test, and the **grammar shim** — an OpenAI-compatible proxy that grammar-locks local model JSON *and* tees every request/response into a free training corpus |
+| `graph/` | The Graphiti layer: episode backfill, canary smoke test, and the **grammar shim** — an OpenAI-compatible proxy that grammar-locks local model JSON, with optional private training-pair capture |
 | `training/` | Dataset builders, GPU-crash-tolerant training chains, and the eval harness: held-out exam, promotion canary, disproof probes |
 | `conductor/` | codex-conductor: an HTTP control plane over `codex app-server` — start, steer (mid-flight), interrupt, and stream Codex threads; one instance per account profile |
+| `connector/` | Authenticated MCP gateway with native files, processes, jobs, browser, UI, SSH and credential handles; no Desktop Commander dependency |
+| `coordination/` | Native Agent Inbox, identities, grants, leased messages, work assignments and Beads bootstrap |
+| `installer/` | Independent configuration, dependency locks, service lifecycle, native client setup and readiness diagnostics |
 | `docs/` | Three papers: the fine-tuning cost audit, the memory-system build, and the conductor fleet |
 
 ## The rules the system lives by
@@ -50,29 +53,32 @@ conductor that turns ChatGPT-account Codex seats into a steerable worker fleet.
    only running the real pipeline head-to-head against the incumbent, on real backlog,
    promotes it. Our best exam scorer (400/400 format-valid) failed its canary 1-of-25 and
    stayed benched. The papers show the full numbers.
-3. **The corpus builds itself.** The grammar shim tees live production traffic into
-   training pairs at zero marginal cost (~168 pairs/hour on this estate), tagged by call
-   shape. Data is a flow, not a stock you go harvest.
-4. **Secrets and client data never enter shared memory.** Extraction runs behind drop
-   filters; scoped access (v2 MCP) gates who reads what; this public repo ships machinery
-   and the adapter weights only — no data, no private corpora. The published adapters were
-   trained on identifier-scrubbed pairs and gated on a memorization probe.
+3. **Training capture is an owner decision.** Fresh installations disable the grammar
+   shim's training-pair capture. Enable a private training workflow only for data you may use.
+4. **An installation owns its data.** Capture filters and scoped MCP grants protect
+   memory boundaries. The distribution includes source and reviewed adapters, without
+   account sessions, secrets or private corpora.
 
 ## Quickstart
 
-See [docs/INSTALL.md](docs/INSTALL.md) for the full path. The short version:
+Start with an empty directory on an Apple Silicon Mac:
 
-1. Run Qdrant and FalkorDB containers, and Ollama with a capable local model
-   (we use qwen-class 27B GGUF; llama.cpp engine required for grammar enforcement).
-2. Create the venv, `pip install mem0ai graphiti-core`, point `memory/bin/mem0ctl` at your
-   store, seed it, and register `memory/bin/mem0-mcp-server-v2` with your agent CLIs.
-3. Put `graph/bin/ollama-schema-shim` in front of Ollama (port 11500) so extraction JSON is
-   grammar-enforced — and so every call starts feeding your own training corpus.
-4. When the corpus is ready, `training/` takes you from pairs to a LoRA student to an exam
-   to a canary. Promotion is your call, made on canary evidence.
+```sh
+git clone https://github.com/h3ro-dev/borg.git
+cd borg
+./install.sh --owner yourname
+"$HOME/.borg/bin/borg" auth codex
+"$HOME/.borg/bin/borg" doctor
+```
 
-These tools were extracted from a working estate, not built as a product. Paths and
-defaults are configurable but opinionated; expect to adapt them to your machine.
+Setup installs local Qdrant, FalkorDB, Ollama, models, the native connector, conductor,
+Inbox and lifecycle hooks. It uses your own provider login. Desktop control requires
+the normal operating-system permissions. The included LoRA adapters remain benched
+until validated against their exact base models; default extraction uses pinned Qwen.
+
+See [installation and recovery](docs/INSTALL.md) and [web ChatGPT setup](docs/WEB.md).
+Linux and Intel artifacts are pinned, but their complete native installation is not yet
+verified. Windows is not supported by this installer.
 
 ## The adapters
 
@@ -99,5 +105,6 @@ re-learning the same facts every morning.
 
 ## License
 
-MIT. The Qwen base models the adapters attach to are separately licensed (Apache-2.0) and
-are not distributed here — pull them from their own repos.
+Owner-authored BORG code and the included adapters are MIT. Base models and runtime
+dependencies retain their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Base weights are downloaded separately from their pinned upstream repositories.

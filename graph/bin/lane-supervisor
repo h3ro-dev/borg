@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
-"""Crash/stall supervisor for the graphiti pipeline lanes (Studio0).
+"""Crash/stall supervisor for configured graph pipeline lanes.
 
-Owner order 2026-08-21 09:47 MDT: "python crashed, we need some type of
-monitoring to catch and restart stuff when these alerts hit."
-
-House shape (officers/HARNESS-CHARTER.md): launchd supervises, this CLI does
-the work, an append-only JSONL is the receipt. One pass per invocation —
-launchd owns the loop (com.studio0.graphiti-lanes, StartInterval 300).
+An external service manager supervises this CLI; the CLI does one pass and
+writes an append-only JSONL receipt.
 
 Pass order:
     kill switch -> ollama -> schema shim -> lanes -> crash scan
 
-HARD RULES (owner doctrine, measured 2026-08-21):
+Safety invariants:
   * Kill ONLY by lockfile pid, -TERM then -KILL after 10s. NEVER pkill by
     pattern — a pattern kill took out our own monitors twice on 08-21.
   * Locks are authoritative. A live, matching lock pid means hands off.
-  * STALLED  = lock pid alive but log mtime older than the lane's threshold.
+  * STALLED  = lock pid alive but log or graph progress older than its bound.
   * DEAD     = lock missing / pid gone without the lane's stop condition met.
   * ollama is restarted only when /api/version itself fails — never because
     it is merely slow or busy.
-  * LUNA is paid: total pairs are hard-capped at 200 and each relaunch asks
+  * Paid optional harvest lanes retain a hard pair cap and each relaunch asks
     only for the remaining balance.
 
 Kill switch: create the file `KILL_SWITCH` beside this executable
 (bin/KILL_SWITCH) and the supervisor stands down without touching anything.
 """
 import argparse
+import importlib.machinery
 import json
 import os
 import re
@@ -39,9 +36,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 BIN = Path(__file__).resolve().parent
-BASE = BIN.parent
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_graph_supervisor", str(BIN / "borg_config.py")
+).load_module().CONFIG
+BASE = CONFIG.graph_root
 DATA = BASE / "data"
-VENV_PY = BASE / "venv" / "bin" / "python"
+VENV_PY = (CONFIG.mem0_root if CONFIG.portable else BASE) / "venv" / "bin" / "python"
 
 RECEIPTS = DATA / "supervisor-receipts.jsonl"
 SEEN_CRASHES = DATA / "supervisor-seen-crashes.json"
@@ -58,38 +58,69 @@ RESTART_BUDGET = 4
 RESTART_WINDOW_S = 3600
 DEP_COOLDOWN_S = {"schema-shim": 600, "ollama": 1800}
 
-SHIM_HEALTH = "http://127.0.0.1:11500/health"
+_graph_url = str(CONFIG.values["BORG_GRAPH_LLM_URL"]).rstrip("/")
+SHIM_HEALTH = os.environ.get("SHIM_HEALTH", (_graph_url[:-3] if _graph_url.endswith("/v1") else _graph_url) + "/health")
 SHIM_TIMEOUT_S = 5
-OLLAMA_VERSION = "http://127.0.0.1:11434/api/version"
+OLLAMA_VERSION = str(CONFIG.values["BORG_OLLAMA_URL"]).rstrip("/") + "/api/version"
 OLLAMA_TIMEOUT_S = 10
 BREW = "/opt/homebrew/bin/brew"
 
-LUNA_PAIR_CAP = 600          # owner raised 200 -> 600 on 2026-08-21
+LUNA_PAIR_CAP = 600
 CRASH_WINDOW_S = 24 * 3600
 
 # --- lane table -------------------------------------------------------------
 # stall_s: log mtime older than this, with a live lock pid, means STALLED.
-# start_re: the lane's own "here is what I queued" line; episodes=0 on the
-#           most recent one is the lane's stop condition.
+# start_re: the lane's own "here is what I queued" line; episodes=0 is a stop
+#           condition only for finite harvest lanes.
 LANES = [
     {
-        # Owner 2026-08-21 ~10:00 MDT: bulk mode is BENCHED (measured no
-        # advantage — batch-10's first batch ran >43 min, ~258s/ep, against
-        # serial's known 278s/ep). The canonical graph lane is the SERIAL
-        # script. backfill_bulk.py is listed as benched, not deleted: it
-        # shares this lock, so the supervisor must still recognise it as a
-        # legitimate lock holder and leave it alone if a human runs it.
+        # Bulk mode is BENCHED because it provided no material advantage. The canonical graph lane is the coordinator
+        # in backfill.py; it owns one state file and checkpoints every
+        # graph outcome. One worker uses the currently responsive model server. backfill_bulk.py is listed as benched, not
+        # deleted: it shares this lock, so the supervisor must still recognise
+        # it as a legitimate lock holder and leave it alone if a human runs it.
         "name": "graph",
         "script": "backfill.py",
-        "argv": ["backfill.py", "--limit", "2000", "--fetch", "12000"],
-        "env": {},
+        "argv": [
+            "backfill.py",
+            "--limit",
+            "96",
+            "--fetch",
+            "12000",
+            "--scan-points",
+            "150000",
+            "--scan-pages",
+            "32",
+            "--episodes",
+            "96",
+            "--episode-timeout",
+            "420",
+            "--pass-budget",
+            "600",
+            "--cleanup-margin",
+            "30",
+            "--workers",
+            "1",
+        ],
+        # PYTHONUNBUFFERED: the pass prints RUN-START/RUN-END to its log; with
+        # block buffering nothing appeared until exit, the supervisor read an
+        # idle log and killed three live passes as "stalled" (2026-09-03 15:03,
+        # 15:10, 15:16). Up to 96 episodes share one 600-second pass deadline;
+        # each add is capped at 420 seconds or the remaining pre-cleanup budget,
+        # whichever is smaller. The coordinator fsyncs every attempted outcome.
+        "env": {"PYTHONUNBUFFERED": "1"},
         "benched": ["backfill_bulk.py"],
         "lock": "backfill.lock",
         "log": "backfill.log",
         "nohup": "backfill-nohup.out",
-        "stall_s": 25 * 60,
+        "stall_s": 90 * 60,
+        # Worker heartbeats stay fresh while an add is stuck. The feed records
+        # the last safe counter change, so 30 minutes without any unfinished
+        # worker attempt/success/failure progress is a real graph stall.
+        "progress_stall_s": 30 * 60,
         "start_re": r"RUN-START\b.*\bslice_episodes=(\d+)",
         "tag": None,
+        "incremental": True,
     },
     {
         "name": "ox",
@@ -110,10 +141,7 @@ LANES = [
         "argv": ["harvest/ox_harvest.py", "--limit", "1000", "--fetch",
                  "30000", "--workers", "6"],
         "env": {"HARVEST_TAG": "qwen",
-                "HARVEST_MODEL": "qwen3.8:27b-mlx",
-                "HARVEST_URL": ("http://127.0.0.1:11436/v1/chat/completions,"
-                                "http://127.0.0.1:11437/v1/chat/completions,"
-                                "http://127.0.0.1:11438/v1/chat/completions")},
+                "HARVEST_MODEL": str(CONFIG.values["BORG_EXTRACTION_MODEL"])},
         "lock": "qwen-harvest.lock",
         "log": "qwen-harvest.log",
         "nohup": "qwen-harvest-nohup.out",
@@ -139,8 +167,8 @@ LANES = [
         "pair_cap": LUNA_PAIR_CAP,
     },
     {
-        # Owner: TERRA finished 60/60 at 09:31 MDT. Considered every pass so
-        # the receipt proves it was looked at; never relaunched.
+        # This supplied finite lane is complete; consider it during each pass
+        # for receipt coverage but never relaunch it.
         "name": "terra",
         "complete": True,
         "log": "terra-harvest.log",
@@ -148,6 +176,9 @@ LANES = [
     },
 ]
 
+
+if CONFIG.portable:
+    LANES[0]["env"] = {"PYTHONUNBUFFERED": "1"}
 
 # --- small helpers ----------------------------------------------------------
 def now():
@@ -216,13 +247,67 @@ def last_queued(log_path, start_re):
     return int(hits[-1]) if hits else None
 
 
+def clean_exit(log_path):
+    """True when the log's last RUN-END comes after its last RUN-START: the
+    previous pass finished on its own (2026-09-03). A missing lock after a
+    clean exit is a completed pass, not a crash."""
+    text = tail_text(log_path)
+    return text.rfind("RUN-END") > text.rfind("RUN-START") >= 0
+
+
+GRAPH_PROGRESS_RE = re.compile(
+    r"WORKER-PROGRESS worker=(\d+) shard=\d+ groups=(\d+) "
+    r"attempts_done=(\d+) episodes_done=(\d+) facts_done=(\d+) failed=(\d+) "
+    r"progress_changed_epoch=(\d+)"
+)
+
+
+def graph_progress_snapshot(log_path):
+    """Latest safe graph counters and age of useful unfinished-worker progress."""
+
+    text = tail_text(log_path)
+    start = text.rfind("RUN-START")
+    if start >= 0:
+        text = text[start:]
+    latest = {}
+    for match in GRAPH_PROGRESS_RE.finditer(text):
+        worker, groups, attempts, episodes, facts, failed, changed = map(
+            int, match.groups()
+        )
+        latest[worker] = {
+            "groups": groups,
+            "attempts_done": attempts,
+            "episodes_done": episodes,
+            "facts_done": facts,
+            "failed": failed,
+            "progress_changed_epoch": changed,
+        }
+    if not latest:
+        return None
+    unfinished = [
+        item for item in latest.values() if item["attempts_done"] < item["groups"]
+    ]
+    changed = max(
+        (item["progress_changed_epoch"] for item in unfinished),
+        default=int(time.time()),
+    )
+    return {
+        "age_s": max(0, int(time.time() - changed)),
+        "attempts_done": sum(item["attempts_done"] for item in latest.values()),
+        "episodes_done": sum(item["episodes_done"] for item in latest.values()),
+        "facts_done": sum(item["facts_done"] for item in latest.values()),
+        "failed": sum(item["failed"] for item in latest.values()),
+        "unfinished_workers": len(unfinished),
+    }
+
+
 # --- receipts ---------------------------------------------------------------
 class Receipts:
     def __init__(self, pass_id, dry_run):
         self.pass_id = pass_id
         self.dry_run = dry_run
         self.lines = []
-        if RECEIPTS.exists() and RECEIPTS.stat().st_size > ROTATE_BYTES:
+        if not self.dry_run and RECEIPTS.exists() and RECEIPTS.stat().st_size > ROTATE_BYTES:
             RECEIPTS.rename(RECEIPTS.with_suffix(
                 f".{now():%Y%m%dT%H%M%S}.jsonl"))
 
@@ -239,9 +324,11 @@ class Receipts:
         if detail:
             rec["detail"] = detail
         line = json.dumps(rec, sort_keys=False)
-        with open(RECEIPTS, "a") as f:
-            f.write(line + "\n")
-        os.chmod(RECEIPTS, 0o600)
+        if not self.dry_run:
+            RECEIPTS.parent.mkdir(parents=True, exist_ok=True)
+            with open(RECEIPTS, "a") as f:
+                f.write(line + "\n")
+            os.chmod(RECEIPTS, 0o600)
         self.lines.append(rec)
         print(line, flush=True)
         return rec
@@ -369,6 +456,11 @@ def lane_environ(lane):
     for k in LANE_ENV_KEYS:
         env.pop(k, None)
     env.update(lane.get("env") or {})
+    if CONFIG.portable:
+        for key in list(env):
+            if key.startswith("HARVEST_") or key in {"GRAPH_LLM_URLS", "GRAPH_LLM_V6_URL", "MEM0_EMBED_OLLAMA_URL"}:
+                env.pop(key, None)
+        env.update(CONFIG.env())
     return env
 
 
@@ -426,6 +518,8 @@ def cooldown_block(target):
 
 
 def check_ollama(rc, dry):
+    if CONFIG.portable:
+        return rc.write("ollama", "dep", "external", "skip", "installer-owns-service")
     ok, secs, body = http_ok(OLLAMA_VERSION, OLLAMA_TIMEOUT_S)
     if ok:
         return rc.write("ollama", "dep", "healthy", "noop",
@@ -463,6 +557,8 @@ def shim_pids():
 
 
 def check_shim(rc, dry):
+    if CONFIG.portable:
+        return rc.write("schema-shim", "dep", "external", "skip", "installer-owns-service")
     ok, secs, body = http_ok(SHIM_HEALTH, SHIM_TIMEOUT_S)
     pids = shim_pids()
     if ok:
@@ -507,6 +603,12 @@ def luna_budget(lane):
 
 def check_lane(rc, lane, dry):
     name = lane["name"]
+    if CONFIG.portable and name != "graph":
+        return rc.write(name, "lane", "unavailable", "skip", "optional-component-not-installed")
+    if CONFIG.portable and os.environ.get("GRAPH_FEED_LIVE", "0").lower() not in {"1", "true", "yes", "on"}:
+        return rc.write(name, "lane", "disabled", "skip", "GRAPH_FEED_LIVE=0")
+    if CONFIG.portable and not (BASE / lane["script"]).is_file():
+        return rc.write(name, "lane", "unavailable", "skip", "component-script-missing")
     if lane.get("complete"):
         return rc.write(name, "lane", "done", "noop",
                         "lane-complete-owner-declared",
@@ -518,6 +620,23 @@ def check_lane(rc, lane, dry):
     queued = last_queued(log_f, lane["start_re"])
     base = {"lock_pid": pid, "log_age_s": None if age is None else int(age),
             "stall_after_s": lane["stall_s"], "last_start_episodes": queued}
+    progress_stalled = False
+    if name == "graph" and lane.get("progress_stall_s"):
+        progress = graph_progress_snapshot(log_f)
+        if progress is not None:
+            base.update({
+                "progress_age_s": progress["age_s"],
+                "progress_stall_after_s": lane["progress_stall_s"],
+                "progress_attempts_done": progress["attempts_done"],
+                "progress_episodes_done": progress["episodes_done"],
+                "progress_facts_done": progress["facts_done"],
+                "progress_failed": progress["failed"],
+                "progress_unfinished_workers": progress.get("unfinished_workers"),
+            })
+            progress_stalled = (
+                progress["age_s"] > lane["progress_stall_s"]
+                and progress.get("unfinished_workers", 1) > 0
+            )
     if lane.get("paid"):
         base["pairs"], base["pair_budget"] = luna_budget(lane)
 
@@ -537,7 +656,14 @@ def check_lane(rc, lane, dry):
             return rc.write(name, "lane", "unrecognised-holder", "skip",
                             "lock pid alive but not a known script for this "
                             "lane — refusing to touch a live lock", **base)
-        if age is not None and age > lane["stall_s"]:
+        log_stalled = age is not None and age > lane["stall_s"]
+        if log_stalled or progress_stalled:
+            stall_reason = (
+                f"graph counters unchanged {base['progress_age_s']}s > "
+                f"{lane['progress_stall_s']}s"
+                if progress_stalled
+                else f"stalled log idle {int(age)}s > {lane['stall_s']}s"
+            )
             if dry:
                 return rc.write(name, "lane", "stalled", "noop", "dry-run",
                                 would_action="kill+restart", **base)
@@ -550,13 +676,20 @@ def check_lane(rc, lane, dry):
                                 "kill-failed-process-survived", **base)
             if read_lock(lock_f) == pid:
                 lock_f.unlink(missing_ok=True)
-            return restart(rc, lane,
-                           f"stalled log idle {int(age)}s > {lane['stall_s']}s",
-                           base, dry)
+            return restart(rc, lane, stall_reason, base, dry)
         return rc.write(name, "lane", "healthy", "noop",
                         "lock-pid-alive-and-log-fresh", **base)
 
-    # --- no live lock: done, or dead and owed a relaunch
+    # --- no live lock: an incremental graph lane is never terminal.  Relaunch
+    # one pass so the next launchd tick probes the source again; finite
+    # harvest lanes retain their old zero-means-done semantics.
+    if queued == 0 and lane.get("incremental"):
+        if dry:
+            return rc.write(name, "lane", "idle", "noop",
+                            "last-start-queued-0-episodes-incremental-poll",
+                            would_action="restart", **base)
+        return restart(rc, lane, "incremental-idle-poll", base, dry,
+                       state_override="idle", poll=True)
     if queued == 0:
         return rc.write(name, "lane", "done", "noop",
                         "last-start-queued-0-episodes", **base)
@@ -564,6 +697,15 @@ def check_lane(rc, lane, dry):
         return rc.write(name, "lane", "done", "noop",
                         f"paid-cap-reached ({base['pairs']}/"
                         f"{lane['pair_cap']} pairs)", **base)
+    if lane.get("incremental") and clean_exit(log_f):
+        # The previous pass ended with RUN-END: schedule the next incremental
+        # pass as a paced poll, outside the crash/stall budget (2026-09-03).
+        if dry:
+            return rc.write(name, "lane", "idle", "noop",
+                            "previous-pass-complete-incremental-poll",
+                            would_action="poll", **base)
+        return restart(rc, lane, "incremental-next-pass", base, dry,
+                       state_override="idle", poll=True)
     if dry:
         return rc.write(name, "lane", "dead", "noop", "dry-run",
                         would_action="restart", **base)
@@ -571,17 +713,23 @@ def check_lane(rc, lane, dry):
     return restart(rc, lane, reason, base, dry)
 
 
-def restart(rc, lane, reason, base, dry):
+def restart(rc, lane, reason, base, dry, state_override=None, poll=False):
     """The only path that starts a lane. Every guard lives here so no caller
-    can reach a launch without passing all of them."""
+    can reach a launch without passing all of them.
+
+    poll=True is the scheduled incremental pass after a CLEAN exit (2026-09-03):
+    it is paced by the launchd tick, recorded as action "poll", and never
+    counts toward the crash/stall restart budget. Crash and stall restarts
+    keep the governor."""
     name = lane["name"]
-    block = governor_block(name)
+    block = None if poll else governor_block(name)
     if block:
-        return rc.write(name, "lane", "dead", "skip", block, **base)
+        return rc.write(name, "lane", state_override or "dead", "skip", block,
+                        **base)
     other = find_lane_process(lane)
     if other:
         base["running_pid"] = other
-        return rc.write(name, "lane", "running", "skip",
+        return rc.write(name, "lane", state_override or "running", "skip",
                         "process-alive-without-lock — refusing a second "
                         "writer", **base)
     argv = None
@@ -594,8 +742,10 @@ def restart(rc, lane, reason, base, dry):
         argv = list(lane["argv"])
         argv[argv.index("--limit") + 1] = str(budget)
     base["launch"] = launch(lane, argv)
-    state = "restarted" if base["launch"]["lock_live"] else "restart-unproven"
-    return rc.write(name, "lane", state, "restart", reason, **base)
+    state = (state_override if state_override and base["launch"]["lock_live"]
+             else ("restarted" if base["launch"]["lock_live"]
+                   else "restart-unproven"))
+    return rc.write(name, "lane", state, "poll" if poll else "restart", reason, **base)
 
 
 # --- crash scan -------------------------------------------------------------
@@ -669,6 +819,8 @@ def crash_record(path, payload):
 
 
 def scan_crashes(rc, dry=False):
+    if CONFIG.portable:
+        return 0
     try:
         seen = json.loads(SEEN_CRASHES.read_text())
     except (OSError, ValueError):
@@ -726,7 +878,9 @@ def main():
         rc.write("supervisor", "system", "halted", "skip",
                  "kill-switch-present", switch=str(KILL_SWITCH))
         return 0
-    if not take_self_lock(rc):
+    if not args.dry_run:
+        DATA.mkdir(parents=True, exist_ok=True)
+    if not args.dry_run and not take_self_lock(rc):
         return 0
     try:
         # Every step is isolated: a dependency check that throws must never
@@ -752,7 +906,7 @@ def main():
         rc.write("supervisor", "system", "ok", "noop", "pass-complete",
                  receipts=len(rc.lines), actions=len(acted))
     finally:
-        if read_lock(SELF_LOCK) == os.getpid():
+        if not args.dry_run and read_lock(SELF_LOCK) == os.getpid():
             SELF_LOCK.unlink(missing_ok=True)
     return 0
 

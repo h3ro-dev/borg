@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Run the portable BORG coordination wrapper from an installed source tree."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from borg_coordination.cli import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""mem0ctl — Studio0 shared local memory (mem0 OSS 2.x, fully local).
+"""mem0ctl — BORG shared local memory (mem0 OSS 2.x, fully local).
 
 Models: qwen3.8:27b-mlx primary, llama3.1:8b automatic fallback.
 Embeddings: nomic-embed-text (768 dims). Store: embedded Qdrant on disk +
-SQLite history, both under ~/Library/Memory/mem0/data.
-All model calls go to 127.0.0.1:11434. Telemetry is force-disabled.
+SQLite history, both under ``BORG_HOME/mem0/data``.
+Extraction model calls default to 127.0.0.1:11434; embeddings default to the
+dedicated 127.0.0.1:11439 endpoint. Telemetry is force-disabled.
+
+``MEM0_OLLAMA_URL`` controls extraction. ``MEM0_EMBED_OLLAMA_URL`` controls
+embeddings without changing the extraction route.
 
 This is a recall layer. It is never the authority — file corpora and
 ledgers stay the source of truth. No client PII, no credentials.
 
 Usage:
-  mem0ctl add "text"    [--user james] [--agent NAME] [--run ID]
+  mem0ctl add "text"    [--user OWNER] [--agent NAME] [--run ID]
                         [--model qwen|llama] [--raw]
-  mem0ctl search "query" [--user james] [--agent NAME] [--limit N] [--threshold F]
-  mem0ctl list          [--user james] [--agent NAME] [--limit N]
+  mem0ctl search "query" [--user OWNER] [--agent NAME] [--limit N] [--threshold F]
+  mem0ctl list          [--user OWNER] [--agent NAME] [--limit N]
   mem0ctl delete MEMORY_ID
   mem0ctl stats
 """
@@ -28,7 +32,10 @@ from copy import deepcopy
 import hashlib
 import importlib.machinery
 import json
+import math
+import sqlite3
 import logging
+import re
 import sys
 import threading
 import time
@@ -37,27 +44,197 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+try:
+    from borg_config import CONFIG
+except ModuleNotFoundError:  # SourceFileLoader callers do not alter sys.path.
+    CONFIG = importlib.machinery.SourceFileLoader(
+        "borg_config_mem0ctl", str(Path(__file__).resolve().parent / "borg_config.py")
+    ).load_module().CONFIG
+
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.ERROR)
 
-BASE = Path(__file__).resolve().parent.parent  # .../Library/Memory/mem0 — path-independent
-BIN = BASE / "bin"
+BASE = CONFIG.mem0_root
+SOURCE_BIN = Path(__file__).resolve().parent
+BIN = SOURCE_BIN
 DATA = BASE / "data"
 RETIRED_LOG = DATA / "retired-log.jsonl"  # undo ledger: every hard-deleted row, in full
 SCROLL_PAGE = 2000  # qdrant scroll page size; pages are streamed, never accumulated
 # Dream v2: destructive shards are star-anchored and never exceed 64 rows.
 MAX_ROWS = 64
 CLUSTER_MAX = MAX_ROWS  # compatibility name used by existing callers/logs
-OLLAMA_URL = os.environ.get("MEM0_OLLAMA_URL", "http://127.0.0.1:11434")  # point at a tunneled fleet qwen to offload extraction
-MODELS = {"qwen": "qwen3.8:27b-mlx", "llama": "llama3.1:8b"}
-EMBED_MODEL = "nomic-embed-text:latest"
-EMBED_DIMS = 768
+OLLAMA_URL = str(CONFIG.values["BORG_OLLAMA_URL"])  # point at a tunneled fleet qwen to offload extraction
+EMBED_OLLAMA_URL = os.environ.get(
+    "MEM0_EMBED_OLLAMA_URL", str(CONFIG.values["BORG_OLLAMA_URL"])
+)
+MODEL_ID = str(CONFIG.values["BORG_EXTRACTION_MODEL"])
+MODELS = {"qwen": MODEL_ID, "llama": MODEL_ID}
+EMBED_MODEL = str(CONFIG.values["BORG_EMBED_MODEL"])
+EMBED_MODEL_ID = str(CONFIG.values["BORG_EMBED_MODEL"])
+EMBED_DIMS = int(CONFIG.values["BORG_EMBED_DIMS"])
+COLLECTION = str(CONFIG.values["BORG_QDRANT_COLLECTION"])
 TOMBSTONE_STATUS = "tombstoned"
 DECAY_STATUS = "decayed"
 RETIRED_STATUSES = (TOMBSTONE_STATUS, DECAY_STATUS)
-EXTRACTION_MODEL = "qwen3.8:27b-mlx"
+SCOPE_KEY = "scope"
+DEFAULT_SCOPE = str(CONFIG.values["BORG_MEMORY_SCOPE"])
+# The shipped standalone recall fast-path is outside this lane and cannot be
+# proven to hide a newly-added pending replacement. Keep explicit apply held
+# until that boundary is made authoritative by the integration lane.
+CONSOLIDATE_APPLY_HELD = True
+CONSOLIDATE_APPLY_HOLD_REASON = (
+    "pending replacement cannot be proven outside normal recall: "
+    "the existing fast recall boundary is outside this candidate"
+)
+
+
+def qdrant_client(*, timeout=120):
+    """Build a client from the canonical BORG endpoint, never a live fallback."""
+    from qdrant_client import QdrantClient
+
+    return QdrantClient(url=str(CONFIG.values["BORG_QDRANT_URL"]), timeout=timeout)
+
+
+def _memory_text_from_payload(payload):
+    """Return the exact current text field, including legacy ``memory`` rows."""
+    if not isinstance(payload, dict):
+        return ""
+    data = payload.get("data")
+    if data not in (None, ""):
+        return data
+    return payload.get("memory", "")
+
+
+def _positive_guard_age_hours():
+    raw = os.environ.get("MEM0_DREAM_GUARD_MIN_AGE_H", "48")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("MEM0_DREAM_GUARD_MIN_AGE_H must be a positive number") from exc
+    if value <= 0:
+        raise ValueError("MEM0_DREAM_GUARD_MIN_AGE_H must be a positive number")
+    return value
+
+
+GUARD_MIN_AGE_H = _positive_guard_age_hours()
+_OWNER_MARKER = re.escape(str(CONFIG.values["BORG_OWNER_ID"]))
+_DOCTRINE_MARKER = re.compile(
+    r"owner(?:\s+rulings?|[-\s]ruled)|" + _OWNER_MARKER + r"\s+(?:decided|approved|ruled|ordered|authorized)|"
+    r"standing\s+(?:orders?|directives?)|doctrine|never\s|always\s|must not|"
+    + _OWNER_MARKER + r"\s+(?:expects|prefers|wants|requires|directs|instructs|mandates)|"
+    r"the\s+user\s+(?:prefers|requires|expects|mandates)|owner\s+(?:preferences?|directives?)|"
+    r"operat(?:or|ing)\s+(?:rules?|doctrine|defaults?)",
+    re.IGNORECASE,
+)
+
+
+def _parse_payload_timestamp(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("timestamp is missing")
+    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def guard_protected_ids(rows, *, now=None):
+    """Map rows that destructive apply paths must keep to exact reasons."""
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    protected = {}
+    for row in rows:
+        row_id = str(row.get("id"))
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            protected[row_id] = "payload-missing"
+            continue
+        if payload.get("is_canary") is True:
+            protected[row_id] = "canary"
+            continue
+        timestamp_values = [payload.get(key) for key in ("created_at", "updated_at") if payload.get(key)]
+        if not timestamp_values:
+            protected[row_id] = "timestamp-missing"
+            continue
+        try:
+            newest_timestamp = max(_parse_payload_timestamp(value) for value in timestamp_values)
+        except (TypeError, ValueError, OverflowError):
+            protected[row_id] = "timestamp-invalid"
+            continue
+        age_h = (now_utc - newest_timestamp).total_seconds() / 3600
+        if age_h < GUARD_MIN_AGE_H:
+            protected[row_id] = f"age<{GUARD_MIN_AGE_H:g}h"
+            continue
+        if payload.get("sensitive") is True:
+            protected[row_id] = "sensitive"
+            continue
+        scope = payload.get(SCOPE_KEY)
+        if not isinstance(scope, str) or not scope.strip():
+            protected[row_id] = "scope-missing"
+            continue
+        text = row.get("text")
+        marker = _DOCTRINE_MARKER.search(text if isinstance(text, str) else "")
+        if marker:
+            protected[row_id] = f"doctrine:{marker.group(0)}"
+    return protected
+
+
+def guard_consolidate_rows(rows, *, now=None, log_fn=print):
+    """Keep a complete merge group when any member is protected."""
+    protected = guard_protected_ids(rows, now=now)
+    for row_id, reason in protected.items():
+        log_fn(f"GUARD-KEEP id={row_id} reason={reason} verdict=merge")
+    if protected:
+        return [], protected
+    return list(rows), protected
+
+
+def guard_merge_verdict(rows, verdict, now=None, log_fn=print, *, protected=None):
+    """Return a safe copy of a merge/retire verdict without changing its evidence.
+
+    ``guard_protected_ids`` remains the only policy decision. Merge verdicts
+    are all-or-nothing: one protected cluster member keeps the entire group.
+    Direct retire verdicts may retain only their unprotected requested IDs.
+    """
+    guarded = deepcopy(verdict) if isinstance(verdict, dict) else {}
+    protected = dict(protected) if protected is not None else guard_protected_ids(rows, now=now)
+    action = guarded.get("action")
+    for row_id, reason in protected.items():
+        log_fn(f"GUARD-KEEP id={row_id} reason={reason} verdict={action or 'unknown'}")
+
+    if action == "retire":
+        retire_ids = guarded.get("retire_ids")
+        guarded["retire_ids"] = (
+            [point_id for point_id in retire_ids if str(point_id) not in protected]
+            if isinstance(retire_ids, list)
+            else []
+        )
+        return guarded
+
+    if action == "merge" and not protected:
+        if not isinstance(guarded.get("retire_ids"), list):
+            guarded["retire_ids"] = []
+        return guarded
+
+    guarded["action"] = "keep"
+    guarded["retire_ids"] = []
+    return guarded
+
+
+def ensure_scope_metadata(metadata):
+    """Return write metadata with one non-empty, default-closed scope key."""
+    result = dict(metadata) if isinstance(metadata, dict) else {}
+    scope = result.get(SCOPE_KEY)
+    if not isinstance(scope, str) or not scope.strip():
+        result[SCOPE_KEY] = DEFAULT_SCOPE
+    else:
+        result[SCOPE_KEY] = scope.strip()
+    return result
+
+EXTRACTION_MODEL = str(CONFIG.values["BORG_EXTRACTION_MODEL"])
 SAFETY = importlib.machinery.SourceFileLoader(
     "mem0_dream_safety", str(BIN / "mem0_dream_safety.py")
+).load_module()
+CONTRACT = importlib.machinery.SourceFileLoader(
+    "mem0_runtime_contract", str(BIN / "mem0_runtime_contract.py")
 ).load_module()
 # 2026-08-21 21:0x MDT (director, measured): extraction MUST run on the model
 # that is already RESIDENT. Wave 2A moved it to qwen3.8:27b (GGUF) for schema
@@ -66,8 +243,9 @@ SAFETY = importlib.machinery.SourceFileLoader(
 # llama3.1:8b generate did not return in 420s, and adds went 25s -> 595s+
 # (director canary timed out at 600s), silently starving session captures
 # (~120s hook timeouts). MLX ignores format-grammar, so linked_memory_ids is
-# best-effort on live adds; the supersession GATE below still guards any
-# links that do appear. Grammar-enforced linking returns when extraction gets
+# best-effort on live adds; links that do appear are evidence-only proposals.
+# The supersession GATE below remains available for future reviewed use.
+# Grammar-enforced linking returns when extraction gets
 # dedicated inference (fleet tunnel or embed/extract-only instance) — parked
 # follow-up in the program memory.
 
@@ -99,7 +277,7 @@ _QUERY_STATE = threading.local()
 # Models with the Ollama "thinking" capability. mem0's OllamaLLM never passes
 # think=False, so thinking tokens intermittently corrupt the JSON extraction
 # and mem0 drops the memory silently (observed 2026-08-19). Force it off.
-THINKING_MODELS = {"qwen3.8:27b-mlx", "qwen3.8:27b"}  # GGUF tag added 2026-08-21: it was missing, so the 14:29 GGUF extraction swap ran with UNBOUNDED THINKING on every add — a large part of the 25s->595s regression.
+THINKING_MODELS = {EXTRACTION_MODEL, str(CONFIG.values["BORG_EXTRACTION_MODEL"]), "qwen3.8:27b-mlx", "qwen3.8:27b"}  # legacy names retained only for legacy installs.
 
 
 def _patch_ollama_think():
@@ -177,7 +355,50 @@ def _patch_mem0_runtime():
     from mem0 import Memory
     from mem0.vector_stores.qdrant import Qdrant
 
-    if not getattr(Qdrant.search, "_studio0_live_filter", False):
+    if not getattr(Memory.add, "_borg_runtime_contract", False):
+        original_memory_add = Memory.add
+
+        def contracted_add(self, messages, *args, **kwargs):
+            metadata = dict(kwargs.get("metadata") or {})
+            agent_id = kwargs.get("agent_id")
+            run_id = kwargs.get("run_id")
+            default_source = "agent:" + str(agent_id) if agent_id else ("run:" + str(run_id) if run_id else "mem0-runtime")
+            infer = kwargs.get("infer", True)
+            if not isinstance(infer, bool):
+                raise ValueError("infer:invalid")
+            model = getattr(getattr(self.llm, "config", None), "model", None) if infer else None
+            extractor_id = CONTRACT.extractor_identity(model) if infer else None
+            kwargs["metadata"] = CONTRACT.normalize_metadata(
+                metadata, default_scope=DEFAULT_SCOPE, default_source=default_source,
+                infer=infer, extractor_model_id=extractor_id)
+            return original_memory_add(self, messages, *args, **kwargs)
+
+        contracted_add._borg_runtime_contract = True
+        Memory.add = contracted_add
+
+    if not getattr(Qdrant.insert, "_borg_vector_contract", False):
+        original_insert, original_update = Qdrant.insert, Qdrant.update
+
+        def checked_insert(self, vectors, payloads=None, ids=None):
+            if self.collection_name == COLLECTION:
+                if payloads is None or len(vectors) != len(payloads):
+                    raise ValueError("payloads:cardinality-mismatch")
+                for vector, payload in zip(vectors, payloads):
+                    CONTRACT.validate_vector(vector)
+                    ok, problems = CONTRACT.validate_new_write(payload)
+                    if not ok:
+                        raise ValueError(";".join(problems))
+            return original_insert(self, vectors, payloads=payloads, ids=ids)
+
+        def checked_update(self, vector_id, vector=None, payload=None):
+            if self.collection_name == COLLECTION and vector is not None:
+                CONTRACT.validate_vector(vector)
+            return original_update(self, vector_id, vector=vector, payload=payload)
+
+        checked_insert._borg_vector_contract = True
+        Qdrant.insert, Qdrant.update = checked_insert, checked_update
+
+    if not getattr(Qdrant.search, "_borg_live_filter", False):
         original_search = Qdrant.search
         original_list = Qdrant.list
 
@@ -191,15 +412,16 @@ def _patch_mem0_runtime():
         def list_rows(self, filters=None, top_k=100):
             return original_list(self, filters=live_filters(filters), top_k=top_k)
 
-        search._studio0_live_filter = True
-        list_rows._studio0_live_filter = True
+        search._borg_live_filter = True
+        list_rows._borg_live_filter = True
         Qdrant.search = search
         Qdrant.list = list_rows
 
-    if not getattr(Memory._add_to_vector_store, "_studio0_supersession", False):
+    if not getattr(Memory._add_to_vector_store, "_borg_supersession", False):
         original_add = Memory._add_to_vector_store
 
         def add_to_vector_store(self, messages, metadata, filters, infer, prompt=None):
+            metadata = ensure_scope_metadata(metadata)
             if not infer:
                 return original_add(self, messages, metadata, filters, infer, prompt=prompt)
             previous = getattr(_LINK_STATE, "current", None)
@@ -212,14 +434,33 @@ def _patch_mem0_runtime():
             finally:
                 _LINK_STATE.current = previous
 
-        add_to_vector_store._studio0_supersession = True
+        add_to_vector_store._borg_supersession = True
         Memory._add_to_vector_store = add_to_vector_store
 
 
+def _record_supersession_skip(new_id, old_id, reason):
+    """Record link review evidence without copying either row's text."""
+    try:
+        target = BASE / "data" / "supersession-skips.jsonl"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a") as handle:
+            handle.write(json.dumps({
+                "ts": now_mdt(),
+                "new_id": str(new_id),
+                "old_id": str(old_id),
+                "reason": reason,
+            }, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        pass
+
+
 def _apply_supersession_links(memory, added_rows, state):
-    """Persist grammar-emitted links and tombstone the linked old rows."""
+    """Persist grammar-emitted links as evidence-only review proposals."""
     if not isinstance(added_rows, list):
         return
+    state = state if isinstance(state, dict) else {}
     candidates = state.get("candidates") or []
     extracted = state.get("extracted") or []
     by_text = {}
@@ -253,35 +494,56 @@ def _apply_supersession_links(memory, added_rows, state):
             wait=True,
         )
         for old_id in resolved:
-            # GATE (added 2026-08-21 after a measured false supersession —
-            # w3c receipt): linked_memory_ids is a REQUIRED array over top-k
-            # nearest candidates, so the model fills it even for unrelated
-            # rows. Retire only when the pair is actually about the same
-            # thing (cosine >= 0.75) and the old row is not newer than the
-            # new one. On gate failure keep the recorded link, skip the
-            # tombstone, and log the skip for review.
-            ok, why = _supersession_gate(q, collection, new_id, old_id)
-            if not ok:
-                try:
-                    import json as _json
-                    with open(BASE / "data/supersession-skips.jsonl", "a") as fh:
-                        fh.write(_json.dumps({
-                            "ts": now_mdt(), "new_id": new_id, "old_id": old_id,
-                            "reason": why}) + "\n")
-                except Exception:
-                    pass
+            _record_supersession_skip(new_id, old_id, "proposal-only")
+
+
+def _supersession_scope(payload):
+    if not isinstance(payload, dict):
+        return None, "scope-missing"
+    scope = payload.get(SCOPE_KEY)
+    if not isinstance(scope, str) or not scope.strip():
+        return None, "scope-missing"
+    return scope.strip(), None
+
+
+def _supersession_date(payload):
+    if not isinstance(payload, dict):
+        return None, "date-missing"
+    present = False
+    for key in ("added_mdt", "created_at", "updated_at", "thread_date"):
+        value = payload.get(key)
+        if value in (None, ""):
+            continue
+        present = True
+        candidates = [value]
+        if isinstance(value, str):
+            candidates.extend((value.replace(" MDT", "-06:00"), value.replace(" MST", "-07:00")))
+        for candidate in candidates:
+            try:
+                return _parse_payload_timestamp(candidate), None
+            except (TypeError, ValueError, OverflowError):
                 continue
-            tombstone_point(
-                q,
-                old_id,
-                retired_by="linked-memory-extraction",
-                reason=f"superseded by grammar-linked memory {new_id}",
-                superseded_by=new_id,
-                collection=collection,
-            )
+        return None, "date-invalid"
+    return None, "date-invalid" if present else "date-missing"
 
 
-def _supersession_gate(q, collection, new_id, old_id):
+def _supersession_vector(value):
+    if value is None or (isinstance(value, (list, tuple)) and not value):
+        return None, "vector-missing"
+    if isinstance(value, dict):
+        return None, "vector-invalid"
+    if not isinstance(value, (list, tuple)) or not value:
+        return None, "vector-invalid"
+    try:
+        vector = [float(component) for component in value]
+    except (TypeError, ValueError):
+        return None, "vector-invalid"
+    if not all(math.isfinite(component) for component in vector):
+        return None, "vector-invalid"
+    return vector, None
+
+
+def _supersession_gate(q, collection, new_id, old_id, *, now=None):
     """(ok, reason). Conservative: any missing evidence fails the gate."""
     try:
         pts = q.retrieve(collection_name=collection, ids=[new_id, old_id],
@@ -290,27 +552,52 @@ def _supersession_gate(q, collection, new_id, old_id):
         new_p, old_p = by_id.get(new_id), by_id.get(old_id)
         if new_p is None or old_p is None:
             return False, "point-missing"
-        nv, ov = new_p.vector, old_p.vector
-        if not nv or not ov:
-            return False, "vector-missing"
+        nv, new_vector_reason = _supersession_vector(getattr(new_p, "vector", None))
+        if new_vector_reason:
+            return False, new_vector_reason
+        ov, old_vector_reason = _supersession_vector(getattr(old_p, "vector", None))
+        if old_vector_reason:
+            return False, old_vector_reason
+        if len(nv) != len(ov):
+            return False, "vector-invalid"
+        new_payload = getattr(new_p, "payload", None)
+        old_payload = getattr(old_p, "payload", None)
+        new_text = _memory_text_from_payload(new_payload)
+        old_text = _memory_text_from_payload(old_payload)
+        if not isinstance(new_text, str) or not new_text.strip():
+            return False, "new-text-missing"
+        if not isinstance(old_text, str) or not old_text.strip():
+            return False, "old-text-missing"
+        new_scope, new_scope_reason = _supersession_scope(new_payload)
+        if new_scope_reason:
+            return False, "new-" + new_scope_reason
+        old_scope, old_scope_reason = _supersession_scope(old_payload)
+        if old_scope_reason:
+            return False, "old-" + old_scope_reason
+        if new_scope != old_scope:
+            return False, "scope-mismatch"
+        if isinstance(old_payload, dict) and old_payload.get("status") in RETIRED_STATUSES:
+            return False, "old-retired"
+        new_date, new_date_reason = _supersession_date(new_payload)
+        if new_date_reason:
+            return False, new_date_reason
+        old_date, old_date_reason = _supersession_date(old_payload)
+        if old_date_reason:
+            return False, old_date_reason
+        old_guarded = guard_protected_ids(
+            [{"id": str(old_id), "text": old_text, "payload": old_payload}],
+            now=now,
+        )
+        if old_guarded:
+            return False, f"protected:{old_guarded[str(old_id)]}"
         dot = sum(a * b for a, b in zip(nv, ov))
         nn = sum(a * a for a in nv) ** 0.5
         no = sum(a * a for a in ov) ** 0.5
         cos = dot / (nn * no) if nn and no else 0.0
         if cos < 0.75:
             return False, f"similarity {cos:.3f} < 0.75"
-        def _date(p):
-            pay = p.payload or {}
-            for k in ("added_mdt", "created_at", "updated_at", "thread_date"):
-                v = str(pay.get(k) or "")[:10]
-                if len(v) == 10 and v[4] == "-":
-                    return v
-            return None
-        nd, od = _date(new_p), _date(old_p)
-        if nd is None or od is None:
-            return False, "date-missing"
-        if od > nd:
-            return False, f"old row newer ({od} > {nd})"
+        if old_date > new_date:
+            return False, f"old row newer ({old_date.date()} > {new_date.date()})"
         return True, "ok"
     except Exception as exc:  # never let the gate crash an add
         return False, f"gate-error {type(exc).__name__}"
@@ -330,9 +617,9 @@ def build_config(model_key: str) -> dict:
         "embedder": {
             "provider": "ollama",
             "config": {
-                "model": EMBED_MODEL,
+                "model": EMBED_MODEL_ID,
                 "embedding_dims": EMBED_DIMS,
-                "ollama_base_url": OLLAMA_URL,
+                "ollama_base_url": EMBED_OLLAMA_URL,
             },
         },
         "vector_store": {
@@ -341,17 +628,18 @@ def build_config(model_key: str) -> dict:
                 # Server mode (mem0-qdrant Docker container, 127.0.0.1 only).
                 # Embedded/path mode is single-process and would deadlock the
                 # MCP server, CLI, and hooks against each other.
-                "collection_name": "studio0",
-                "host": "127.0.0.1",
-                "port": 6333,
+                "collection_name": COLLECTION,
+                "url": str(CONFIG.values["BORG_QDRANT_URL"]),
                 "embedding_model_dims": EMBED_DIMS,
             },
         },
-        "history_db_path": str(DATA / "history.db"),
+        "history_db_path": str(CONFIG.values["BORG_HISTORY_DB"]),
     }
 
 
 def get_memory(model_key: str):
+    if EMBED_MODEL != CONTRACT.EMBED_MODEL or EMBED_DIMS != CONTRACT.EMBED_DIMS:
+        raise ValueError("configured embedding space does not match runtime contract")
     _patch_ollama_think()
     _patch_mem0_runtime()
     from mem0 import Memory
@@ -420,7 +708,7 @@ def cmd_add(args):
             user_id=args.user,
             agent_id=args.agent,
             run_id=args.run,
-            metadata={"added_mdt": now_mdt(), "source": "mem0ctl"},
+            metadata={"added_mdt": now_mdt(), "source": "mem0ctl", "scope": DEFAULT_SCOPE},
             infer=not args.raw,
         )
 
@@ -451,8 +739,8 @@ def cmd_search(args):
         must = [FieldCondition(key="user_id", match=MatchValue(value=args.user))]
         if args.agent:
             must.append(FieldCondition(key="agent_id", match=MatchValue(value=args.agent)))
-        points = QdrantClient(host="127.0.0.1", port=6333, timeout=120).query_points(
-            collection_name="studio0",
+        points = qdrant_client(timeout=120).query_points(
+            collection_name=COLLECTION,
             query=vector,
             query_filter=Filter(
                 must=must,
@@ -500,8 +788,8 @@ def cmd_list(args):
             FieldCondition(key="is_canary", match=MatchValue(value=True)),
         ],
     )
-    points, _ = QdrantClient(host="127.0.0.1", port=6333, timeout=120).scroll(
-        "studio0",
+    points, _ = qdrant_client(timeout=120).scroll(
+        COLLECTION,
         scroll_filter=query_filter,
         limit=args.limit,
         with_payload=True,
@@ -523,7 +811,7 @@ def cmd_review_decayed(args):
     from qdrant_client import QdrantClient
     from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-    q = QdrantClient(host="127.0.0.1", port=6333, timeout=120)
+    q = qdrant_client(timeout=120)
     filt = Filter(must=[FieldCondition(key="status", match=MatchValue(value=DECAY_STATUS))])
     rows = []
     for point in scroll_all(q, with_vectors=False, scroll_filter=filt):
@@ -554,16 +842,16 @@ def _qdrant_stats(user: str):
     from qdrant_client import QdrantClient
     from qdrant_client.models import FieldCondition, Filter, MatchValue
 
-    q = QdrantClient(host="127.0.0.1", port=6333, timeout=120)
+    q = qdrant_client(timeout=120)
     count_filter = None
-    schema = getattr(q.get_collection("studio0"), "payload_schema", None) or {}
+    schema = getattr(q.get_collection(COLLECTION), "payload_schema", None) or {}
     if "user_id" in schema:
         count_filter = Filter(must=[FieldCondition(key="user_id", match=MatchValue(value=user))])
-    n = q.count("studio0", count_filter=count_filter, exact=True).count
+    n = q.count(COLLECTION, count_filter=count_filter, exact=True).count
     agents = {}
     try:
         facet = q.facet(
-            "studio0",
+            COLLECTION,
             key="agent_id",
             facet_filter=count_filter,
             limit=200,
@@ -588,8 +876,17 @@ def cmd_stats(args):
 
 
 SEED_RUN_ID = "corpus-seed"
-CLAUDE_MEM_DIR = Path.home() / ".claude/projects/-Users-YOURUSER/memory"
-CODEX_SUMMARY = Path.home() / ".codex/memories/memory_summary.md"
+
+
+def _configured_source(name: str) -> Path | None:
+    raw = os.environ.get(name, "").strip()
+    return Path(raw).expanduser().resolve() if raw else None
+
+
+CLAUDE_MEM_DIR = _configured_source("BORG_CLAUDE_MEMORY_DIR")
+CODEX_SUMMARY = _configured_source("BORG_CODEX_MEMORY_SUMMARY")
+CODEX_REGISTRY = _configured_source("BORG_CODEX_MEMORY_REGISTRY")
+CODEX_ROLLOUTS = _configured_source("BORG_CODEX_ROLLOUT_SUMMARIES")
 
 
 def _frontmatter_field(text: str, field: str) -> str:
@@ -601,7 +898,7 @@ def _frontmatter_field(text: str, field: str) -> str:
 
 def _seed_rows():
     """Yield (fact_text, metadata) for every corpus item to seed."""
-    for f in sorted(CLAUDE_MEM_DIR.glob("*.md")):
+    for f in sorted(CLAUDE_MEM_DIR.glob("*.md")) if CLAUDE_MEM_DIR else ():
         if f.name == "MEMORY.md":
             continue
         text = f.read_text(errors="ignore")
@@ -610,7 +907,7 @@ def _seed_rows():
         if not desc:
             continue
         yield (f"{name}: {desc} — full note: {f}", {"source": str(f), "kind": "claude-memory"})
-    if CODEX_SUMMARY.exists():
+    if CODEX_SUMMARY and CODEX_SUMMARY.exists():
         section = None
         for line in CODEX_SUMMARY.read_text(errors="ignore").splitlines():
             if line.startswith("## "):
@@ -620,15 +917,12 @@ def _seed_rows():
             if section and line.strip().startswith("- "):
                 bullet = line.strip()[2:].strip()
                 if len(bullet) > 20:
-                    prefix = "James preference" if section == "User preferences" else "Operating tip"
+                    prefix = "Owner preference" if section == "User preferences" else "Operating tip"
                     yield (f"{prefix}: {bullet}", {"source": str(CODEX_SUMMARY), "kind": "codex-summary"})
 
-    # Codex registry: one row per task group (title + scope line).
-    # Source policy (owner ruling 2026-08-19): seed the CURRENT Claude corpus and
-    # the Codex corpus ONLY. NEVER seed OpenClaw workspace notes (antiquated).
-    # Grok bridge and ~/.claude/imported-memory (MacBook-era snapshot) stay out.
-    reg = Path.home() / ".codex/memories/MEMORY.md"
-    if reg.exists():
+    # Optional sources are never inferred from a provider's global home.
+    reg = CODEX_REGISTRY
+    if reg and reg.exists():
         title, scope = None, ""
         for line in reg.read_text(errors="ignore").splitlines():
             if line.startswith("# Task Group:"):
@@ -642,8 +936,8 @@ def _seed_rows():
             yield (f"Codex task group — {title}: {scope} — registry: {reg}", {"source": str(reg), "kind": "codex-registry"})
 
     # Codex rollout summaries: one row per session summary file.
-    ro_dir = Path.home() / ".codex/memories/rollout_summaries"
-    if ro_dir.exists():
+    ro_dir = CODEX_ROLLOUTS
+    if ro_dir and ro_dir.exists():
         for f in sorted(ro_dir.glob("*.md")):
             title, date, context = "", "", ""
             for line in f.read_text(errors="ignore").splitlines():
@@ -665,6 +959,13 @@ def _seed_rows():
 
 
 def cmd_seed(args):
+    sources = [CLAUDE_MEM_DIR, CODEX_SUMMARY, CODEX_REGISTRY, CODEX_ROLLOUTS]
+    if not any(path and path.exists() for path in sources):
+        raise SystemExit(
+            "seed requires an explicit existing BORG_CLAUDE_MEMORY_DIR, "
+            "BORG_CODEX_MEMORY_SUMMARY, BORG_CODEX_MEMORY_REGISTRY, or "
+            "BORG_CODEX_ROLLOUT_SUMMARIES source"
+        )
     m = get_memory("llama")  # raw adds: embed-only, no LLM
     old = m.get_all(filters={"run_id": SEED_RUN_ID}, top_k=10000)
     old_rows = old.get("results", old) if isinstance(old, dict) else old
@@ -679,7 +980,7 @@ def cmd_seed(args):
             user_id=args.user,
             agent_id="seeder",
             run_id=SEED_RUN_ID,
-            metadata=meta,
+            metadata=ensure_scope_metadata(meta),
             infer=False,
         )
         n += 1
@@ -714,7 +1015,229 @@ def _merge_admitted_prompt(prompt):
     return resp["message"]["content"].strip()
 
 
-def scroll_all(q, collection="studio0", *, page=SCROLL_PAGE, with_vectors=True, with_payload=True, scroll_filter=None):
+# Ordered from the most structured forms to the general number form so that
+# dates, paths, issue refs, UUIDs, and fractions are never split into weaker
+# tokens.  Values are case-folded; multiplicity is retained by Counter.
+_SPECIFIC_TOKEN_RE = re.compile(
+    r"(?:"
+    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})\b"
+    r"|\b\d{4}-\d{2}-\d{2}\b"
+    r"|(?<!\w)(?:~|/)[^\s,;:()\[\]{}<>\"']+"
+    r"|\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b"
+    r"|(?<!\w)#\d+\b"
+    r"|\b(?:localhost|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(?::\d+)?\b"
+    r"|\b\d+\/\d+\b"
+    r"|\b\d+(?:\.\d+)?%?\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def normalize_consolidate_text(text):
+    """Normalize only the prose surface used for exact duplicate detection."""
+    return re.sub(r"\s+", " ", str(text or "")).strip().rstrip(".,;:!?\u3002").casefold()
+
+
+def specific_tokens(text):
+    """Return the case-folded specific-token multiset as a sorted list."""
+    values = []
+    for match in _SPECIFIC_TOKEN_RE.finditer(str(text or "")):
+        token = match.group(0).rstrip(".,;:!?\u3002")
+        values.append(token.casefold())
+    return sorted(values)
+
+
+def _consolidate_created_at(row):
+    payload = row.get("payload") or {}
+    value = payload.get("created_at") or row.get("created_at") or row.get("date")
+    try:
+        return _parse_payload_timestamp(value)
+    except (TypeError, ValueError, OverflowError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def classify_consolidate_group(rows, *, allow_llm_merge=False):
+    """Classify an admitted, guard-filtered group without rewriting facts."""
+    rows = list(rows)
+    if len(rows) < 2:
+        return {"mode": "keep-guarded", "diff": [], "merged_text": None}
+    normalized = [normalize_consolidate_text(row.get("text", "")) for row in rows]
+    tokens = [specific_tokens(row.get("text", "")) for row in rows]
+    if len(set(normalized)) == 1:
+        kept = max(rows, key=lambda row: (len(str(row.get("text", ""))), _consolidate_created_at(row)))
+        return {"mode": "verbatim", "diff": [], "merged_text": kept.get("text", "")}
+    if len(set(tuple(value) for value in tokens)) != 1:
+        return {"mode": "keep-specifics", "diff": sorted({token for values in tokens for token in values}), "merged_text": None}
+    return {"mode": "llm" if allow_llm_merge else "keep-wording", "diff": [], "merged_text": None}
+
+
+def _source_version(row):
+    if not isinstance(row, dict):
+        return False, None
+    payload = row.get("payload")
+    for source in (payload, row):
+        if not isinstance(source, dict):
+            continue
+        for key in ("source_version", "sourceVersion", "version", "revision"):
+            if key in source:
+                return True, deepcopy(source[key])
+    return False, None
+
+
+def _point_as_consolidate_row(point):
+    payload = getattr(point, "payload", None)
+    text = _memory_text_from_payload(payload)
+    return {
+        "id": str(getattr(point, "id", "")),
+        "text": text,
+        "payload": deepcopy(payload) if isinstance(payload, dict) else payload,
+    }
+
+
+def authorize_consolidate_group(q, initial_rows, *, collection=COLLECTION, now=None, log_fn=print):
+    """Re-read and reclassify a complete group immediately before any add.
+
+    The returned authorization is deliberately pure with respect to storage:
+    retrieval is the only client operation. A caller must not add a
+    replacement unless ``authorized`` is true and the decision is verbatim.
+    """
+    initial_rows = list(initial_rows or [])
+    ids = [str(row.get("id")) for row in initial_rows if isinstance(row, dict)]
+    if len(ids) != len(initial_rows) or any(not point_id or point_id == "None" for point_id in ids):
+        return {"authorized": False, "reason": "id-missing", "rows": [], "guarded": {}}
+    try:
+        points = q.retrieve(
+            collection_name=collection,
+            ids=ids,
+            with_payload=True,
+            with_vectors=False,
+        )
+    except Exception as exc:
+        return {
+            "authorized": False,
+            "reason": f"retrieve-error:{type(exc).__name__}",
+            "rows": [],
+            "guarded": {},
+        }
+    by_id = {str(getattr(point, "id", "")): point for point in (points or [])}
+    current_rows = []
+    for initial in initial_rows:
+        point_id = str(initial["id"])
+        point = by_id.get(point_id)
+        if point is None:
+            return {"authorized": False, "reason": f"missing:{point_id}", "rows": current_rows, "guarded": {}}
+        current = _point_as_consolidate_row(point)
+        current_payload = current.get("payload")
+        if not isinstance(current_payload, dict):
+            return {
+                "authorized": False,
+                "reason": f"incomplete-payload:{point_id}",
+                "rows": current_rows,
+                "guarded": {},
+            }
+        if not isinstance(current.get("text"), str) or not current["text"].strip():
+            return {
+                "authorized": False,
+                "reason": f"incomplete-text:{point_id}",
+                "rows": current_rows,
+                "guarded": {},
+            }
+        if current["text"] != initial.get("text"):
+            return {
+                "authorized": False,
+                "reason": f"changed-text:{point_id}",
+                "rows": current_rows,
+                "guarded": {},
+            }
+        if current_payload.get("status") in RETIRED_STATUSES:
+            return {
+                "authorized": False,
+                "reason": f"retired:{point_id}",
+                "rows": current_rows,
+                "guarded": {},
+            }
+        initial_payload = initial.get("payload")
+        if not isinstance(initial_payload, dict):
+            return {
+                "authorized": False,
+                "reason": f"incomplete-initial-payload:{point_id}",
+                "rows": current_rows,
+                "guarded": {},
+            }
+        initial_scope = initial_payload.get(SCOPE_KEY)
+        current_scope = current_payload.get(SCOPE_KEY)
+        if initial_scope != current_scope:
+            return {
+                "authorized": False,
+                "reason": f"changed-scope:{point_id}",
+                "rows": current_rows,
+                "guarded": {},
+            }
+        initial_has_version, initial_version = _source_version(initial)
+        current_has_version, current_version = _source_version(current)
+        if initial_has_version != current_has_version or (
+            initial_has_version and initial_version != current_version
+        ):
+            return {
+                "authorized": False,
+                "reason": f"source-version-changed:{point_id}",
+                "rows": current_rows,
+                "guarded": {},
+            }
+        current_rows.append(current)
+
+    eligible, guarded = guard_consolidate_rows(current_rows, now=now, log_fn=log_fn)
+    if guarded:
+        return {
+            "authorized": False,
+            "reason": "protected",
+            "rows": current_rows,
+            "guarded": guarded,
+        }
+    decision = classify_consolidate_group(eligible, allow_llm_merge=False)
+    if decision.get("mode") != "verbatim":
+        return {
+            "authorized": False,
+            "reason": f"quality:{decision.get('mode', 'unknown')}",
+            "rows": current_rows,
+            "guarded": {},
+            "decision": decision,
+        }
+    return {
+        "authorized": True,
+        "reason": "ok",
+        "rows": current_rows,
+        "guarded": {},
+        "decision": decision,
+    }
+
+
+def apply_consolidate_group(memory, q, initial_rows, *, collection=COLLECTION, now=None, log_fn=print):
+    """Authorize a standalone replacement without exposing an unsafe pending row."""
+    result = authorize_consolidate_group(
+        q,
+        initial_rows,
+        collection=collection,
+        now=now,
+        log_fn=log_fn,
+    )
+    if not result.get("authorized"):
+        return result
+    if CONSOLIDATE_APPLY_HELD:
+        result["authorized"] = False
+        result["reason"] = CONSOLIDATE_APPLY_HOLD_REASON
+        return result
+    # This branch is intentionally unreachable in the candidate. The
+    # integration lane must first provide a recall-proven pending status and a
+    # final readback protocol before replacement add/retire operations exist.
+    return {
+        **result,
+        "authorized": False,
+        "reason": CONSOLIDATE_APPLY_HOLD_REASON,
+    }
+
+
+def scroll_all(q, collection=COLLECTION, *, page=SCROLL_PAGE, with_vectors=True, with_payload=True, scroll_filter=None):
     """Yield every point in the collection, chaining qdrant's pagination offset.
 
     `q.scroll(collection, limit=N)` returns `(points, next_page_offset)` and stops
@@ -887,43 +1410,188 @@ def cluster_seeded(V, I, J, W, lo, max_size=MAX_ROWS, anchor_order=None):
     return cluster_star_anchored(V, I, J, W, lo, anchor_order=anchor_order, max_size=max_size)
 
 
-def append_retired(q, point_id, *, retired_by, reason, superseded_by=None, fallback_text="", with_vector=False,
-                   collection="studio0", action="tombstone", status_after=TOMBSTONE_STATUS):
-    """Append one complete point and planned action to the undo ledger first.
+UNDO_LEDGER_SCHEMA = "tombstone-undo-v1"
+UNDO_LEDGER_SCHEMA_VERSION = 1
 
-    data/retired-log.jsonl is the recovery path for every hard delete in this
-    system: one JSON object per line carrying the id, the FULL payload, the full
-    text, who retired it and why. Before this existed, mem0-dream:revise logged
-    `r['text'][:120]` and then hard-deleted the row, so a revise-caused loss was
-    unrecoverable (qdrant has no undelete).
 
-    Raises on write failure by design — a caller must never delete a row it
-    could not log. The vector is omitted by default: the text is in the record,
-    so re-embedding reconstructs it.
-    """
-    payload, vector = None, None
+def canonical_json(value):
+    """Serialize JSON values in one stable form for local integrity hashes."""
     try:
-        got = q.retrieve(collection, ids=[point_id], with_payload=True, with_vectors=with_vector)
-        if got:
-            payload = got[0].payload
-            if with_vector:
-                vector = got[0].vector
-    except Exception as e:  # retrieval is best-effort; the ledger line is not
-        payload = {"_retrieve_error": f"{type(e).__name__}: {e}"}
-    text = (payload or {}).get("data") or (payload or {}).get("memory") or fallback_text
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("value is not canonical JSON") from exc
+
+
+def canonical_json_sha256(value):
+    """Return the SHA256 of the stable JSON representation of ``value``."""
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _apply_flat_payload_mutation(payload, mutation):
+    """Model Qdrant set_payload's flat null-delete and replacement semantics."""
+    postimage = deepcopy(payload)
+    for key, value in mutation.items():
+        if value is None:
+            postimage.pop(key, None)
+        else:
+            postimage[key] = deepcopy(value)
+    return postimage
+
+
+def _undo_operation_integrity_sha256(*, collection, point_id, operation_id,
+                                     original_payload_sha256,
+                                     planned_post_tombstone_payload_sha256):
+    """Bind target and both payload identities to one recomputable operation hash."""
+    return canonical_json_sha256({
+        "collection": collection,
+        "point_id": str(point_id),
+        "operation_id": operation_id,
+        "original_payload_sha256": original_payload_sha256,
+        "planned_post_tombstone_payload_sha256": planned_post_tombstone_payload_sha256,
+    })
+
+
+def _retrieve_undo_point(q, collection, point_id, *, phase, allow_missing=False,
+                         with_vector=False):
+    """Read one native point without exposing its payload in failure text."""
+    try:
+        found = q.retrieve(
+            collection,
+            ids=[point_id],
+            with_payload=True,
+            with_vectors=with_vector,
+        )
+    except Exception as exc:
+        raise ValueError(f"unable to retrieve point during {phase} {point_id}") from exc
+    if not found:
+        if allow_missing:
+            return None, None
+        raise ValueError(f"point missing during {phase}: {point_id}")
+    point = found[0]
+    returned_id = getattr(point, "id", None)
+    if returned_id not in (None, "") and str(returned_id) != str(point_id):
+        raise ValueError(f"retrieved point ID mismatch during {phase}: {point_id}")
+    return point, getattr(point, "payload", None)
+
+
+def _require_complete_undo_payload(payload, point_id):
+    """Return a payload safe to use as the source of truth for restoration.
+
+    A complete undo payload is a mapping with the original memory text in the
+    same field Qdrant returned (``data`` or the legacy ``memory`` key). A
+    retrieval-error marker, an empty mapping, or a textless mapping is only a
+    stub and cannot support a lossless restore.
+    """
+    if not isinstance(payload, dict) or not payload:
+        raise ValueError(f"complete ledger payload missing for {point_id}")
+    if "_retrieve_error" in payload:
+        raise ValueError(f"retrieval failed for {point_id}; refusing incomplete ledger payload")
+    text = payload.get("data") or payload.get("memory")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(f"complete ledger payload missing memory text for {point_id}")
+    return payload
+
+
+def append_retired(q, point_id, *, retired_by, reason, superseded_by=None, fallback_text="", with_vector=False,
+                   collection=COLLECTION, action="tombstone", status_after=TOMBSTONE_STATUS,
+                   expected_payload=None, mutation_patch=None):
+    """Append one complete point and, when supplied, its bound postimage first.
+
+    ``expected_payload`` and ``mutation_patch`` are optional so decay and older
+    callers retain their keyword contract.  Only callers that provide both an
+    exact expected source and a complete tombstone patch receive a bound record;
+    all other records are explicitly unbound and cannot be auto-restored.
+    """
+    point, fresh_payload = _retrieve_undo_point(
+        q,
+        collection,
+        point_id,
+        phase="undo-ledger",
+        allow_missing=False,
+        with_vector=with_vector,
+    )
+    payload = _require_complete_undo_payload(fresh_payload, point_id)
+
+    if expected_payload is not None:
+        expected = _require_complete_undo_payload(expected_payload, point_id)
+        if canonical_json_sha256(payload) != canonical_json_sha256(expected):
+            raise ValueError(f"undo source changed before ledger write for {point_id}")
+
+    if mutation_patch is not None and not isinstance(mutation_patch, dict):
+        raise ValueError(f"undo mutation patch malformed for {point_id}")
+
+    required_patch_keys = {
+        "status",
+        "retired_at",
+        "retire_reason",
+        "retired_by",
+        "superseded_by",
+    }
+    bound = (
+        action == "tombstone"
+        and expected_payload is not None
+        and isinstance(mutation_patch, dict)
+        and required_patch_keys.issubset(mutation_patch)
+    )
+    mutation = deepcopy(mutation_patch) if bound else None
+    original_payload_sha256 = None
+    planned_post_tombstone_payload_sha256 = None
+    operation_integrity_sha256 = None
+    if bound:
+        if mutation["status"] != status_after:
+            raise ValueError(f"undo status mismatch for {point_id}")
+        if mutation["retire_reason"] != reason:
+            raise ValueError(f"undo reason mismatch for {point_id}")
+        if mutation["retired_by"] != retired_by:
+            raise ValueError(f"undo actor mismatch for {point_id}")
+        if mutation["superseded_by"] != superseded_by:
+            raise ValueError(f"undo supersession mismatch for {point_id}")
+        original_payload_sha256 = canonical_json_sha256(payload)
+        planned_payload = _apply_flat_payload_mutation(payload, mutation)
+        planned_post_tombstone_payload_sha256 = canonical_json_sha256(planned_payload)
+
+    operation_id = str(uuid.uuid4())
     rec = {
-        "retired_at": now_iso(),
+        "schema": UNDO_LEDGER_SCHEMA,
+        "schema_version": UNDO_LEDGER_SCHEMA_VERSION,
+        "binding": "bound" if bound else "unbound",
+        "collection": collection,
+        "point_id": str(point_id),
+        "operation_id": operation_id,
+        "retired_at": mutation["retired_at"] if bound else now_iso(),
         "action": action,
         "status_after": status_after,
         "id": str(point_id),
         "retired_by": retired_by,
         "reason": reason,
         "superseded_by": superseded_by,
-        "text": text,
-        "payload": payload,
+        "text": payload.get("data") or payload.get("memory"),
+        "payload": deepcopy(payload),
     }
-    if vector is not None:
-        rec["vector"] = vector
+    if bound:
+        operation_integrity_sha256 = _undo_operation_integrity_sha256(
+            collection=collection,
+            point_id=point_id,
+            operation_id=operation_id,
+            original_payload_sha256=original_payload_sha256,
+            planned_post_tombstone_payload_sha256=planned_post_tombstone_payload_sha256,
+        )
+        rec.update({
+            "original_payload_sha256": original_payload_sha256,
+            "planned_post_tombstone_payload_sha256": planned_post_tombstone_payload_sha256,
+            "operation_integrity_sha256": operation_integrity_sha256,
+            "mutation": mutation,
+        })
+    if with_vector:
+        vector = getattr(point, "vector", None)
+        if vector is not None:
+            rec["vector"] = vector
     RETIRED_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(RETIRED_LOG, "a") as f:
         f.write(json.dumps(rec, default=str, ensure_ascii=False) + "\n")
@@ -932,15 +1600,31 @@ def append_retired(q, point_id, *, retired_by, reason, superseded_by=None, fallb
 
 
 def tombstone_point(q, point_id, *, retired_by, reason, superseded_by=None,
-                    fallback_text="", collection="studio0"):
-    """Reversibly retire one point after its full pre-change payload is logged."""
-    found = q.retrieve(collection, ids=[point_id], with_payload=True, with_vectors=False)
-    if not found:
+                    fallback_text="", collection=COLLECTION):
+    """Reversibly retire one point after its exact bound preimage is logged."""
+    _point, found_payload = _retrieve_undo_point(
+        q,
+        collection,
+        point_id,
+        phase="tombstone",
+        allow_missing=True,
+        with_vector=False,
+    )
+    if _point is None:
         return False
-    current = found[0].payload or {}
+    current = _require_complete_undo_payload(found_payload, point_id)
     if current.get("status") in RETIRED_STATUSES:
         return False
     retired_at = now_iso()
+    mutation = {
+        "status": TOMBSTONE_STATUS,
+        "retired_at": retired_at,
+        "retire_reason": reason,
+        "retired_by": retired_by,
+        "superseded_by": superseded_by,
+    }
+    planned_payload = _apply_flat_payload_mutation(current, mutation)
+    planned_hash = canonical_json_sha256(planned_payload)
     append_retired(
         q,
         point_id,
@@ -948,29 +1632,220 @@ def tombstone_point(q, point_id, *, retired_by, reason, superseded_by=None,
         reason=reason,
         superseded_by=superseded_by,
         fallback_text=fallback_text,
+        expected_payload=current,
+        mutation_patch=mutation,
         collection=collection,
         action="tombstone",
         status_after=TOMBSTONE_STATUS,
     )
-    q.set_payload(
-        collection_name=collection,
-        payload={
-            "status": TOMBSTONE_STATUS,
-            "retired_at": retired_at,
-            "retire_reason": reason,
-            "retired_by": retired_by,
-            "superseded_by": superseded_by,
-        },
-        points=[point_id],
-        wait=True,
+    try:
+        q.set_payload(
+            collection_name=collection,
+            payload=deepcopy(mutation),
+            points=[point_id],
+            wait=True,
+        )
+    except Exception as exc:
+        try:
+            _readback_point, readback_payload = _retrieve_undo_point(
+                q,
+                collection,
+                point_id,
+                phase="tombstone readback",
+                allow_missing=False,
+                with_vector=False,
+            )
+            readback = _require_complete_undo_payload(readback_payload, point_id)
+            if canonical_json_sha256(readback) == planned_hash:
+                return True
+        except Exception as readback_exc:
+            raise ValueError(f"tombstone outcome unknown for {point_id}") from readback_exc
+        raise ValueError(f"tombstone outcome unknown for {point_id}") from exc
+    try:
+        _readback_point, readback_payload = _retrieve_undo_point(
+            q,
+            collection,
+            point_id,
+            phase="tombstone readback",
+            allow_missing=False,
+            with_vector=False,
+        )
+        readback = _require_complete_undo_payload(readback_payload, point_id)
+    except Exception as exc:
+        raise ValueError(f"tombstone readback failed for {point_id}") from exc
+    if canonical_json_sha256(readback) != planned_hash:
+        raise ValueError(f"tombstone readback mismatched for {point_id}")
+    return True
+
+
+def _require_bound_undo_record(ledger_record, *, collection):
+    """Validate the local ledger identity before reading or auditing a target."""
+    if not isinstance(ledger_record, dict) or ledger_record.get("id") in (None, ""):
+        raise ValueError("ledger point id missing")
+    point_id = str(ledger_record["id"])
+    if ledger_record.get("point_id") in (None, "") or str(ledger_record["point_id"]) != point_id:
+        raise ValueError(f"ledger point binding mismatch for {point_id}")
+    if ledger_record.get("collection") != collection:
+        raise ValueError(f"ledger collection binding mismatch for {point_id}")
+    if ledger_record.get("schema") != UNDO_LEDGER_SCHEMA:
+        raise ValueError(f"ledger schema unsupported for {point_id}")
+    if ledger_record.get("schema_version") != UNDO_LEDGER_SCHEMA_VERSION:
+        raise ValueError(f"ledger schema version unsupported for {point_id}")
+    if ledger_record.get("binding") != "bound":
+        raise ValueError(f"ledger record unbound for {point_id}")
+    operation_id = ledger_record.get("operation_id")
+    if not isinstance(operation_id, str) or not operation_id.strip():
+        raise ValueError(f"ledger operation binding missing for {point_id}")
+    original = _require_complete_undo_payload(ledger_record.get("payload"), point_id)
+    if original.get("is_canary") is True:
+        raise ValueError(f"refusing to restore canary {point_id}")
+    original_hash = ledger_record.get("original_payload_sha256")
+    planned_hash = ledger_record.get("planned_post_tombstone_payload_sha256")
+    sha_values = (original_hash, planned_hash, ledger_record.get("operation_integrity_sha256"))
+    if any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None for value in sha_values):
+        raise ValueError(f"ledger integrity hash malformed for {point_id}")
+    try:
+        computed_original_hash = canonical_json_sha256(original)
+    except ValueError as exc:
+        raise ValueError(f"ledger original payload is not canonical for {point_id}") from exc
+    if computed_original_hash != original_hash:
+        raise ValueError(f"ledger original payload hash mismatch for {point_id}")
+    mutation = ledger_record.get("mutation")
+    required_patch_keys = {
+        "status",
+        "retired_at",
+        "retire_reason",
+        "retired_by",
+        "superseded_by",
+    }
+    if ledger_record.get("action") != "tombstone" or not isinstance(mutation, dict) or not required_patch_keys.issubset(mutation):
+        raise ValueError(f"ledger planned postimage missing for {point_id}")
+    if mutation["status"] != TOMBSTONE_STATUS:
+        raise ValueError(f"ledger status is not a tombstone for {point_id}")
+    if ledger_record.get("status_after") != mutation["status"]:
+        raise ValueError(f"ledger status binding mismatch for {point_id}")
+    if ledger_record.get("retired_at") != mutation["retired_at"]:
+        raise ValueError(f"ledger timestamp binding mismatch for {point_id}")
+    if ledger_record.get("reason") != mutation["retire_reason"]:
+        raise ValueError(f"ledger reason binding mismatch for {point_id}")
+    if ledger_record.get("retired_by") != mutation["retired_by"]:
+        raise ValueError(f"ledger actor binding mismatch for {point_id}")
+    if ledger_record.get("superseded_by") != mutation["superseded_by"]:
+        raise ValueError(f"ledger supersession binding mismatch for {point_id}")
+    planned_payload = _apply_flat_payload_mutation(original, mutation)
+    try:
+        computed_planned_hash = canonical_json_sha256(planned_payload)
+    except ValueError as exc:
+        raise ValueError(f"ledger planned payload is not canonical for {point_id}") from exc
+    if computed_planned_hash != planned_hash:
+        raise ValueError(f"ledger planned payload hash mismatch for {point_id}")
+    computed_operation_hash = _undo_operation_integrity_sha256(
+        collection=collection,
+        point_id=point_id,
+        operation_id=operation_id,
+        original_payload_sha256=original_hash,
+        planned_post_tombstone_payload_sha256=planned_hash,
     )
+    if computed_operation_hash != ledger_record["operation_integrity_sha256"]:
+        raise ValueError(f"ledger operation integrity mismatch for {point_id}")
+    return point_id, original, planned_hash
+
+
+def restore_point_from_ledger(q, ledger_record, *, guard_reason, audit_log,
+                              collection=COLLECTION, restored_by="retro-audit-20260901"):
+    """Restore only a bound tombstone whose native row is the exact postimage."""
+    point_id, original, planned_hash = _require_bound_undo_record(
+        ledger_record,
+        collection=collection,
+    )
+    _point, found_payload = _retrieve_undo_point(
+        q,
+        collection,
+        point_id,
+        phase="restore",
+        allow_missing=False,
+        with_vector=False,
+    )
+    current = _require_complete_undo_payload(found_payload, point_id)
+    if current.get("is_canary") is True:
+        raise ValueError(f"refusing to restore canary {point_id}")
+    try:
+        current_hash = canonical_json_sha256(current)
+    except ValueError as exc:
+        raise ValueError(f"current payload is not canonical for {point_id}") from exc
+    restored = deepcopy(original)
+    restored["restored_by"] = restored_by
+    restored["restore_reason"] = guard_reason
+    restored_hash = canonical_json_sha256(restored)
+    if current.get("status") in RETIRED_STATUSES:
+        if current_hash != planned_hash:
+            raise ValueError(f"current retired payload does not match ledger postimage for {point_id}")
+    elif current_hash == restored_hash and current == restored:
+        return False
+    else:
+        raise ValueError(f"current payload is not the bound retirement state for {point_id}")
+    record = {
+        "at": now_iso(),
+        "action": "restore",
+        "state": "planned",
+        "id": point_id,
+        "collection": collection,
+        "operation_id": ledger_record["operation_id"],
+        "operation_integrity_sha256": ledger_record["operation_integrity_sha256"],
+        "guard_reason": guard_reason,
+        "payload_before": current,
+        "payload_after": restored,
+    }
+    audit_path = Path(audit_log)
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(audit_path, "a") as handle:
+        handle.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        q.overwrite_payload(
+            collection_name=collection,
+            payload=deepcopy(restored),
+            points=[point_id],
+            wait=True,
+        )
+    except Exception as exc:
+        try:
+            _readback_point, readback_payload = _retrieve_undo_point(
+                q,
+                collection,
+                point_id,
+                phase="restore readback",
+                allow_missing=False,
+                with_vector=False,
+            )
+            readback = _require_complete_undo_payload(readback_payload, point_id)
+            if canonical_json_sha256(readback) == restored_hash and readback == restored:
+                return True
+        except Exception as readback_exc:
+            raise ValueError(f"restore outcome unknown for {point_id}") from readback_exc
+        raise ValueError(f"restore outcome unknown for {point_id}") from exc
+    try:
+        _readback_point, readback_payload = _retrieve_undo_point(
+            q,
+            collection,
+            point_id,
+            phase="restore readback",
+            allow_missing=False,
+            with_vector=False,
+        )
+        readback = _require_complete_undo_payload(readback_payload, point_id)
+    except Exception as exc:
+        raise ValueError(f"restore readback failed for {point_id}") from exc
+    if canonical_json_sha256(readback) != restored_hash or readback != restored:
+        raise ValueError(f"restore readback mismatched for {point_id}")
     return True
 
 
 def tombstone_memory_id(point_id, *, retired_by, reason, superseded_by=None):
     from qdrant_client import QdrantClient
 
-    q = QdrantClient(host="127.0.0.1", port=6333, timeout=120)
+    q = qdrant_client(timeout=120)
     return tombstone_point(
         q,
         point_id,
@@ -992,6 +1867,7 @@ def _messages_text(messages):
 
 def novelty_add(memory, messages, *, threshold=0.92, log_path=None, **add_kwargs):
     """Skip a near-duplicate ingest candidate and append a privacy-safe receipt."""
+    add_kwargs["metadata"] = ensure_scope_metadata(add_kwargs.get("metadata"))
     text = _messages_text(messages)
     user_id = add_kwargs.get("user_id")
     if text and user_id:
@@ -1043,9 +1919,6 @@ def novelty_prune_events(memory, events, *, user_id, agent_id, q=None, log_path=
     Fail-open: any lookup or delete error keeps the row.
     Returns (kept_events, deduped_count).
     """
-    from qdrant_client import QdrantClient
-    from qdrant_client import models as qm
-
     kept, deduped = [], 0
     for ev in events or []:
         text = str(ev.get("memory") or "").strip()
@@ -1065,10 +1938,9 @@ def novelty_prune_events(memory, events, *, user_id, agent_id, q=None, log_path=
             continue
         try:
             if q is None:
-                q = QdrantClient(host="127.0.0.1", port=6333, timeout=10)
-            dup = q.count(
-                "studio0",
-                count_filter=qm.Filter(
+                from qdrant_client import models as qm
+                q = qdrant_client(timeout=10)
+                count_filter = qm.Filter(
                     must=[
                         qm.FieldCondition(key="user_id", match=qm.MatchValue(value=user_id)),
                         qm.FieldCondition(key="agent_id", match=qm.MatchValue(value=agent_id)),
@@ -1078,7 +1950,12 @@ def novelty_prune_events(memory, events, *, user_id, agent_id, q=None, log_path=
                         qm.HasIdCondition(has_id=[ev_id]),
                         qm.FieldCondition(key="status", match=qm.MatchAny(any=["tombstoned", "decayed"])),
                     ],
-                ),
+                )
+            else:
+                count_filter = None
+            dup = q.count(
+                COLLECTION,
+                count_filter=count_filter,
                 exact=True,
             ).count
         except Exception:
@@ -1112,7 +1989,7 @@ def novelty_prune_events(memory, events, *, user_id, agent_id, q=None, log_path=
     return kept, deduped
 
 
-def load_organic(q, user, *, want_vectors=True, date_keys=("added_mdt", "created_at")):
+def load_organic(q, user, *, want_vectors=True, date_keys=("added_mdt", "created_at"), include_payloads=False):
     """Stream the whole collection; keep only this user's non-seed rows.
 
     Returns (ids, texts, dates, V, scanned). V is one L2-normalised float32
@@ -1121,7 +1998,7 @@ def load_organic(q, user, *, want_vectors=True, date_keys=("added_mdt", "created
     """
     import numpy as np
 
-    ids, texts, dates, chunks, buf, scanned = [], [], [], [], [], 0
+    ids, texts, dates, payloads, chunks, buf, scanned = [], [], [], [], [], [], 0
     for p in scroll_all(q, with_vectors=want_vectors, with_payload=True):
         scanned += 1
         pay = p.payload or {}
@@ -1139,6 +2016,7 @@ def load_organic(q, user, *, want_vectors=True, date_keys=("added_mdt", "created
         ids.append(str(p.id))
         texts.append(text)
         dates.append(next((pay[k] for k in date_keys if pay.get(k)), "?"))
+        payloads.append(dict(pay))
         buf.append(np.asarray(vec, dtype=np.float32))
         if len(buf) >= 4096:
             chunks.append(np.stack(buf))
@@ -1149,7 +2027,8 @@ def load_organic(q, user, *, want_vectors=True, date_keys=("added_mdt", "created
     del chunks, buf
     if V.shape[0]:
         V /= np.linalg.norm(V, axis=1, keepdims=True) + 1e-9
-    return ids, texts, dates, V, scanned
+    result = (ids, texts, dates, V, scanned)
+    return result + (payloads,) if include_payloads else result
 
 
 def cmd_consolidate(args):
@@ -1157,18 +2036,19 @@ def cmd_consolidate(args):
     from qdrant_client import QdrantClient
 
     t0 = time.time()
-    q = QdrantClient(host="127.0.0.1", port=6333, timeout=120)
+    apply = bool(getattr(args, "apply", False))
+    dry_run = bool(getattr(args, "dry_run", False))
+    q = qdrant_client(timeout=120)
     try:
-        true_count = q.count("studio0", exact=True).count
+        true_count = q.count(COLLECTION, exact=True).count
     except Exception as e:
         true_count = f"unavailable ({type(e).__name__})"
 
-    ids, texts, dates, V, scanned = load_organic(q, args.user)
+    ids, texts, dates, V, scanned, payloads = load_organic(q, args.user, include_payloads=True)
     n = len(ids)
     print(f"scanned {scanned} points (collection reports {true_count}); {n} organic rows for user '{args.user}'")
     if n < 2:
         print(f"{n} organic rows — nothing to consolidate  [{time.time() - t0:.0f}s]")
-        _save_consolidate_state()
         return
 
     I, J, W = pair_index(V, args.threshold)
@@ -1179,7 +2059,7 @@ def cmd_consolidate(args):
     )
     del I, J, W
     dup_clusters = [
-        [{"id": ids[x], "text": texts[x], "date": dates[x]} for x in mem]
+        [{"id": ids[x], "text": texts[x], "date": dates[x], "payload": payloads[x]} for x in mem]
         for mem in members.values()
         if len(mem) > 1
     ]
@@ -1190,18 +2070,19 @@ def cmd_consolidate(args):
         f"({stats['capped_deferred']} rows form later shards), {stats['seed_check_failures']} anchor-threshold failures"
     )
     if not dup_clusters:
-        _save_consolidate_state()
         print(f"consolidate done: 0 merges  [{time.time() - t0:.0f}s]")
         return
 
-    log = open(BASE / "data/consolidate.log", "a")
-    log.write(
-        f"{now_mdt()} RUN scanned={scanned} collection={true_count} organic={n} pairs={pairs} "
-        f"clusters={len(dup_clusters)} threshold={args.threshold} cap={MAX_ROWS} "
-        f"chain_links_refused={stats['chain_links_refused']} seed_check_failures={stats['seed_check_failures']} "
-        f"capped_clusters={stats['capped_clusters']} capped_deferred={stats['capped_deferred']} "
-        f"dry_run={bool(args.dry_run)}\n"
-    )
+    log = None
+    if apply:
+        log = open(BASE / "data/consolidate.log", "a")
+        log.write(
+            f"{now_mdt()} RUN scanned={scanned} collection={true_count} organic={n} pairs={pairs} "
+            f"clusters={len(dup_clusters)} threshold={args.threshold} cap={MAX_ROWS} "
+            f"chain_links_refused={stats['chain_links_refused']} seed_check_failures={stats['seed_check_failures']} "
+            f"capped_clusters={stats['capped_clusters']} capped_deferred={stats['capped_deferred']} "
+            f"dry_run={dry_run} apply={apply}\n"
+        )
     # Runaway families are announced, never silently trimmed.
     for seed, deferred in sorted(capped.items(), key=lambda kv: -kv[1]):
         warn = (
@@ -1209,86 +2090,96 @@ def cmd_consolidate(args):
             f"{deferred} direct neighbours will form later star shard(s) — {texts[seed][:160]}"
         )
         print(f"  {warn}")
-        log.write(f"{now_mdt()} {warn}\n")
+        if log:
+            log.write(f"{now_mdt()} {warn}\n")
 
     def token_log(line):
         print(f"  {line}")
-        log.write(f"{now_mdt()} {line}\n")
-        log.flush()
+        if log:
+            log.write(f"{now_mdt()} {line}\n")
+            log.flush()
 
-    m = None if args.dry_run else get_memory("llama")
-    merged_n = retired_n = 0
+    merged_n = successful_retired_n = guarded_n = proposed_n = 0
+    category_counts = {"verbatim": 0, "keep-specifics": 0, "keep-wording": 0}
+    group_number = 0
     for c in dup_clusters:
-        if args.dry_run:
-            # Preview only. The qwen merge call is skipped here: at full
-            # coverage a dry run would otherwise fire thousands of 27B calls
-            # and never finish. The live path below is unchanged.
-            log.write(f"{now_mdt()} WOULD MERGE {len(c)} rows (dry-run: no LLM call, no changes):\n")
-            for r in c:
-                log.write(f"  - OLD [{r['id']}] {r['text']}\n")
-            merged_n += 1
-            retired_n += len(c)
-            continue
-        admissions = SAFETY.admit_serialized_prompt(
-            phase="CONSOLIDATE",
-            model=MODELS["qwen"],
-            rows=c,
-            render_prompt=_serialize_consolidate_prompt,
-            log=token_log,
-        )
+        # Proposal and dry-run modes intentionally classify the original
+        # group without an LLM call. Explicit apply is conservative too: the
+        # authoritative recheck below only permits exact duplicates.
+        admissions = [type("Admission", (), {"rows": c, "prompt": None})]
         for admission in admissions:
+            group_number += 1
             sub = list(admission.rows)
-            # There is no direct qwen call outside this admission loop.
-            merged = _merge_admitted_prompt(admission.prompt)
-            print(f"  MERGE {len(sub)} rows -> {merged}")
-            log.write(f"{now_mdt()} MERGED {len(sub)} rows:\n")
-            for r in sub:
-                log.write(f"  - OLD [{r['id']}] {r['text']}\n")
-            res = m.add(
-                [{"role": "user", "content": merged}],
-                user_id=args.user,
-                agent_id="consolidate",
-                metadata={"added_mdt": now_mdt(), "source": "consolidate", "merged_from": [r["id"] for r in sub]},
-                infer=False,
-            )
-            evs = res.get("results", res) if isinstance(res, dict) else res
-            new_id = evs[0].get("id") if isinstance(evs, list) and evs and isinstance(evs[0], dict) else None
-            for r in sub:
-                tombstone_point(
-                    q,
-                    r["id"],
-                    retired_by="consolidate",
-                    reason=f"merged into {new_id or 'new consolidate row'} at threshold {args.threshold}",
-                    superseded_by=new_id,
-                    fallback_text=r["text"],
+            retire_rows, guarded = guard_consolidate_rows(sub, log_fn=token_log)
+            guarded_n += len(guarded)
+            decision = classify_consolidate_group(retire_rows, allow_llm_merge=args.allow_llm_merge)
+            if decision["mode"] == "keep-specifics":
+                category_counts["keep-specifics"] += 1
+                token_log(f"CONSOLIDATE-KEEP-SPECIFICS group={group_number} diff={decision['diff']}")
+                continue
+            if decision["mode"] == "keep-wording":
+                category_counts["keep-wording"] += 1
+                token_log(f"CONSOLIDATE-KEEP-WORDING group={group_number}")
+                continue
+            if decision["mode"] == "keep-guarded":
+                token_log(f"CONSOLIDATE-KEEP group={len(sub)} guarded={len(guarded)} retire_set=empty")
+                continue
+            category_counts["verbatim"] += int(decision["mode"] == "verbatim")
+            if not apply:
+                proposed_n += 1
+                mode = "dry-run" if dry_run else "proposal"
+                token_log(
+                    f"CONSOLIDATE-PROPOSAL group={group_number} rows={len(retire_rows)} "
+                    f"mode={mode} merge_mode={decision['mode']} (no changes)"
                 )
-            log.write(f"  -> NEW [{new_id}]: {merged}\n")
-            merged_n += 1
-            retired_n += len(sub)
-    log.close()
-    if not args.dry_run:
-        _save_consolidate_state()
-    verb = "would merge" if args.dry_run else "merged"
-    print(f"consolidate done: {verb} {merged_n} clusters, {retired_n} rows retired  [{time.time() - t0:.0f}s]")
+                continue
+
+            # This is the final read/classify boundary. No replacement add is
+            # reachable until every source is present, unchanged, active,
+            # complete, same-scope, unprotected, and still verbatim.
+            authorized = apply_consolidate_group(
+                None,
+                q,
+                retire_rows,
+                collection=COLLECTION,
+                log_fn=token_log,
+            )
+            if not authorized.get("authorized"):
+                token_log(
+                    f"CONSOLIDATE-APPLY-HELD group={group_number} "
+                    f"reason={authorized.get('reason', 'unknown')}"
+                )
+                continue
+            # apply_consolidate_group is held above until the existing recall
+            # fast-path can hide pending replacements. Keep this defensive
+            # branch explicit so an integration lane cannot accidentally
+            # reintroduce add-before-recheck behavior.
+            proposed_n += 1
+    if log:
+        log.close()
+    mode = "apply-held" if apply else ("dry-run" if dry_run else "proposal")
+    print(f"consolidate done: {mode} {merged_n} clusters, {successful_retired_n} rows retired, proposed={proposed_n}, guarded={guarded_n}, "
+          f"verbatim={category_counts['verbatim']} kept-specifics={category_counts['keep-specifics']} "
+          f"kept-wording={category_counts['keep-wording']}  [{time.time() - t0:.0f}s]")
 
 
 def _save_consolidate_state():
     try:
         from qdrant_client import QdrantClient
 
-        q = QdrantClient(host="127.0.0.1", port=6333, timeout=120)
-        count = q.count("studio0").count
+        q = qdrant_client(timeout=120)
+        count = q.count(COLLECTION).count
         (BASE / "data/consolidate-state.json").write_text(json.dumps({"count_at_last_run": count, "at": now_mdt()}))
     except Exception:
         pass
 
 
-def main():
+def build_parser():
     p = argparse.ArgumentParser(prog="mem0ctl", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def common(sp, with_model=False):
-        sp.add_argument("--user", default="james")
+        sp.add_argument("--user", default=str(CONFIG.values["BORG_OWNER_ID"]))
         sp.add_argument("--agent", default=None)
         if with_model:
             sp.add_argument("--model", choices=["qwen", "llama"], default="qwen")
@@ -1318,7 +2209,7 @@ def main():
     sp.set_defaults(fn=cmd_list)
 
     sp = sub.add_parser("review-decayed", help="list decayed rows for human review")
-    sp.add_argument("--user", default="james")
+    sp.add_argument("--user", default=str(CONFIG.values["BORG_OWNER_ID"]))
     sp.add_argument("--limit", type=int, default=100)
     sp.set_defaults(fn=cmd_review_decayed)
 
@@ -1327,20 +2218,26 @@ def main():
     sp.set_defaults(fn=cmd_delete)
 
     sp = sub.add_parser("stats")
-    sp.add_argument("--user", default="james")
+    sp.add_argument("--user", default=str(CONFIG.values["BORG_OWNER_ID"]))
     sp.set_defaults(fn=cmd_stats)
 
     sp = sub.add_parser("seed", help="(re)index the memory corpus: purge old seed rows, add fresh ones")
-    sp.add_argument("--user", default="james")
+    sp.add_argument("--user", default=str(CONFIG.values["BORG_OWNER_ID"]))
     sp.set_defaults(fn=cmd_seed)
 
     sp = sub.add_parser("consolidate", help="merge near-duplicate organic rows; seed rows untouched")
-    sp.add_argument("--user", default="james")
+    sp.add_argument("--user", default=str(CONFIG.values["BORG_OWNER_ID"]))
     sp.add_argument("--threshold", type=float, default=0.90)
-    sp.add_argument("--dry-run", action="store_true")
+    mode = sp.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="compatibility alias for a non-mutating proposal scan")
+    mode.add_argument("--apply", action="store_true", help="explicit apply (held until pending recall is authoritative)")
+    sp.add_argument("--allow-llm-merge", action="store_true", help="opt in to LLM merges for same-specifics wording differences")
     sp.set_defaults(fn=cmd_consolidate)
+    return p
 
-    args = p.parse_args()
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     args.fn(args)
 
 

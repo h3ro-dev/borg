@@ -1,0 +1,5 @@
+# Optional, opt-in training/evaluation dependencies. No training or downloads
+# are performed by this lane.
+numpy==2.2.6
+openai==1.99.9
+httpx==0.28.1

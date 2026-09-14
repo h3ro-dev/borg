@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""Grammar-locked 100-row staleness audit for configured live rows."""
+
+import argparse
+import hashlib
+import importlib.machinery
+import json
+import os
+import random
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+CTL = importlib.machinery.SourceFileLoader(
+    "mem0ctl_staleness", str(BASE / "bin" / "mem0ctl")
+).load_module()
+DATA = CTL.CONFIG.data_root
+OWNER_ID = str(CTL.CONFIG.values["BORG_OWNER_ID"])
+
+DEFAULT_OUTPUT = DATA / "staleness-audit-2026-08-21.jsonl"
+RANDOM_SEED = 20260821
+SAMPLE_SIZE = 100
+
+
+def row_text(payload):
+    return str(payload.get("data") or payload.get("memory") or "").strip()
+
+
+def row_date(payload):
+    for key in ("updated_at", "created_at", "thread_date", "added_mdt"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return "UNKNOWN"
+
+
+def is_organic_live(payload):
+    run_id = str(payload.get("run_id") or "")
+    if payload.get("user_id") != OWNER_ID or run_id == "corpus-seed":
+        return False
+    if "canary" in run_id.lower() or run_id.lower().startswith("test-"):
+        return False
+    if payload.get("status") in CTL.RETIRED_STATUSES:
+        return False
+    kind = str(payload.get("kind") or "").lower()
+    if kind in {"seed", "corpus"} or kind.startswith("seed-") or kind.startswith("corpus-"):
+        return False
+    return bool(row_text(payload))
+
+
+def vector_of(point):
+    if isinstance(point.vector, list):
+        return point.vector
+    if isinstance(point.vector, dict):
+        return point.vector.get("") or []
+    return []
+
+
+def sample_universe(q):
+    rng = random.Random(RANDOM_SEED)
+    reservoir = []
+    universe_ids = []
+    eligible = scanned = 0
+    for point in CTL.scroll_all(q, CTL.COLLECTION, with_payload=True, with_vectors=True):
+        scanned += 1
+        payload = point.payload or {}
+        vector = vector_of(point)
+        if not is_organic_live(payload) or not vector:
+            continue
+        eligible += 1
+        universe_ids.append(str(point.id))
+        item = {"id": str(point.id), "payload": payload, "vector": vector}
+        if len(reservoir) < SAMPLE_SIZE:
+            reservoir.append(item)
+        else:
+            index = rng.randrange(eligible)
+            if index < SAMPLE_SIZE:
+                reservoir[index] = item
+    digest = hashlib.sha256("\n".join(sorted(universe_ids)).encode()).hexdigest()
+    return reservoir, set(universe_ids), digest, scanned, eligible
+
+
+def neighbors(q, item, universe_ids, limit=5):
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    query_filter = Filter(
+        must=[FieldCondition(key="user_id", match=MatchValue(value=OWNER_ID))],
+        must_not=[
+            FieldCondition(key="run_id", match=MatchValue(value="corpus-seed")),
+            FieldCondition(key="status", match=MatchValue(value=CTL.TOMBSTONE_STATUS)),
+            FieldCondition(key="status", match=MatchValue(value=CTL.DECAY_STATUS)),
+        ],
+    )
+    response = q.query_points(
+        collection_name=CTL.COLLECTION,
+        query=item["vector"],
+        query_filter=query_filter,
+        limit=limit + 1,
+        with_payload=True,
+        with_vectors=False,
+    )
+    result = []
+    for point in response.points:
+        point_id = str(point.id)
+        payload = point.payload or {}
+        if point_id == item["id"] or point_id not in universe_ids or not is_organic_live(payload):
+            continue
+        result.append({
+            "id": point_id,
+            "score": round(float(point.score or 0.0), 6),
+            "date": row_date(payload),
+            "text": row_text(payload)[:900],
+        })
+        if len(result) >= limit:
+            break
+    return result
+
+
+def verdict_schema(ids):
+    verdict = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "verdict", "stale_class", "confidence", "reason",
+            "evidence_ids", "propose_tombstone",
+        ],
+        "properties": {
+            "verdict": {"type": "string", "enum": ["stale", "current", "unverifiable"]},
+            "stale_class": {
+                "type": "string",
+                "enum": ["exact_duplicate", "contradicted", "outdated", "none", "unknown"],
+            },
+            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 240},
+            "evidence_ids": {
+                "type": "array", "maxItems": 5, "items": {"type": "string"}
+            },
+            "propose_tombstone": {"type": "boolean"},
+        },
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ids,
+        "properties": {memory_id: verdict for memory_id in ids},
+    }
+
+
+def grammar_chat(client, prompt, schema, num_predict):
+    """Return schema-locked content from Ollama or a llama.cpp test endpoint."""
+    if isinstance(client, str):
+        body = {
+            "model": CTL.EXTRACTION_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": num_predict,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "staleness_verdicts",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        }
+        request = urllib.request.Request(
+            client.rstrip("/") + "/v1/chat/completions",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=600) as response:
+            parsed = json.load(response)
+        return parsed["choices"][0]["message"]["content"]
+
+    response = client.chat(
+        model=CTL.EXTRACTION_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        format=schema,
+        think=False,
+        options={"temperature": 0, "num_predict": num_predict},
+    )
+    return response["message"]["content"]
+
+
+def judge(client, batch):
+    ids = [item["id"] for item in batch]
+    cases = []
+    allowed_evidence = {}
+    for item in batch:
+        allowed_evidence[item["id"]] = {row["id"] for row in item["neighbors"]}
+        cases.append({
+            "id": item["id"],
+            "date": row_date(item["payload"]),
+            "kind": item["payload"].get("kind"),
+            "memory": row_text(item["payload"])[:1400],
+            "similar_live_rows": item["neighbors"],
+        })
+    prompt = (
+        "Judge each memory using only the supplied row and similar live rows. "
+        "stale means a newer row directly contradicts it, it is an exact redundant duplicate, "
+        "or its own time wording is no longer current. current means it remains a valid fact or "
+        "accurate time-bounded history. unverifiable means the supplied evidence cannot decide. "
+        "Do not treat mere similarity as contradiction. Set propose_tombstone=true only for an "
+        "unambiguous exact_duplicate or contradicted row with confidence at least 0.95 and name "
+        "the newer replacement in evidence_ids. Return one verdict for every id, keyed by the "
+        "exact id string.\n\n"
+        + json.dumps(cases, ensure_ascii=False)
+    )
+    # Bound the grammar response. A one-row retry needs fewer than 256 tokens;
+    # larger batches scale linearly without allowing runaway prose.
+    num_predict = max(256, min(2400, 240 * len(batch)))
+    content = grammar_chat(client, prompt, verdict_schema(ids), num_predict)
+    parsed = json.loads(content)
+    if not isinstance(parsed, dict):
+        raise ValueError("model response is not a verdict object")
+    by_id = {}
+    for memory_id, row in parsed.items():
+        if not isinstance(row, dict) or memory_id not in ids or memory_id in by_id:
+            continue
+        row["id"] = memory_id
+        evidence = [str(value) for value in row.get("evidence_ids") or []]
+        row["evidence_ids"] = [value for value in evidence if value in allowed_evidence[memory_id]]
+        if row.get("stale_class") not in {"exact_duplicate", "contradicted"} or float(row.get("confidence") or 0) < 0.95:
+            row["propose_tombstone"] = False
+        by_id[memory_id] = row
+    if set(by_id) != set(ids):
+        missing = sorted(set(ids) - set(by_id))
+        raise ValueError(f"missing or duplicate verdict ids: {missing}")
+    return by_id
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--batch-size", type=int, default=10)
+    args = parser.parse_args()
+    if args.batch_size < 1 or args.batch_size > 10:
+        parser.error("--batch-size must be between 1 and 10")
+
+    import ollama
+
+    q = CTL.qdrant_client()
+    count_before = q.count(CTL.COLLECTION, exact=True).count
+    sample, universe_ids, universe_digest, scanned, eligible = sample_universe(q)
+    if len(sample) != SAMPLE_SIZE:
+        raise SystemExit(f"NOT_RUN: need {SAMPLE_SIZE} live organic rows; found {len(sample)}")
+    sample.sort(key=lambda item: item["id"])
+    for item in sample:
+        item["neighbors"] = neighbors(q, item, universe_ids)
+
+    llama_cpp_url = os.environ.get("MEM0_LLAMA_CPP_URL")
+    client = llama_cpp_url or ollama.Client(host=CTL.OLLAMA_URL, timeout=600.0)
+    grammar_backend = "llama.cpp-openai" if llama_cpp_url else "ollama-api-chat"
+    verdicts = {}
+    for start in range(0, len(sample), args.batch_size):
+        batch = sample[start:start + args.batch_size]
+        try:
+            verdicts.update(judge(client, batch))
+        except Exception:
+            # A smaller grammar is easier for the local model to satisfy and
+            # preserves the exact 100-row contract when one batch fails.
+            for item in batch:
+                verdicts.update(judge(client, [item]))
+        print(f"judged={min(start + len(batch), len(sample))}/{len(sample)}", flush=True)
+
+    sampled_at = CTL.now_iso()
+    output_rows = []
+    for item in sample:
+        verdict = verdicts[item["id"]]
+        output_rows.append({
+            "id": item["id"],
+            "memory": row_text(item["payload"]),
+            "kind": item["payload"].get("kind"),
+            "date": row_date(item["payload"]),
+            "verdict": verdict["verdict"],
+            "stale_class": verdict["stale_class"],
+            "confidence": verdict["confidence"],
+            "reason": verdict["reason"],
+            "evidence_ids": verdict["evidence_ids"],
+            "propose_tombstone": verdict["propose_tombstone"],
+            "evidence": item["neighbors"],
+            "model": CTL.EXTRACTION_MODEL,
+            "grammar_locked": True,
+            "grammar_backend": grammar_backend,
+            "random_seed": RANDOM_SEED,
+            "universe_digest": universe_digest,
+            "sampled_at": sampled_at,
+        })
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    temp = args.output.with_suffix(args.output.suffix + ".tmp")
+    with open(temp, "w") as handle:
+        for row in output_rows:
+            handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp, args.output)
+
+    count_after = q.count(CTL.COLLECTION, exact=True).count
+    counts = {"stale": 0, "current": 0, "unverifiable": 0}
+    proposals = 0
+    for row in output_rows:
+        counts[row["verdict"]] += 1
+        proposals += int(bool(row["propose_tombstone"]))
+    print(
+        f"audit_complete output={args.output} scanned={scanned} eligible={eligible} "
+        f"universe_digest={universe_digest} count_before={count_before} count_after={count_after} "
+        f"stale={counts['stale']} current={counts['current']} unverifiable={counts['unverifiable']} "
+        f"staleness_ratio={counts['stale'] / SAMPLE_SIZE:.1%} tombstone_proposals={proposals} applied=0"
+    )
+
+
+if __name__ == "__main__":
+    main()

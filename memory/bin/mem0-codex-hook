@@ -1,0 +1,1939 @@
+#!/usr/bin/env python3
+"""Fail-open Codex lifecycle bridge for the configured BORG memory store.
+
+Modes:
+  prime   SessionStart: create one stable generation for this task start.
+  start   UserPromptSubmit: inject bounded, scoped Mem0 candidates on refresh.
+  end     Stop/SessionEnd: enqueue a sanitized, idempotent capture worker.
+  worker  Internal detached capture worker.
+
+The bridge never makes memory authoritative. It never changes Graphiti.
+Kill switch: touch ``BORG_HOME/mem0/HOOK_OFF``
+"""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from difflib import SequenceMatcher
+from pathlib import Path
+from typing import Any, Callable, Iterable
+from zoneinfo import ZoneInfo
+
+os.environ["MEM0_TELEMETRY"] = "false"
+os.umask(0o077)
+
+SOURCE_BIN = Path(__file__).resolve().parent
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_codex_hook", str(SOURCE_BIN / "borg_config.py")
+).load_module().CONFIG
+BASE = Path(os.environ.get("MEM0_CODEX_BASE", str(CONFIG.mem0_root)))
+DATA = BASE / "data"
+STATE = DATA / "hook-runs" / "codex"
+LOG = DATA / "codex-hook.log"
+HOOK_OFF = BASE / "HOOK_OFF"
+CTL_PATH = SOURCE_BIN / "mem0ctl"
+RECALL_FAST_PATH = SOURCE_BIN / "mem0_recall_fast.py"
+
+USER_ID = str(CONFIG.values["BORG_OWNER_ID"])
+CAPTURE_AGENT = "codex-hook"
+# Legacy mem0 path only. The fast path searches the whole live store.
+RECALL_AGENTS = ("seeder", CAPTURE_AGENT)
+MAX_RECALL_ROWS_PER_AGENT = 12
+MAX_RECALL_ITEMS = 4
+MAX_RECALL_TOKENS = 700
+MAX_GENERATION_INJECTIONS = 3
+MAX_SEEN_ROWS_PER_GENERATION = MAX_RECALL_ITEMS * MAX_GENERATION_INJECTIONS
+MAX_TOPIC_TOKENS = 40
+MIN_TOPIC_SIMILARITY = 0.35
+MIN_SEMANTIC_SCORE = 0.45
+# Widened recall (2026-08-21): the fast path drops the agent_id filter and
+# searches every live point, matching mem0-claude-hook. Same candidate pool
+# size as the two agent-scoped searches it replaces (2 x 12).
+MAX_RECALL_ROWS = 24
+# Raw-cosine floor for the widened search. Measured over 16 prompts: 0.45
+# through 0.65 all keep the same candidates, 0.70 empties 3 of 16, so 0.60
+# trims the most noise while staying clear of the cliff - and matches
+# mem0-claude-hook's SCORE_FLOOR.
+RECALL_MIN_SCORE = 0.60
+MEMORY_SELECTION_PATH = Path(__file__).resolve().parent / "memory_selection.py"
+# FINDING A1 — default-closed scope boundary for BOTH recall transports.
+# Unset/empty grants ZERO scopes: recall returns nothing (fail closed).
+# Grant per-machine scopes explicitly, e.g. MEM0_HOOK_SCOPES="team:project".
+# Exact scopes only: globs ("client:*") are deliberately not honored here.
+HOOK_ALLOWED_SCOPES = tuple(
+    s.strip() for s in os.environ.get("MEM0_HOOK_SCOPES", "").split(",") if s.strip()
+)
+IMPOSSIBLE_SCOPE = "__scope_boundary__no_scopes_granted__"
+# P1.1 SELF-INGESTION GUARD (2026-08-28). mem0's own dispatchers
+# (mem0-luna-deepread, mem0-commitments, mem0-patrol-launch) launch codex runs
+# THROUGH conductor CODEX_HOMEs. Once those homes carry lifecycle hooks, mem0
+# would capture its own analysis runs as memories and then recall them —
+# memory eating its own homework. Those three dispatchers export
+# MEM0_INTERNAL=1 into the codex environment they build; this hook then does
+# nothing but write one SKIP_INTERNAL receipt line: no recall, no enqueue,
+# no capture. Retrieval was already safe by accident (a bare env carries no
+# MEM0_HOOK_SCOPES grant); only the saving side leaked, and this closes it.
+MEM0_INTERNAL = bool(os.environ.get("MEM0_INTERNAL", "").strip())
+# CAPTURE SCOPE (2026-08-28, MEMORY-INTEGRATION-CONTRACT trap 3). MEM0_HOOK_SCOPES
+# governs RECALL only; the capture path writes no `scope` payload key at all, so a
+# fresh capture is invisible to scoped recall until mem0-scope-backfill classifies
+# it — and that classifier is DEFAULT-CLOSED, so anything it cannot place lands in
+# the configured personal scope. Automation must receive an explicit write scope, so an
+# automation launcher (a conductor wrapper) sets MEM0_CAPTURE_SCOPE and the row is
+# born scoped. Backfill skips rows that already carry a scope (only --force
+# re-classifies), so a write-time scope is durable.
+# UNSET = today's exact behaviour, no `scope` key. The main seat is unchanged.
+CAPTURE_SCOPE = os.environ.get("MEM0_CAPTURE_SCOPE", "").strip()
+INTERNAL_SKIP_EVENTS = {
+    "prime": "prime",
+    "start": "start",
+    "end": "end-enqueue",
+    "worker": "capture",
+}
+# UserPromptSubmit blocks the prompt. The direct recall transport costs about
+# 150 ms; this ceiling only exists so a wedged local service cannot stall a turn.
+RECALL_TIMEOUT_SECONDS = 2.5
+MAX_EVIDENCE_CHARS = 26000
+MAX_USER_RECORDS = 14
+MAX_TOOL_RECORDS = 32
+EXTRACT_TIMEOUT_SECONDS = 60.0
+# Ceiling for waiting on a concurrent capture of the same digest. A healthy
+# capture holds the digest lock for seconds (measured ~9 s live); the hard
+# extraction ceiling is 60 s x 2 models, so a peer still holding after 300 s
+# is wedged and the waiter fails open instead of hanging behind it.
+CAPTURE_LOCK_WAIT_SECONDS = 300.0
+CAPTURE_LOCK_POLL_SECONDS = 1.0
+
+AUTHORITY_NOTICE = (
+    "Mem0 candidate context only. Current user instructions and AGENTS.md have priority. "
+    "Repository state, native providers, and live evidence have priority over memory. "
+    "Verify every candidate before use; memory is never completion proof."
+)
+
+WORD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{2,}")
+PATH_RE = re.compile(r"(?:~|/Users/[^\s'\"<>]+)[^\s'\"<>]*")
+HEX_RE = re.compile(r"\b[0-9a-fA-F]{7,64}\b")
+NUMBER_RE = re.compile(r"\b\d+(?:\.\d+)?\b")
+URL_RE = re.compile(r"https?://[^\s)\]}>]+")
+
+SECRET_VALUE_RE = re.compile(
+    r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|"
+    r"client[_-]?secret|private[_-]?key|password|passwd|cookie|authorization|bearer)\b"
+    r"\s*(?:=|:|is)\s*\S+"
+)
+BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
+EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[A-Za-z]{2,}\b")
+PHONE_RE = re.compile(r"\b(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b")
+SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+CARD_RE = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
+STREET_RE = re.compile(
+    r"(?i)\b\d{1,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,4}\s+"
+    r"(?:street|st|avenue|ave|road|rd|boulevard|blvd|lane|ln|drive|dr|court|ct)\b"
+)
+MONEY_RE = re.compile(
+    r"(?i)(?:[$€£]\s?\d|\b(?:usd|dollars?)\s?\d|\b\d[\d,.]*\s?(?:usd|dollars?)\b)"
+)
+PRIVATE_RECORD_RE = re.compile(
+    r"(?i)\b(?:social security|routing number|bank account|credit card|iban|"
+    r"patient|diagnos(?:is|ed)|prescription|medical record|insurance id|date of birth|dob)\b"
+)
+LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_~+/=-]{28,}\b")
+SPECULATION_RE = re.compile(r"(?i)\b(?:maybe|probably|possibly|speculation|hypothesis|appears to)\b")
+
+SYNTHETIC_USER_PREFIXES = (
+    "<recommended_plugins>",
+    "# AGENTS.md instructions",
+    "<environment_context>",
+    "<permissions",
+    "<app-context>",
+    "<skills_instructions>",
+    "<plugins_instructions>",
+    "<apps_instructions>",
+)
+
+GENERIC_WORDS = {
+    "about", "after", "agent", "agents", "automatic", "before", "candidate",
+    "capture", "codex", "context", "current", "data", "develop", "durable",
+    "existing", "facts", "files", "hook", "hooks", "implementation", "inject",
+    "injection", "owner", "local", "memory", "project", "recall", "result",
+    "start", "store", "system", "task", "tasks", "test", "tests", "this",
+    "through", "using", "verify", "with", "work", "working",
+}
+
+GENERIC_PATH_WORDS = {
+    "bin", "codex", "config", "documents", "library", "memory", "memories",
+    "projects", "toml", "users", "owner",
+}
+
+TOPIC_FILLER_WORDS = {
+    "add", "build", "change", "check", "continue", "create", "debug",
+    "fix", "follow", "followup", "implement", "inspect", "investigate",
+    "look", "now", "please", "review", "start", "the", "update",
+    "verify", "with",
+}
+
+
+def now_mdt() -> str:
+    return datetime.now(ZoneInfo("America/Denver")).isoformat(timespec="seconds")
+
+
+def capture_skip_enabled() -> bool:
+    return os.environ.get("MEM0_CAPTURE_SKIP") == "1"
+
+
+def safe_component(value: str, fallback: str = "unknown") -> str:
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "_", value or "")[:180]
+    return clean or fallback
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def ensure_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+
+
+def atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    ensure_private_dir(path.parent)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def log_event(event: str, status: str, **fields: Any) -> None:
+    """Write metadata only. Callers must never pass prompt or memory text."""
+    allowed = {
+        "session", "turn", "generation", "count", "reason", "event_name",
+        "digest", "project", "source", "elapsed_ms", "stored", "skipped",
+        "rejected", "request", "agent",
+        # Which engine extracted, and why it fell back. Both are fixed enums
+        # built by _fallback_reason, never free text, so the metadata-only
+        # contract holds. Stated outright so the evidence for a flip is read,
+        # not inferred from a latency change.
+        "extract_door", "extract_fallback",
+        # THE ERRATIC-ZERO GUARD (2026-08-30). The measured risk of serving the
+        # capture student off its training distribution is not bad memories —
+        # the production gate still screens every candidate — it is a capture
+        # that quietly stores NOTHING where the incumbent would have stored
+        # several. One session in the envelope probe did exactly that (0 of 8).
+        # `student_zero` is written on precisely that event so the live rate is
+        # countable with a grep instead of inferred, and `extract_candidates`
+        # says whether the student returned nothing at all or returned facts the
+        # gate then rejected — a different fault with a different fix.
+        "extract_candidates", "student_zero",
+    }
+    row: dict[str, Any] = {"at": now_mdt(), "event": event, "status": status}
+    for key, value in fields.items():
+        if key in allowed and value is not None:
+            row[key] = value
+    try:
+        ensure_private_dir(LOG.parent)
+        fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+
+
+def load_payload() -> dict[str, Any]:
+    try:
+        value = json.load(sys.stdin)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def pick(payload: dict[str, Any], *keys: str, default: Any = "") -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def is_subagent(payload: dict[str, Any]) -> bool:
+    return bool(pick(payload, "agent_id", "agentId", "agent_type", "agentType", "subagent_type", "subagentType"))
+
+
+def is_hex_literal(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-fA-F]{7,64}", value))
+
+
+def sensitive_reason(text: str) -> str | None:
+    checks = (
+        (SECRET_VALUE_RE, "secret-label"),
+        (BEARER_RE, "bearer"),
+        (EMAIL_RE, "email"),
+        (PHONE_RE, "phone"),
+        (SSN_RE, "ssn"),
+        (STREET_RE, "street-address"),
+        (MONEY_RE, "money"),
+        (PRIVATE_RECORD_RE, "private-record"),
+    )
+    for pattern, reason in checks:
+        if pattern.search(text):
+            return reason
+    token_scan = PATH_RE.sub(" ", URL_RE.sub(" ", text))
+    for match in LONG_TOKEN_RE.finditer(token_scan):
+        token = match.group(0)
+        if not is_hex_literal(token):
+            return "long-token"
+    if CARD_RE.search(text):
+        digits = re.sub(r"\D", "", CARD_RE.search(text).group(0))
+        if len(digits) >= 13:
+            return "card-number"
+    return None
+
+
+def redact_text(text: str, limit: int = 4000) -> str:
+    clean_lines: list[str] = []
+    for raw in str(text).splitlines():
+        line = raw[:2000]
+        if sensitive_reason(line):
+            clean_lines.append("[REDACTED_SENSITIVE_LINE]")
+        else:
+            clean_lines.append(line)
+    clean = "\n".join(clean_lines)
+    return clean[:limit]
+
+
+def words(text: str, *, generic: bool = False) -> set[str]:
+    out = {m.group(0).lower().strip("._-") for m in WORD_RE.finditer(text)}
+    out = {word for word in out if len(word) >= 3}
+    if not generic:
+        out -= GENERIC_WORDS
+    return out
+
+
+def origin_slug(cwd: str) -> str:
+    root = git_root(cwd)
+    if not root:
+        return ""
+    marker = Path(root) / ".git"
+    if marker.is_dir():
+        config = marker / "config"
+    elif marker.is_file():
+        try:
+            raw_marker = marker.read_text(encoding="utf-8", errors="ignore")
+            gitdir = next(
+                line.split(":", 1)[1].strip()
+                for line in raw_marker.splitlines()
+                if line.lower().startswith("gitdir:")
+            )
+            config = Path(gitdir)
+            if not config.is_absolute():
+                config = marker.parent / config
+            config = config / "config"
+        except (OSError, StopIteration, ValueError):
+            return ""
+    else:
+        return ""
+    try:
+        in_origin = False
+        for line in config.read_text(encoding="utf-8", errors="ignore").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("["):
+                in_origin = stripped.lower() == '[remote "origin"]'
+                continue
+            if in_origin and stripped.lower().startswith("url") and "=" in stripped:
+                raw = stripped.split("=", 1)[1].strip().rstrip("/")
+                slug = raw.rsplit("/", 1)[-1]
+                return slug[:-4] if slug.endswith(".git") else slug
+    except OSError:
+        pass
+    return ""
+
+
+def git_root(cwd: str) -> str:
+    if not cwd or not Path(cwd).is_dir():
+        return ""
+    try:
+        path = Path(cwd).expanduser().resolve()
+    except OSError:
+        return ""
+    for candidate in (path, *path.parents):
+        marker = candidate / ".git"
+        if marker.is_dir() or marker.is_file():
+            return str(candidate)
+    return ""
+
+
+@dataclass(frozen=True)
+class Scope:
+    cwd: str
+    project: str
+    project_tokens: frozenset[str]
+    task_tokens: frozenset[str]
+    query: str
+
+
+def build_scope(cwd: str, prompt: str) -> Scope:
+    root = git_root(cwd)
+    slug = origin_slug(cwd)
+    project = slug or (Path(root).name if root else Path(cwd or "").name)
+    if project.lower() in {"", CONFIG.owner_id.lower(), "users", "home"}:
+        project = ""
+
+    project_tokens: set[str] = set()
+    for value in (project, slug, Path(root).name if root else ""):
+        project_tokens |= words(value.replace("-", " "), generic=True)
+    for raw_path in PATH_RE.findall(prompt):
+        expanded = str(Path(raw_path.replace("~", str(CONFIG.home), 1)))
+        for part in Path(expanded).parts[-5:]:
+            stem = Path(part).stem.replace("-", " ").replace("_", " ")
+            project_tokens |= words(stem, generic=True)
+    project_tokens -= GENERIC_PATH_WORDS
+    project_tokens = {token for token in project_tokens if len(token) >= 3}
+
+    task_tokens = words(prompt)
+    query_bits = []
+    if project:
+        query_bits.append(project.replace("-", " "))
+    query_bits.extend(sorted(project_tokens)[:12])
+    query_bits.extend(sorted(task_tokens)[:40])
+    query = " ".join(dict.fromkeys(query_bits))[:1400]
+    return Scope(cwd=cwd, project=project, project_tokens=frozenset(project_tokens), task_tokens=frozenset(task_tokens), query=query)
+
+
+def topic_tokens(prompt: str) -> frozenset[str]:
+    return frozenset(words(prompt) - TOPIC_FILLER_WORDS)
+
+
+def row_text(row: dict[str, Any]) -> str:
+    return str(row.get("memory") or row.get("text") or "").strip()
+
+
+def row_id(row: dict[str, Any]) -> str:
+    return str(row.get("id") or row.get("memory_id") or "").strip()
+
+
+def same_scope_text_key(row: dict[str, Any]) -> str:
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict) and "scope" in metadata:
+        scope = metadata["scope"]
+    else:
+        scope = row.get("scope", "")
+    scope = str(scope or "")
+    text = re.sub(r"\s+", " ", row_text(row)).strip()
+    return sha256_text(f"{scope}\0{text}") if text else ""
+
+
+def row_source(row: dict[str, Any]) -> str:
+    meta = row.get("metadata") or {}
+    source = str(meta.get("source") or meta.get("transcript_path") or row.get("agent_id") or "unknown")
+    source = source.replace("\n", " ").replace("\r", " ").strip()[:400]
+    return "redacted-source" if sensitive_reason(source) else source
+
+
+def normalized(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def near_duplicate(text: str, prior: Iterable[str]) -> bool:
+    norm = normalized(text)
+    for old in prior:
+        old_norm = normalized(old)
+        if norm == old_norm:
+            return True
+        if SequenceMatcher(None, norm, old_norm).ratio() >= 0.90:
+            return True
+    return False
+
+
+def _is_graph_row(row: dict[str, Any]) -> bool:
+    metadata = row.get("metadata") or {}
+    return (
+        row.get("is_graph") is True
+        or metadata.get("source") == "graphiti"
+        or metadata.get("is_graph") is True
+    )
+
+
+def _recall_pointer(row: dict[str, Any], graph: bool) -> dict[str, Any]:
+    metadata = row.get("metadata") or {}
+    pointer = {
+        "source": "graphiti" if graph else "mem0",
+        "id": str(row.get("id") or ""),
+    }
+    source = metadata.get("source")
+    if source and source not in {"graphiti", "mem0"}:
+        pointer["source_ref"] = str(source)[:400]
+    for field in ("scope", "source_graph_key", "graph_edge_uuid", "edge_uuid"):
+        value = metadata.get(field, row.get(field))
+        if value not in (None, ""):
+            pointer[field] = value
+    if metadata.get("episode_uuids"):
+        pointer["episode_uuids"] = metadata["episode_uuids"]
+    return pointer
+
+
+def _merge_recall_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Coalesce scoped whitespace-exact rows through the shared selector."""
+
+    return list(load_memory_selection().merge_exact_rows(rows))
+
+
+def select_eligible_rows(
+    rows: Iterable[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    """Apply shared diversity to eligible rows while retaining hook relevance."""
+
+    try:
+        requested = max(1, int(limit))
+    except (TypeError, ValueError):
+        requested = 1
+    rows = list(rows)
+    if not rows:
+        return []
+
+    # Keep only the two strongest graph rows in the selector's input. This
+    # preserves the hook's graph cap while allowing the selector to fill the
+    # remaining slots with relevant Mem0 rows.
+    graph_positions = {
+        index
+        for index, row in enumerate(rows)
+        if _is_graph_row(row)
+    }
+    graph_positions = set(sorted(graph_positions)[:2])
+    candidates: list[dict[str, Any]] = []
+    for index, row in enumerate(rows):
+        if index in graph_positions or not _is_graph_row(row):
+            item = dict(row)
+            item["_raw_score"] = row.get("score")
+            item["score"] = row.get("_relevance", row.get("score"))
+            candidates.append(item)
+
+    selected = load_memory_selection().select_rows(
+        candidates,
+        requested,
+        add_single_provenance=False,
+    )
+    for row in selected:
+        raw_score = row.pop("_raw_score", None)
+        row["score"] = raw_score
+    return selected
+
+
+def rank_candidates(
+    rows: list[dict[str, Any]],
+    scope: Scope,
+    *,
+    limit: int | None = MAX_RECALL_ITEMS,
+) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+    for row in _merge_recall_rows(rows):
+        text = row_text(row)
+        if not text or sensitive_reason(text):
+            continue
+        # Fail-closed post-fetch guard (FINDING A1): drop any row outside the
+        # granted scopes even if a transport ignored its scope argument. Rows
+        # with no metadata.scope are owner-only and never pass.
+        if ((row.get("metadata") or {}).get("scope") or "") not in HOOK_ALLOWED_SCOPES:
+            continue
+        score_value = row.get("score")
+        score = float(score_value) if isinstance(score_value, (int, float)) else 0.0
+        if score and score < MIN_SEMANTIC_SCORE:
+            continue
+        haystack = text + " " + row_source(row)
+        candidate_tokens = words(haystack, generic=True)
+        project_overlap = len(scope.project_tokens & candidate_tokens)
+        task_overlap = len(scope.task_tokens & candidate_tokens)
+        if scope.project_tokens:
+            if project_overlap == 0 or task_overlap == 0:
+                continue
+        elif task_overlap < 3:
+            continue
+        relevance = score + (0.38 * project_overlap) + (0.08 * min(task_overlap, 8))
+        item = dict(row)
+        item["_relevance"] = relevance
+        item["_project_overlap"] = project_overlap
+        item["_task_overlap"] = task_overlap
+        item["_is_graph"] = _is_graph_row(row)
+        item["_provenance"] = list(
+            (row.get("metadata") or {}).get("provenance") or [_recall_pointer(row, item["_is_graph"])]
+        )
+        ranked.append(item)
+    ranked.sort(key=lambda item: (item["_relevance"], float(item.get("score") or 0.0)), reverse=True)
+    return ranked if limit is None else select_eligible_rows(ranked, limit)
+
+
+def approx_tokens(text: str) -> int:
+    return max(1, (len(text) + 3) // 4)
+
+
+def format_context_with_emitted_rows(
+    rows: list[dict[str, Any]], scope: Scope
+) -> tuple[str, list[dict[str, Any]]]:
+    if not rows:
+        return "", []
+    lines = [AUTHORITY_NOTICE, "", "Scoped Mem0 candidates:"]
+    emitted_rows: list[dict[str, Any]] = []
+    for row in rows:
+        text = row_text(row).replace("\n", " ").strip()
+        score = row.get("score")
+        score_text = f"{float(score):.3f}" if isinstance(score, (int, float)) else "n/a"
+        source = row_source(row)
+        memory_id = row_id(row) or "unknown"
+        provenance = row.get("_provenance") or (row.get("metadata") or {}).get("provenance") or []
+        pointer_bits = []
+        for pointer in provenance:
+            label = pointer.get("source")
+            pointer_id = pointer.get("graph_edge_uuid") if label == "graphiti" else pointer.get("id")
+            if label and pointer_id:
+                pointer_bits.append(f"{label}_id={pointer_id}")
+        suffix = f"; provenance={','.join(pointer_bits)}" if pointer_bits else ""
+        line = f"- {text} [id={memory_id}; score={score_text}; source={source}{suffix}]"
+        candidate = "\n".join(lines + [line])
+        if approx_tokens(candidate) > MAX_RECALL_TOKENS:
+            break
+        lines.append(line)
+        emitted_rows.append(row)
+    return ("\n".join(lines), emitted_rows) if emitted_rows else ("", [])
+
+
+def format_context(rows: list[dict[str, Any]], scope: Scope) -> str:
+    return format_context_with_emitted_rows(rows, scope)[0]
+
+
+def load_ctl():
+    return importlib.machinery.SourceFileLoader("mem0ctl_codex", str(CTL_PATH)).load_module()
+
+
+def default_memory_factory():
+    return load_ctl().get_memory("llama")
+
+
+_RECALL_FAST: Any = None
+_MEMORY_SELECTION: Any = None
+
+
+def load_recall_fast():
+    """Load the direct Ollama + Qdrant recall transport from this bin directory.
+
+    Stdlib-only module. Importing it is milliseconds, unlike the mem0 stack.
+    """
+    global _RECALL_FAST
+    if _RECALL_FAST is None:
+        spec = importlib.util.spec_from_file_location("mem0_recall_fast", str(RECALL_FAST_PATH))
+        if spec is None or spec.loader is None:
+            raise ImportError("mem0_recall_fast is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _RECALL_FAST = module
+    return _RECALL_FAST
+
+
+def load_memory_selection():
+    """Load the sibling selector without depending on the caller's cwd."""
+    global _MEMORY_SELECTION
+    if _MEMORY_SELECTION is None:
+        spec = importlib.util.spec_from_file_location(
+            "memory_selection_codex_hook", str(MEMORY_SELECTION_PATH)
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError("memory_selection is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _MEMORY_SELECTION = module
+    return _MEMORY_SELECTION
+
+
+class RecallUnavailable(RuntimeError):
+    """The recall transport could not reach Ollama or Qdrant."""
+
+
+def recall_rows(scope: "Scope", memory_factory: Callable[[], Any] | None = None) -> list[dict[str, Any]]:
+    """Fetch scoped recall candidates for one prompt.
+
+    Default path is the direct HTTP transport over the whole live store: one
+    search, no ``agent_id`` filter, matching how ``mem0-claude-hook`` searches.
+    Retired points (``status`` of ``tombstoned`` or ``decayed``) stay excluded
+    by the fast library's own filter.
+
+    A caller that supplies ``memory_factory`` (the unit tests, and any future
+    mem0-backed caller) keeps the original agent-scoped mem0 ``Memory.search``
+    path. Both paths use the same query and return the same row keys.
+    """
+    if memory_factory is not None:
+        memory = memory_factory()
+        rows: list[dict[str, Any]] = []
+        for agent in RECALL_AGENTS:
+            result = memory.search(
+                scope.query,
+                top_k=MAX_RECALL_ROWS_PER_AGENT,
+                filters={
+                    "user_id": USER_ID,
+                    "agent_id": agent,
+                    # FINDING A1: default-closed scope boundary. Empty grant
+                    # becomes an impossible value => zero rows, never "all".
+                    "scope": (
+                        list(HOOK_ALLOWED_SCOPES)
+                        if HOOK_ALLOWED_SCOPES
+                        else [IMPOSSIBLE_SCOPE]
+                    ),
+                    "NOT": [{"status": "tombstoned"}, {"status": "decayed"}, {"is_canary": True}],
+                },
+                threshold=MIN_SEMANTIC_SCORE,
+            )
+            rows.extend(unwrap_rows(result))
+        return rows
+
+    errors: list[str] = []
+    rows = load_recall_fast().search(
+        scope.query,
+        limit=MAX_RECALL_ROWS,
+        min_score=RECALL_MIN_SCORE,
+        timeout_s=RECALL_TIMEOUT_SECONDS,
+        user_id=USER_ID,
+        agent_id=None,
+        # FINDING A1: server-side default-closed scope boundary on the direct
+        # transport. mem0_recall_fast.search MUST apply this as a Qdrant
+        # MatchAny on payload scope; empty list means match NOTHING. See the
+        # contract addendum below — until that file lands the change, the
+        # rank_candidates guard above still blocks leakage.
+        allowed_scopes=list(HOOK_ALLOWED_SCOPES),
+        errors=errors,
+    )
+    if errors and not rows:
+        raise RecallUnavailable(errors[0])
+    return rows
+
+
+def unwrap_rows(result: Any) -> list[dict[str, Any]]:
+    rows = result.get("results", result) if isinstance(result, dict) else result
+    return [
+        row for row in (rows or [])
+        if isinstance(row, dict)
+        and not (row.get("is_canary") is True or (row.get("metadata") or {}).get("is_canary") is True)
+    ]
+
+
+def generation_path(session: str) -> Path:
+    return STATE / "generations" / f"{safe_component(session)}.json"
+
+
+def start_receipt_path(session: str, generation: str) -> Path:
+    key = sha256_text(session + "\0" + generation)
+    return STATE / "start" / f"{key}.json"
+
+
+def attempt_receipt_path(session: str, generation: str, prompt: str) -> Path:
+    key = sha256_text(session + "\0" + generation + "\0" + sha256_text(prompt))
+    return STATE / "start" / f"{key}.json"
+
+
+def empty_generation_state(session: str, generation: str, source: str = "") -> dict[str, Any]:
+    return {
+        "state_version": 2,
+        "session": session,
+        "source": source,
+        "generation": generation,
+        "injection_count": 0,
+        "seen_ids": [],
+        "seen_texts": [],
+        "topic_known": False,
+        "last_project": "",
+        "last_topic_tokens": [],
+        "last_prompt_sha256": "",
+        "at": now_mdt(),
+    }
+
+
+def _read_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _bounded_strings(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item not in (None, "")]
+
+
+def _bounded_count(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def load_generation_state(session: str, generation: str) -> dict[str, Any]:
+    stored = _read_object(generation_path(session))
+    generation_state = empty_generation_state(
+        session,
+        generation,
+        str(stored.get("source") or "") if stored.get("generation") == generation else "",
+    )
+    if stored.get("generation") == generation:
+        generation_state.update(
+            {
+                "injection_count": min(
+                    MAX_GENERATION_INJECTIONS,
+                    max(0, _bounded_count(stored.get("injection_count"))),
+                ),
+                "seen_ids": _bounded_strings(stored.get("seen_ids"))[:MAX_SEEN_ROWS_PER_GENERATION],
+                "seen_texts": _bounded_strings(stored.get("seen_texts"))[:MAX_SEEN_ROWS_PER_GENERATION],
+                "topic_known": bool(stored.get("topic_known")),
+                "last_project": str(stored.get("last_project") or ""),
+                "last_topic_tokens": _bounded_strings(
+                    stored.get("last_topic_tokens") or stored.get("last_task_tokens")
+                )[:MAX_TOPIC_TOKENS],
+                "last_prompt_sha256": str(stored.get("last_prompt_sha256") or ""),
+                "at": str(stored.get("at") or now_mdt()),
+            }
+        )
+    if generation_state["topic_known"] or generation_state["last_prompt_sha256"]:
+        return generation_state
+
+    # The former hook wrote one receipt for a whole generation. Read that
+    # receipt once so its emitted IDs and budget remain known, while leaving
+    # the old global latch behind.
+    prior_receipt = _read_object(start_receipt_path(session, generation))
+    if prior_receipt.get("generation") != generation:
+        return generation_state
+    generation_state["seen_ids"] = _bounded_strings(prior_receipt.get("candidate_ids"))[:MAX_SEEN_ROWS_PER_GENERATION]
+    generation_state["injection_count"] = (
+        1 if prior_receipt.get("status") == "injected" else 0
+    )
+    generation_state["last_project"] = str(prior_receipt.get("project") or "")
+    generation_state["last_prompt_sha256"] = str(prior_receipt.get("prompt_sha256") or "")
+    return generation_state
+
+
+def material_topic_change(
+    generation_state: dict[str, Any], scope: Scope, prompt: str
+) -> bool:
+    if _bounded_count(generation_state.get("injection_count")) >= MAX_GENERATION_INJECTIONS:
+        return False
+    if not generation_state.get("topic_known"):
+        prior_prompt = str(generation_state.get("last_prompt_sha256") or "")
+        return not prior_prompt or prior_prompt != sha256_text(prompt)
+
+    prior_project = str(generation_state.get("last_project") or "")
+    if prior_project != scope.project and (prior_project or scope.project):
+        return True
+
+    prior_tokens = set(_bounded_strings(generation_state.get("last_topic_tokens")))
+    current_tokens = set(topic_tokens(prompt))
+    if not prior_tokens and not current_tokens:
+        return False
+    if not current_tokens:
+        return False
+    if not prior_tokens:
+        return True
+    shared_tokens = len(prior_tokens & current_tokens)
+    combined_tokens = len(prior_tokens | current_tokens)
+    if shared_tokens < 2:
+        return combined_tokens > shared_tokens
+    similarity = shared_tokens / combined_tokens
+    return similarity < MIN_TOPIC_SIMILARITY
+
+
+def unseen_rows(
+    rows: Iterable[dict[str, Any]], generation_state: dict[str, Any]
+) -> list[dict[str, Any]]:
+    seen_ids = set(_bounded_strings(generation_state.get("seen_ids")))
+    seen_texts = set(_bounded_strings(generation_state.get("seen_texts")))
+    current_ids: set[str] = set()
+    current_texts: set[str] = set()
+    fresh_rows: list[dict[str, Any]] = []
+    for row in rows:
+        identifier = row_id(row)
+        text_key = same_scope_text_key(row)
+        if identifier and (identifier in seen_ids or identifier in current_ids):
+            continue
+        if text_key and (text_key in seen_texts or text_key in current_texts):
+            continue
+        if identifier:
+            current_ids.add(identifier)
+        if text_key:
+            current_texts.add(text_key)
+        fresh_rows.append(row)
+    return fresh_rows
+
+
+def update_generation_state(
+    generation_state: dict[str, Any],
+    scope: Scope,
+    prompt: str,
+    emitted_rows: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    generation_state["topic_known"] = True
+    generation_state["last_project"] = scope.project
+    generation_state["last_topic_tokens"] = sorted(topic_tokens(prompt))[:MAX_TOPIC_TOKENS]
+    generation_state["last_prompt_sha256"] = sha256_text(prompt)
+    emitted_rows = list(emitted_rows)
+    if emitted_rows:
+        generation_state["injection_count"] = min(
+            MAX_GENERATION_INJECTIONS,
+            _bounded_count(generation_state.get("injection_count")) + 1,
+        )
+        seen_ids = _bounded_strings(generation_state.get("seen_ids"))
+        seen_texts = _bounded_strings(generation_state.get("seen_texts"))
+        for row in emitted_rows:
+            identifier = row_id(row)
+            text_key = same_scope_text_key(row)
+            if identifier and identifier not in seen_ids:
+                seen_ids.append(identifier)
+            if text_key and text_key not in seen_texts:
+                seen_texts.append(text_key)
+        generation_state["seen_ids"] = seen_ids[:MAX_SEEN_ROWS_PER_GENERATION]
+        generation_state["seen_texts"] = seen_texts[:MAX_SEEN_ROWS_PER_GENERATION]
+    generation_state["at"] = now_mdt()
+    return generation_state
+
+
+def is_compaction_prime(payload: dict[str, Any]) -> bool:
+    for key in ("compact", "compaction", "is_compaction"):
+        if payload.get(key) is True:
+            return True
+    markers = (
+        pick(payload, "source", default=""),
+        pick(payload, "reason", default=""),
+        pick(payload, "hook_event_name", "hookEventName", default=""),
+    )
+    return any("compact" in str(marker).lower() for marker in markers)
+
+
+def handle_prime(payload: dict[str, Any]) -> str:
+    if HOOK_OFF.exists() or is_subagent(payload):
+        return ""
+    session = str(pick(payload, "session_id", "sessionId", default="unknown"))
+    source = str(pick(payload, "source", default="startup"))
+    transcript = str(pick(payload, "transcript_path", "transcriptPath", default=""))
+    try:
+        size = Path(transcript).stat().st_size if transcript and Path(transcript).is_file() else 0
+    except OSError:
+        size = 0
+    previous = _read_object(generation_path(session))
+    previous_generation = str(previous.get("generation") or "")
+    if is_compaction_prime(payload):
+        generation = sha256_text(
+            f"{session}\0{source}\0{transcript}\0{size}\0{previous_generation}\0{time.time_ns()}"
+        )[:20]
+        generation_state = empty_generation_state(session, generation, source)
+    else:
+        generation = sha256_text(f"{session}\0{source}\0{transcript}\0{size}")[:20]
+        generation_state = load_generation_state(session, generation)
+        generation_state["source"] = source
+        generation_state["at"] = now_mdt()
+    atomic_json(
+        generation_path(session),
+        generation_state,
+    )
+    log_event(
+        "prime",
+        "PASS",
+        session=session,
+        generation=generation,
+        source=source,
+        reason="compaction-reset" if is_compaction_prime(payload) else None,
+    )
+    return ""
+
+
+def current_generation(session: str) -> str:
+    path = generation_path(session)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        value = str(payload.get("generation") or "")
+        if value:
+            return value
+    except Exception:
+        pass
+    return sha256_text(session + "\0fallback")[:20]
+
+
+def handle_start(payload: dict[str, Any], memory_factory: Callable[[], Any] | None = None) -> str:
+    if HOOK_OFF.exists() or is_subagent(payload):
+        return ""
+    session = str(pick(payload, "session_id", "sessionId", default="unknown"))
+    turn = str(pick(payload, "turn_id", "turnId", default="unknown"))
+    prompt = str(pick(payload, "prompt", default=""))
+    cwd = str(pick(payload, "cwd", default=os.getcwd()))
+    if not prompt:
+        return ""
+    generation = current_generation(session)
+    scope = build_scope(cwd, prompt)
+    generation_state = load_generation_state(session, generation)
+    if not material_topic_change(generation_state, scope, prompt):
+        log_event("start", "SKIP_TOPIC", session=session, turn=turn, generation=generation)
+        return ""
+
+    t0 = time.monotonic()
+    try:
+        rows = recall_rows(scope, memory_factory)
+        eligible = rank_candidates(rows, scope, limit=None)
+        fresh = unseen_rows(eligible, generation_state)
+        ranked = select_eligible_rows(fresh, MAX_RECALL_ITEMS)
+        context, emitted_rows = format_context_with_emitted_rows(ranked, scope)
+    except Exception:
+        elapsed = int((time.monotonic() - t0) * 1000)
+        log_event("start", "FAIL_OPEN", session=session, turn=turn, reason="service-unavailable", elapsed_ms=elapsed)
+        return ""
+
+    generation_state = update_generation_state(generation_state, scope, prompt, emitted_rows)
+    atomic_json(
+        generation_path(session),
+        generation_state,
+    )
+    atomic_json(
+        attempt_receipt_path(session, generation, prompt),
+        {
+            "session": session,
+            "turn": turn,
+            "generation": generation,
+            "prompt_sha256": sha256_text(prompt),
+            "project": scope.project,
+            "candidate_ids": [row_id(row) for row in emitted_rows if row_id(row)],
+            "status": "injected" if context else "empty",
+            "at": now_mdt(),
+        },
+    )
+    elapsed = int((time.monotonic() - t0) * 1000)
+    log_event(
+        "start",
+        "PASS" if context else "PASS_EMPTY",
+        session=session,
+        turn=turn,
+        generation=generation,
+        count=len(ranked),
+        project=scope.project or "unscoped",
+        elapsed_ms=elapsed,
+    )
+    if not context:
+        return ""
+    return json.dumps(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": context,
+            }
+        },
+        ensure_ascii=False,
+    )
+
+
+def request_path(payload: dict[str, Any]) -> Path:
+    session = str(pick(payload, "session_id", "sessionId", default="unknown"))
+    turn = str(pick(payload, "turn_id", "turnId", default="session-end"))
+    event_name = str(pick(payload, "hook_event_name", "hookEventName", default="unknown"))
+    key = sha256_text(f"{session}\0{turn}\0{event_name}")
+    return STATE / "requests" / f"{key}.json"
+
+
+def handle_end(payload: dict[str, Any]) -> str:
+    if capture_skip_enabled():
+        return ""
+    event_name = str(pick(payload, "hook_event_name", "hookEventName", default="Stop"))
+    stop_output = "{}" if event_name.lower() == "stop" else ""
+    if HOOK_OFF.exists() or is_subagent(payload):
+        return stop_output
+    session = str(pick(payload, "session_id", "sessionId", default="unknown"))
+    turn = str(pick(payload, "turn_id", "turnId", default="session-end"))
+    transcript = str(pick(payload, "transcript_path", "transcriptPath", default=""))
+    cwd = str(pick(payload, "cwd", default=""))
+    if not transcript or not Path(transcript).is_file():
+        log_event("end-enqueue", "FAIL_OPEN", session=session, turn=turn, reason="missing-transcript", event_name=event_name)
+        return stop_output
+    request = request_path(payload)
+    safe_request = {
+        "session": session,
+        "turn": turn,
+        "event_name": event_name,
+        "transcript_path": transcript,
+        "cwd": cwd,
+        "assistant_completed": bool(pick(payload, "last_assistant_message", "lastAssistantMessage", default="")),
+        "queued_at": now_mdt(),
+    }
+    atomic_json(request, safe_request)
+    try:
+        subprocess.Popen(
+            [str(Path(__file__).resolve()), "worker", str(request)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+        log_event("end-enqueue", "PASS", session=session, turn=turn, event_name=event_name, request=request.stem)
+    except Exception:
+        log_event("end-enqueue", "FAIL_OPEN", session=session, turn=turn, reason="spawn-failed", event_name=event_name)
+    return stop_output
+
+
+def content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    bits: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        value = block.get("text") or block.get("input_text") or block.get("output_text")
+        if isinstance(value, str):
+            bits.append(value)
+    return "\n".join(bits)
+
+
+def actual_user_text(text: str) -> str:
+    clean = text.strip()
+    if not clean or clean.startswith(SYNTHETIC_USER_PREFIXES):
+        return ""
+    if "<codex_delegation>" in clean:
+        match = re.search(r"<input>(.*?)</input>", clean, re.S)
+        return match.group(1).strip() if match else ""
+    return clean
+
+
+@dataclass
+class TranscriptEvidence:
+    records: list[dict[str, str]]
+    last_role: str
+    completed: bool
+    digest: str
+
+
+def parse_transcript(path: Path, assistant_completed: bool = False) -> TranscriptEvidence:
+    users: list[tuple[int, str]] = []
+    tools: list[tuple[int, str]] = []
+    call_names: dict[str, str] = {}
+    last_user_seq = -1
+    last_assistant_seq = -1
+    last_task_complete_seq = -1
+    last_role = ""
+    seq = 0
+    with path.open(encoding="utf-8", errors="ignore") as handle:
+        for raw in handle:
+            seq += 1
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                continue
+            if obj.get("type") == "event_msg" and (obj.get("payload") or {}).get("type") == "task_complete":
+                last_task_complete_seq = seq
+                continue
+            if obj.get("type") != "response_item":
+                continue
+            payload = obj.get("payload") or {}
+            ptype = payload.get("type")
+            if ptype == "message":
+                role = str(payload.get("role") or "")
+                text = content_text(payload.get("content"))
+                if role == "user":
+                    text = actual_user_text(text)
+                    if text:
+                        users.append((seq, redact_text(text, 5000)))
+                        last_user_seq = seq
+                        last_role = "user"
+                elif role == "assistant" and text.strip():
+                    last_assistant_seq = seq
+                    last_role = "assistant"
+            elif ptype in ("function_call", "custom_tool_call"):
+                call_id = str(payload.get("call_id") or payload.get("id") or "")
+                if call_id:
+                    call_names[call_id] = str(payload.get("name") or "tool")
+            elif ptype in ("function_call_output", "custom_tool_call_output"):
+                call_id = str(payload.get("call_id") or payload.get("id") or "")
+                output = payload.get("output")
+                if not isinstance(output, str):
+                    try:
+                        output = json.dumps(output, ensure_ascii=False, default=str)
+                    except Exception:
+                        output = str(output)
+                name = call_names.get(call_id, "tool")
+                clean_output = redact_text(output, 5000)
+                if clean_output.strip():
+                    tools.append((seq, f"tool={name}\n{clean_output}"))
+                    last_role = "tool"
+
+    selected_users = users[-MAX_USER_RECORDS:]
+    selected_tools = tools[-MAX_TOOL_RECORDS:]
+    combined = sorted([(seq, "user", text) for seq, text in selected_users] + [(seq, "tool", text) for seq, text in selected_tools])
+    records: list[dict[str, str]] = []
+    chars = 0
+    user_i = 0
+    tool_i = 0
+    for _, kind, text in reversed(combined):
+        if chars + len(text) > MAX_EVIDENCE_CHARS:
+            continue
+        if kind == "user":
+            user_i += 1
+            ref = f"U{user_i}"
+        else:
+            tool_i += 1
+            ref = f"T{tool_i}"
+        records.append({"ref": ref, "kind": kind, "text": text})
+        chars += len(text)
+    records.reverse()
+    digest_body = json.dumps(records, sort_keys=True, ensure_ascii=True)
+    completed = assistant_completed or (last_task_complete_seq > last_user_seq >= 0 and last_assistant_seq > last_user_seq)
+    return TranscriptEvidence(records=records, last_role=last_role, completed=completed, digest=sha256_text(digest_body))
+
+
+EXTRACTION_PROMPT = """Extract at most eight durable memory candidates from the evidence JSON.
+
+Allowed kinds: fact, decision, preference, procedure.
+- A decision or preference must cite at least one U reference where the owner states it.
+- A fact or procedure must cite at least one T reference with native or tool evidence.
+- Assistant claims are absent on purpose. Do not infer them.
+- Do not extract plans, transient chatter, task requests, guesses, open questions, completion claims without tool proof, credentials, secrets, tokens, cookies, recovery material, contact data, street addresses, PII, PHI, financial account data, or money amounts.
+- Keep exact paths, ports, names, versions, and states from the cited evidence.
+- Each fact must be one plain self-contained sentence.
+
+Return JSON only:
+{"candidates":[{"fact":"...","kind":"fact","support":["T1"]}]}
+
+Evidence:
+"""
+
+
+def parse_candidate_json(text: str) -> list[dict[str, Any]]:
+    clean = text.strip()
+    if clean.startswith("```"):
+        clean = re.sub(r"^```(?:json)?\s*", "", clean)
+        clean = re.sub(r"\s*```$", "", clean)
+    try:
+        payload = json.loads(clean)
+    except Exception:
+        start = clean.find("{")
+        end = clean.rfind("}")
+        if start < 0 or end <= start:
+            return []
+        try:
+            payload = json.loads(clean[start : end + 1])
+        except Exception:
+            return []
+    rows = payload.get("candidates", []) if isinstance(payload, dict) else payload
+    return [row for row in (rows or []) if isinstance(row, dict)]
+
+
+# ----------------------------------------------------------- EXTRACTION DOORS
+# Two engines can answer the extraction prompt. Which one ran is recorded here
+# so the capture log states it outright instead of leaving it to be inferred
+# from a latency change.
+EXTRACT_DOOR: dict[str, str | None] = {"door": None, "fallback": None}
+
+
+def student_timeout() -> float:
+    """The student's own ceiling, separate from the incumbent's.
+
+    EXTRACT_TIMEOUT_SECONDS (60) was calibrated for the 27B, where it is a
+    per-model ceiling inside a two-model chain — a worst case of 120 s. The two
+    engines have very different latency shapes, so one shared number cannot be
+    right for both: measured on real transcripts the student runs about 5 s on
+    a small session and well past 60 s on a large one, while the incumbent runs
+    past 290 s on the same large one. A single ceiling either cuts the student
+    off on work it would have finished sooner than the incumbent, or loosens
+    the incumbent's.
+
+    UNSET = today's 60 s exactly, so this changes nothing until it is set.
+    """
+    raw = os.environ.get("MEM0_EXTRACT_TIMEOUT", "").strip()
+    if not raw:
+        return EXTRACT_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return EXTRACT_TIMEOUT_SECONDS
+    return value if value > 0 else EXTRACT_TIMEOUT_SECONDS
+
+
+# THE STUDENT'S PROVEN ENVELOPE — set from measurement, see
+# data/capture-student-deploy/ENVELOPE-PROBE.json.
+#
+# The v1 capture student was trained on evidence windows of at most 6,647 chars
+# while the live hook sends up to 26,000, so most real sessions are larger than
+# anything it has seen. Off its envelope it is not merely worse, it is ERRATIC —
+# the canary recorded 8/8 on one oversized session and 0/8 on the next, and an
+# outright failure at 8,314 chars. A memory system that sometimes returns
+# nothing is worse than a slow one that always returns something.
+#
+# So the door routes by size: inside the envelope the student answers, outside it
+# the incumbent does, and oversized traffic never reaches the student at all.
+# Measured in SERIALIZED EVIDENCE CHARACTERS — the exact bytes that go on the
+# wire — because that is the thing the model actually has to read.
+#
+# 0 disables the student entirely; a negative value removes the size check.
+STUDENT_MAX_EVIDENCE_CHARS = 5200
+
+
+def student_max_evidence_chars() -> int:
+    raw = os.environ.get("MEM0_EXTRACT_MAX_EVIDENCE", "").strip()
+    if not raw:
+        return STUDENT_MAX_EVIDENCE_CHARS
+    try:
+        return int(raw)
+    except ValueError:
+        return STUDENT_MAX_EVIDENCE_CHARS
+
+
+def serialized_evidence(records: list[dict[str, str]]) -> str:
+    """The evidence exactly as it is sent. One definition, used by the prompt
+    builder and by the size check, so the thing measured is the thing routed."""
+    return json.dumps(records, ensure_ascii=False, separators=(",", ":"))
+
+
+def build_extraction_prompt(records: list[dict[str, str]]) -> str:
+    """The one place the prompt is assembled. The capture student was trained on
+    exactly this string (data/capture-training/BUILD-REPORT.json pins the
+    constant's sha256 to the harvest's), so both doors must send it byte for
+    byte or the student is answering a question it was never taught."""
+    return EXTRACTION_PROMPT + serialized_evidence(records)
+
+
+def _fallback_reason(exc: BaseException) -> str:
+    """A SHORT, FIXED reason code. Never the exception text: an exception can
+    carry response body, and the capture log is metadata-only by contract."""
+    import socket
+    import urllib.error
+
+    if isinstance(exc, StudentAnswerError):
+        return exc.code
+    if isinstance(exc, urllib.error.HTTPError):
+        return "http-error"
+    if isinstance(exc, socket.timeout) or isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, urllib.error.URLError):
+        return "timeout" if isinstance(exc.reason, socket.timeout) else "connect"
+    return "error"
+
+
+class StudentAnswerError(Exception):
+    """The student answered, but not with a usable candidates envelope."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def strict_candidate_envelope(text: str) -> list[dict[str, Any]]:
+    """Parse a student answer STRICTLY, and tell empty apart from broken.
+
+    parse_candidate_json returns [] for both "parsed fine, nothing durable here"
+    and "could not parse a thing". The door must not confuse them: an empty
+    candidate list is a legitimate answer for evidence with nothing worth
+    keeping, and falling back to the 27B on every quiet session would throw the
+    whole saving away. Only an answer that is not a candidates envelope at all
+    is a failure, and only that raises.
+    """
+    clean = (text or "").strip()
+    if not clean:
+        raise StudentAnswerError("empty-answer")
+    if clean.startswith("```"):
+        clean = re.sub(r"^```(?:json)?\s*", "", clean)
+        clean = re.sub(r"\s*```$", "", clean)
+    payload: Any = None
+    try:
+        payload = json.loads(clean)
+    except Exception:
+        start = clean.find("{")
+        end = clean.rfind("}")
+        if start < 0 or end <= start:
+            raise StudentAnswerError("bad-json")
+        try:
+            payload = json.loads(clean[start : end + 1])
+        except Exception:
+            raise StudentAnswerError("bad-json")
+    rows = payload.get("candidates") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        raise StudentAnswerError("bad-shape")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def student_extract(records: list[dict[str, str]], url: str, model: str) -> list[dict[str, Any]]:
+    """Extraction through the OpenAI-compatible capture-student door.
+
+    stdlib urllib on purpose: the worker already pays for mem0 and ollama
+    imports, and this path must stay usable even if the openai package is not
+    present in whatever interpreter a future harness runs the hook under.
+
+    temperature 0 is pinned HERE as well as clamped at the server.
+    RECANARY-B-2026-08-29 measured what an unpinned temperature costs: 100% of
+    answers in shape becomes 17.6%. It is one argument and it was left out for
+    two days, so it is now stated at both ends.
+    """
+    import urllib.request
+
+    body = json.dumps(
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": build_extraction_prompt(records)}],
+            "temperature": 0,
+            "max_tokens": 1200,
+            "stream": False,
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        url.rstrip("/") + "/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=student_timeout()) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except Exception:
+        raise StudentAnswerError("bad-response")
+    return strict_candidate_envelope(content)
+
+
+def ollama_extract(records: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """The incumbent path, unchanged: 27B first, llama3.1:8b behind it."""
+    ctl = load_ctl()
+    ctl._patch_ollama_think()
+    import ollama
+
+    prompt = build_extraction_prompt(records)
+    error: Exception | None = None
+    for model_key in ("qwen", "llama"):
+        try:
+            with ollama.Client(host=ctl.OLLAMA_URL, timeout=EXTRACT_TIMEOUT_SECONDS) as client:
+                response = client.chat(
+                    model=ctl.MODELS[model_key],
+                    messages=[{"role": "user", "content": prompt}],
+                    format="json",
+                    options={"temperature": 0, "num_predict": 1200},
+                )
+            return parse_candidate_json(response["message"]["content"])
+        except Exception as exc:
+            error = exc
+    if error:
+        raise error
+    return []
+
+
+def default_extractor(records: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Env-switched extraction with the incumbent as the rollback.
+
+    MEM0_EXTRACT_URL unset  -> byte-identical to the path that shipped before
+                               this door existed. Unsetting it IS the rollback;
+                               no code change, no restart, no redeploy.
+    MEM0_EXTRACT_URL set    -> the capture student answers. On ANY failure —
+                               refused connection, timeout, HTTP error, an
+                               answer that is not a candidates envelope — the
+                               ollama path runs instead and the reason is
+                               logged. A capture is never lost to the door.
+    """
+    test_value = os.environ.get("MEM0_CODEX_TEST_EXTRACT_JSON")
+    if test_value is not None:
+        return parse_candidate_json(test_value)
+
+    EXTRACT_DOOR["door"] = None
+    EXTRACT_DOOR["fallback"] = None
+    url = os.environ.get("MEM0_EXTRACT_URL", "").strip()
+    if url:
+        limit = student_max_evidence_chars()
+        size = len(serialized_evidence(records))
+        if limit == 0:
+            EXTRACT_DOOR["fallback"] = "student-disabled"
+        elif limit > 0 and size > limit:
+            # Outside the envelope this student was proven on. Not an error —
+            # a routing decision, taken before the call is made.
+            EXTRACT_DOOR["fallback"] = "oversize"
+        else:
+            model = os.environ.get("MEM0_EXTRACT_MODEL", "").strip() or "default_model"
+            try:
+                rows = student_extract(records, url, model)
+                EXTRACT_DOOR["door"] = "student"
+                return rows
+            except Exception as exc:
+                EXTRACT_DOOR["fallback"] = _fallback_reason(exc)
+
+    EXTRACT_DOOR["door"] = "ollama"
+    return ollama_extract(records)
+
+
+def literal_values(text: str) -> set[str]:
+    values = set(PATH_RE.findall(text)) | set(HEX_RE.findall(text)) | set(URL_RE.findall(text))
+    values |= {value for value in NUMBER_RE.findall(text) if len(value) >= 2}
+    return values
+
+
+def validate_candidate(row: dict[str, Any], records: list[dict[str, str]]) -> tuple[bool, str]:
+    fact = str(row.get("fact") or row.get("memory") or "").strip()
+    kind = str(row.get("kind") or "").lower()
+    support = row.get("support") or []
+    if not isinstance(support, list):
+        return False, "bad-support"
+    refs = [str(ref) for ref in support]
+    record_map = {record["ref"]: record for record in records}
+    cited = [record_map[ref] for ref in refs if ref in record_map]
+    if len(fact) < 20 or len(fact) > 600 or kind not in {"fact", "decision", "preference", "procedure"}:
+        return False, "bad-shape"
+    if sensitive_reason(fact):
+        return False, "sensitive"
+    if SPECULATION_RE.search(fact):
+        return False, "speculative"
+    if not cited or len(cited) != len(refs):
+        return False, "missing-support"
+    cited_kinds = {record["kind"] for record in cited}
+    if kind in {"decision", "preference"} and "user" not in cited_kinds:
+        return False, "needs-user-support"
+    if kind in {"fact", "procedure"} and "tool" not in cited_kinds:
+        return False, "needs-tool-support"
+    support_text = " ".join(record["text"] for record in cited)
+    fact_tokens = words(fact, generic=True) - GENERIC_WORDS
+    support_tokens = words(support_text, generic=True)
+    overlap = len(fact_tokens & support_tokens)
+    if fact_tokens and overlap / max(1, len(fact_tokens)) < 0.28 and overlap < 3:
+        return False, "weak-text-support"
+    for literal in literal_values(fact):
+        if literal not in support_text:
+            return False, "unsupported-literal"
+    return True, "ok"
+
+
+def existing_run_rows(memory: Any, run_id: str) -> list[dict[str, Any]]:
+    try:
+        return unwrap_rows(memory.get_all(
+            filters={
+                "run_id": run_id,
+                "NOT": [{"status": "tombstoned"}, {"status": "decayed"}],
+            },
+            top_k=100,
+        ))
+    except Exception:
+        return []
+
+
+def store_candidates(
+    memory: Any,
+    candidates: list[dict[str, Any]],
+    records: list[dict[str, str]],
+    *,
+    run_id: str,
+    session: str,
+    cwd: str,
+    transcript: str,
+    digest: str,
+) -> tuple[int, int, int]:
+    existing = existing_run_rows(memory, run_id)
+    existing_texts = [row_text(row) for row in existing]
+    stored = 0
+    skipped = 0
+    rejected = 0
+    project = build_scope(cwd, "").project
+    for candidate in candidates[:8]:
+        valid, _reason = validate_candidate(candidate, records)
+        if not valid:
+            rejected += 1
+            continue
+        fact = str(candidate.get("fact") or candidate.get("memory") or "").strip()
+        if near_duplicate(fact, existing_texts):
+            skipped += 1
+            continue
+        try:
+            similar = unwrap_rows(
+                memory.search(
+                    fact,
+                    top_k=3,
+                    filters={
+                        "user_id": USER_ID,
+                        "agent_id": CAPTURE_AGENT,
+                        "NOT": [{"status": "tombstoned"}, {"status": "decayed"}, {"is_canary": True}],
+                    },
+                    threshold=0.93,
+                )
+            )
+        except Exception:
+            similar = []
+        if any(
+            near_duplicate(fact, [row_text(row)])
+            or (isinstance(row.get("score"), (int, float)) and float(row["score"]) >= 0.97)
+            for row in similar
+        ):
+            skipped += 1
+            continue
+        support = [str(ref) for ref in candidate.get("support") or []]
+        metadata = {
+            "added_mdt": now_mdt(),
+            "source": "codex-session-hook",
+            "cwd": cwd,
+            "project": project,
+            "transcript_path": transcript,
+            "capture_digest": digest,
+            "kind": str(candidate.get("kind") or "fact"),
+            "support_refs": support,
+        }
+        if CAPTURE_SCOPE:
+            # Lands as the top-level qdrant payload key `scope`, which is the key
+            # mem0_recall_fast filters on. Verified: every key in this metadata
+            # dict is already a top-level payload key on live codex-hook rows.
+            metadata["scope"] = CAPTURE_SCOPE
+        memory.add(
+            [{"role": "user", "content": fact}],
+            user_id=USER_ID,
+            agent_id=CAPTURE_AGENT,
+            run_id=run_id,
+            metadata=metadata,
+            infer=False,
+        )
+        existing_texts.append(fact)
+        stored += 1
+    return stored, skipped, rejected
+
+
+def capture_receipt_path(digest: str) -> Path:
+    return STATE / "capture" / f"{digest}.json"
+
+
+def digest_lock_path(digest: str) -> Path:
+    return STATE / "locks" / f"digest-{safe_component(digest)}.lock"
+
+
+def session_lock_path(session: str) -> Path:
+    return STATE / "locks" / f"session-{safe_component(session)}.lock"
+
+
+CAPTURE_RECEIPT_SUCCESS = frozenset({"complete", "empty"})
+
+
+def local_capture_key(session: str, digest: str) -> str:
+    """Bind local capture state to its fixed principal, write scope, and source."""
+    return sha256_text(json.dumps(
+        ["local-capture-v2", USER_ID, CAPTURE_SCOPE, session, digest],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ))
+
+
+def capture_receipt_committed(
+    receipt: dict[str, Any], *, identity: str, session: str, digest: str
+) -> bool:
+    """Accept only a complete terminal receipt for this exact local identity."""
+    status = receipt.get("status")
+    if status not in CAPTURE_RECEIPT_SUCCESS:
+        return False
+    if (
+        receipt.get("identity") != identity
+        or receipt.get("principal") != USER_ID
+        or receipt.get("write_scope") != CAPTURE_SCOPE
+        or receipt.get("session") != session
+        or receipt.get("digest") != digest
+        or not isinstance(receipt.get("at"), str)
+        or not receipt["at"]
+    ):
+        return False
+    if status == "empty":
+        return True
+    if not isinstance(receipt.get("run_id"), str) or not receipt["run_id"]:
+        return False
+    return all(
+        isinstance(receipt.get(field), int)
+        and not isinstance(receipt[field], bool)
+        and receipt[field] >= 0
+        for field in ("stored", "skipped", "rejected")
+    )
+
+
+def acquire_capture_flock(path: Path) -> Any:
+    """flock with the capture wait ceiling; returns the handle or None.
+
+    Shared by the digest lock and the session lock. Same fail-open shape:
+    the kernel drops the lock when a crashed holder dies, the file is never
+    unlinked (unlinking would hand a third worker a fresh inode that
+    bypasses the lock).
+    """
+    ensure_private_dir(STATE / "locks")
+    try:
+        handle = open(path, "a+", encoding="utf-8")
+    except OSError:
+        return None
+    deadline = time.monotonic() + CAPTURE_LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except (BlockingIOError, OSError):
+            if time.monotonic() >= deadline:
+                handle.close()
+                return None
+            time.sleep(CAPTURE_LOCK_POLL_SECONDS)
+
+
+def acquire_session_lock(session: str) -> Any:
+    """Serialize ALL captures of one session, whatever their digests.
+
+    The digest lock below closed the same-digest race, but Stop and
+    SessionEnd snapshot the transcript moments apart, so the two workers can
+    carry DIFFERENT digests for the same session end — each takes its own
+    digest lock, both run the semantic dup checks before either has stored,
+    and the same fact lands twice (measured on the conductor pilot,
+    2026-08-28: two `capture PASS` for session 01a048f5-04fe). Holding one
+    session-scoped lock across the whole capture means the second twin runs
+    its checks AFTER the first has committed, so the 0.93/0.97 semantic
+    layer finally sees the rows it needs to skip.
+    """
+    return acquire_capture_flock(session_lock_path(session))
+
+
+def acquire_digest_lock(digest: str) -> Any:
+    """Take the per-capture-identity lock; return the open handle, or None.
+
+    Stop and SessionEnd enqueue DIFFERENT request files for the same
+    transcript, so run_worker's per-request lock never serializes their two
+    workers, and the receipt cannot either: it is only written after a
+    capture finishes, so two workers that start in the same second both pass
+    the exists() check and store the same fact twice (measured 2026-08-28,
+    digest fad9a2c2...). The caller supplies a key bound to principal, write
+    scope, native session, and evidence digest.
+
+    flock, not a claim marker, keeps the path fail-open: the kernel releases
+    the lock when a crashed holder dies, so a failed capture never blocks a
+    later capture of the same digest. The waiter re-checks the receipt after
+    acquiring — SKIP_DUP behind a finished peer, a fresh attempt behind a
+    failed one. The lock file is never unlinked: removing it would let a
+    third worker reopen the path as a new inode and bypass the lock. It is
+    one empty file per capture identity, the same growth rate as the receipts.
+    """
+    return acquire_capture_flock(digest_lock_path(digest))
+
+
+def _release_capture_flock(handle: Any) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+
+def _retain_legacy_digest_marker(digest: str) -> None:
+    """Keep the prior diagnostic path without using it as a lock identity."""
+    try:
+        ensure_private_dir(STATE / "locks")
+        marker = digest_lock_path(digest)
+        fd = os.open(marker, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def capture_request(
+    request: dict[str, Any],
+    memory_factory: Callable[[], Any] | None = None,
+    extractor: Callable[[list[dict[str, str]]], list[dict[str, Any]]] | None = None,
+) -> str:
+    if capture_skip_enabled():
+        return "KILL_SWITCH"
+    if HOOK_OFF.exists():
+        return "KILL_SWITCH"
+    session = str(request.get("session") or "unknown")
+    turn = str(request.get("turn") or "session-end")
+    transcript = str(request.get("transcript_path") or "")
+    cwd = str(request.get("cwd") or "")
+    event_name = str(request.get("event_name") or "unknown")
+    if not transcript or not Path(transcript).is_file():
+        log_event("capture", "FAIL_OPEN", session=session, turn=turn, reason="missing-transcript", event_name=event_name)
+        return "FAIL_OPEN"
+    session_lock = acquire_session_lock(session)
+    if session_lock is None:
+        log_event("capture", "FAIL_OPEN", session=session, turn=turn, reason="session-lock", event_name=event_name)
+        return "FAIL_OPEN"
+    try:
+        try:
+            evidence = parse_transcript(Path(transcript), bool(request.get("assistant_completed")))
+        except Exception:
+            log_event("capture", "FAIL_OPEN", session=session, turn=turn, reason="transcript-parse", event_name=event_name)
+            return "FAIL_OPEN"
+        digest = evidence.digest
+        _retain_legacy_digest_marker(digest)
+        identity = local_capture_key(session, digest)
+        receipt = capture_receipt_path(identity)
+        lock_handle = acquire_digest_lock(identity)
+        if lock_handle is None:
+            log_event("capture", "FAIL_OPEN", session=session, turn=turn, digest=digest[:16], reason="digest-lock", event_name=event_name)
+            return "FAIL_OPEN"
+        try:
+            prior = _read_object(receipt)
+            if capture_receipt_committed(
+                prior,
+                identity=identity,
+                session=session,
+                digest=digest,
+            ):
+                log_event("capture", "SKIP_DUP", session=session, turn=turn, digest=digest[:16], event_name=event_name)
+                return "SKIP_DUP"
+            receipt_base = {
+                "identity": identity,
+                "principal": USER_ID,
+                "write_scope": CAPTURE_SCOPE,
+                "digest": digest,
+                "session": session,
+                "turn": turn,
+                "at": now_mdt(),
+            }
+            if not evidence.completed:
+                atomic_json(receipt, {**receipt_base, "status": "interrupted"})
+                log_event("capture", "SKIP_INTERRUPTED", session=session, turn=turn, digest=digest[:16], event_name=event_name)
+                return "SKIP_INTERRUPTED"
+            if not evidence.records:
+                atomic_json(receipt, {**receipt_base, "status": "empty"})
+                log_event("capture", "PASS_EMPTY", session=session, turn=turn, digest=digest[:16], event_name=event_name)
+                return "PASS_EMPTY"
+
+            t0 = time.monotonic()
+            try:
+                candidates = (extractor or default_extractor)(evidence.records)
+                memory = (memory_factory or default_memory_factory)()
+                run_id = f"codex:{session}:{digest[:24]}"
+                stored, skipped, rejected = store_candidates(
+                    memory,
+                    candidates,
+                    evidence.records,
+                    run_id=run_id,
+                    session=session,
+                    cwd=cwd,
+                    transcript=transcript,
+                    digest=digest,
+                )
+            except Exception:
+                elapsed = int((time.monotonic() - t0) * 1000)
+                log_event("capture", "FAIL_OPEN", session=session, turn=turn, digest=digest[:16], reason="service-unavailable", event_name=event_name, elapsed_ms=elapsed, extract_door=EXTRACT_DOOR["door"], extract_fallback=EXTRACT_DOOR["fallback"])
+                return "FAIL_OPEN"
+
+            atomic_json(
+                receipt,
+                {
+                    **receipt_base,
+                    "status": "complete",
+                    "run_id": run_id,
+                    "stored": stored,
+                    "skipped": skipped,
+                    "rejected": rejected,
+                    "extract_door": EXTRACT_DOOR["door"],
+                    "extract_fallback": EXTRACT_DOOR["fallback"],
+                },
+            )
+            elapsed = int((time.monotonic() - t0) * 1000)
+            log_event(
+                "capture",
+                "PASS",
+                session=session,
+                turn=turn,
+                digest=digest[:16],
+                event_name=event_name,
+                stored=stored,
+                skipped=skipped,
+                rejected=rejected,
+                elapsed_ms=elapsed,
+                extract_door=EXTRACT_DOOR["door"],
+                extract_fallback=EXTRACT_DOOR["fallback"],
+                extract_candidates=len(candidates or []),
+                # True ONLY on the fault being watched: the student ran, and the
+                # capture ended up storing nothing. `skipped` means the facts were
+                # already known, which is a correct empty capture, not this fault.
+                student_zero=(True if EXTRACT_DOOR["door"] == "student"
+                              and stored == 0 and skipped == 0 else None),
+            )
+            return "PASS"
+        finally:
+            _release_capture_flock(lock_handle)
+    finally:
+        _release_capture_flock(session_lock)
+
+
+def run_worker(request_file: Path) -> int:
+    if capture_skip_enabled():
+        return 0
+    ensure_private_dir(STATE / "locks")
+    lock_path = STATE / "locks" / f"{request_file.stem}.lock"
+    lock_handle = None
+    try:
+        lock_handle = open(lock_path, "a+", encoding="utf-8")
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        if lock_handle:
+            lock_handle.close()
+        return 0
+    try:
+        request = json.loads(request_file.read_text(encoding="utf-8"))
+        status = capture_request(request)
+        if status not in {"FAIL_OPEN"}:
+            try:
+                request_file.unlink()
+            except FileNotFoundError:
+                pass
+    except Exception:
+        pass
+    finally:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            lock_handle.close()
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    mode = argv[1] if len(argv) > 1 else "start"
+    if mode in {"end", "worker"} and capture_skip_enabled():
+        return 0
+    if MEM0_INTERNAL:
+        # Self-ingestion guard: one receipt line, then no-op. Never reads the
+        # payload, never touches the store, never spawns a capture worker.
+        log_event(
+            INTERNAL_SKIP_EVENTS.get(mode, mode),
+            "SKIP_INTERNAL",
+            reason="mem0-internal-dispatch",
+        )
+        return 0
+    if mode == "worker":
+        if len(argv) < 3:
+            return 0
+        return run_worker(Path(argv[2]))
+    payload = load_payload()
+    if mode == "prime":
+        output = handle_prime(payload)
+    elif mode == "end":
+        output = handle_end(payload)
+    else:
+        output = handle_start(payload)
+    if output:
+        sys.stdout.write(output)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv))
+    except Exception:
+        # Lifecycle hooks are advisory. Memory failure must never stop Codex work.
+        raise SystemExit(0)

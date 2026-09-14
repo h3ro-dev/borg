@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Read-only queue/receipt/frontier projection. Never opens requests or transcripts."""
+import argparse
+import collections
+import datetime
+import hashlib
+import json
+import os
+import re
+import signal
+import sys
+from pathlib import Path
+import time
+from borg_config import CONFIG
+
+ACCEPTED = {'PASS', 'PASS_EMPTY', 'SKIP_DUP'}
+
+class MetricsDeadline(Exception):
+    pass
+
+def digest(value):
+    return hashlib.sha256(value.encode()).hexdigest()
+
+def object_at(path):
+    value=json.loads(path.read_text())
+    if not isinstance(value,dict): raise ValueError('object required')
+    return value
+
+def validate_previous(previous):
+    if previous is None:
+        return
+    if not isinstance(previous, dict) or previous.get("schema") != "capture-queue-metadata/v2":
+        raise ValueError("invalid previous snapshot schema")
+    if "cohort" not in previous or not isinstance(previous["cohort"], list):
+        raise ValueError("invalid previous cohort")
+    cohort = previous["cohort"]
+    if len(cohort) > 32 or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in cohort) or len(set(cohort)) != len(cohort):
+        raise ValueError("invalid previous cohort identities")
+    cursors = previous.get("cursor_frontiers", {})
+    if not isinstance(cursors, dict) or any(
+        not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key)
+        or type(value) is not int or value < 0 for key, value in cursors.items()
+    ):
+        raise ValueError("invalid previous frontiers")
+
+
+def unavailable(reason):
+    return {"schema": "capture-queue-metadata/v2", "state": "UNAVAILABLE",
+            "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "queued_files": None, "cohort_size": None,
+            "cohort_locally_accepted": None, "reason": reason, "atomic": False}
+
+
+def inventory(state):
+    lanes = {"requests": [], "capture": [], "cursors": []}
+    with os.scandir(state) as machines:
+        machine_dirs = [Path(row.path) for row in machines if row.is_dir(follow_symlinks=False)]
+    for machine in machine_dirs:
+        with os.scandir(machine) as harnesses:
+            harness_dirs = [Path(row.path) for row in harnesses if row.is_dir(follow_symlinks=False)]
+        for harness in harness_dirs:
+            for kind in lanes:
+                directory = harness / kind
+                try:
+                    with os.scandir(directory) as entries:
+                        lanes[kind].extend(Path(row.path) for row in entries
+                                           if row.name.endswith(".json") and row.is_file(follow_symlinks=False))
+                except FileNotFoundError:
+                    pass  # An existing empty state may not yet have all lanes.
+    return lanes
+
+
+def snapshot(base, previous=None, now=None):
+    validate_previous(previous)
+    now=time.time() if now is None else now
+    state=base/'data/hook-runs/fleet'
+    if not state.is_dir():
+        return unavailable('source_missing')
+    try:
+        paths = inventory(state)
+    except OSError:
+        return unavailable('inventory_unreadable')
+    errors=collections.Counter()
+    queued=[]; accepted=set(); cursors={}
+    for path in paths['requests']:
+        try:
+            st=path.stat()
+            queued.append({'id_sha256':digest(str(path.relative_to(state))),
+                           'oldest_age_s':round(max(0,now-getattr(st,'st_birthtime',st.st_mtime)),3),
+                           'age_basis':'birthtime' if hasattr(st,'st_birthtime') else 'mtime_retry_rotated',
+                           'bytes':st.st_size})
+        except OSError: errors['queue_stat']+=1
+    for path in paths['capture']:
+        try:
+            if object_at(path).get('status') in ACCEPTED:
+                relative=path.relative_to(state)
+                accepted.add(digest(str(relative.parent.parent/'requests'/relative.name)))
+        except (OSError,ValueError): errors['receipt_read']+=1
+    for path in paths['cursors']:
+        try:
+            row=object_at(path);high=row.get('high_water')
+            if type(high) is not int or high<0: raise ValueError('invalid frontier')
+            cursors[digest(str(path.relative_to(state)))]=high
+        except (OSError,ValueError): errors['cursor_read']+=1
+    attempts=collections.Counter(); log=base/'data/fleet-hook.log'
+    try:
+        with log.open() as f:
+            for line in f:
+                try:
+                    row=json.loads(line)
+                    stamp=datetime.datetime.fromisoformat(row.get('at','')).timestamp()
+                    if now-3600 <= stamp <= now and row.get('event')=='capture':
+                        status=row.get('status')
+                        if status in ACCEPTED|{'BUSY','FAIL_OPEN','DEFERRED','KILL_SWITCH','CONTINUATION_PENDING'}:
+                            attempts[status]+=1
+                        else: attempts['OTHER']+=1
+                except (ValueError,TypeError): errors['log_parse']+=1
+    except OSError: errors['log_read']+=1
+    queued.sort(key=lambda row:(-row['oldest_age_s'],row['id_sha256']))
+    current_ids={row['id_sha256'] for row in queued}
+    cohort=previous['cohort'] if previous is not None else [row['id_sha256'] for row in queued[:32]]
+    cohort=set(cohort)
+    prior_cursors=(previous or {}).get('cursor_frontiers',{})
+    return {'schema':'capture-queue-metadata/v2','state':'PARTIAL' if errors else 'OK','observed_at':datetime.datetime.fromtimestamp(now,datetime.timezone.utc).isoformat(),
+            'atomic':False,'scope':'local fleet client; all machine aliases and harnesses',
+            'queued_files':None if errors.get('queue_stat', 0) else len(queued),'unique_file_ids':None if errors.get('queue_stat', 0) else len(current_ids),
+            'oldest_age_s':queued[0]['oldest_age_s'] if queued else None,
+            'age_basis':queued[0]['age_basis'] if queued else None,
+            'attempts_last_hour':dict(attempts),'scan_errors':dict(errors),
+            'cohort':sorted(cohort),'cohort_size':len(cohort),
+            'cohort_locally_accepted':None if errors.get('receipt_read', 0) else len(cohort&accepted),
+            'cohort_still_queued':len(cohort&current_ids),
+            'cohort_missing_without_receipt':None if errors.get('receipt_read', 0) or errors.get('queue_stat', 0) else len(cohort-current_ids-accepted),
+            'cursor_frontiers':cursors,'cursor_rows':len(cursors),
+            'advancing_cursor_rows':None if errors.get('cursor_read', 0) else sum(k in prior_cursors and v>prior_cursors[k] for k,v in cursors.items()),
+            'regressing_cursor_rows':None if errors.get('cursor_read', 0) else sum(k in prior_cursors and v<prior_cursors[k] for k,v in cursors.items()),
+            'semantics':'Attempts are not unique source events. Local accepted receipts are not independently verified store coverage. Legacy cursors may contain historical gaps. Compare fixed cohort and native terminal receipts before claiming repair.'}
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--base',type=Path,default=CONFIG.mem0_root)
+    parser.add_argument('--previous',type=Path)
+    parser.add_argument('--timeout-seconds',type=float,default=10.0)
+    args=parser.parse_args()
+    def expired(_signum, _frame):
+        raise MetricsDeadline("metrics deadline")
+    # Native macOS invocation is a standalone process. Deadline covers previous
+    # snapshot loading and every file scan; no partial result is published.
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, min(30.0, args.timeout_seconds)))
+    try:
+        previous=object_at(args.previous) if args.previous else None
+        result=snapshot(args.base,previous)
+    except MetricsDeadline:
+        result=unavailable('deadline_exceeded')
+    except (OSError, ValueError, TypeError):
+        result=unavailable('invalid_or_unreadable_source')
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    print(json.dumps(result,sort_keys=True,indent=2))
+    return 2 if result.get('state') == 'UNAVAILABLE' else 0
+
+if __name__=='__main__': raise SystemExit(main())

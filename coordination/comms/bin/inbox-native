@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+import signal
+import sys
+
+installed_config = Path(__file__).resolve().parents[4] / "coordination" / "config.json"
+if installed_config.is_file():
+    os.environ.setdefault("BORG_COORDINATION_CONFIG", str(installed_config))
+
+_COMMAND_BUDGET_SECONDS = 6.0
+_MINIMUM_WRITE_REMAINING_SECONDS = 0.5
+_NOOP = b"{}\n"
+_MAX_RESULT_BYTES = 128 * 1024
+_MAX_CONTEXT_BYTES = 24_576
+
+
+def _fail_open(_signum, _frame):
+    """End a stalled hook without letting Python print a second result."""
+    try:
+        os.write(1, _NOOP)
+    finally:
+        os._exit(0)
+
+
+def _context_is_bounded(value):
+    """Return false for a native envelope with an oversized context string."""
+    if not isinstance(value, dict):
+        return False
+    hook_output = value.get("hookSpecificOutput")
+    if hook_output is not None:
+        if not isinstance(hook_output, dict):
+            return False
+        context = hook_output.get("additionalContext")
+        if not isinstance(context, str):
+            return False
+        if len(context.encode("utf-8")) > _MAX_CONTEXT_BYTES:
+            return False
+    context = value.get("additionalContext")
+    if context is not None:
+        if not isinstance(context, str):
+            return False
+        if len(context.encode("utf-8")) > _MAX_CONTEXT_BYTES:
+            return False
+    return True
+
+
+def _accepted_result(stdout, stderr, return_code):
+    """Validate native output while the alarm remains armed."""
+    import json
+
+    if return_code != 0 or stderr or not stdout:
+        return None
+    try:
+        if len(stdout.encode("utf-8")) > _MAX_RESULT_BYTES:
+            return None
+        decoder = json.JSONDecoder()
+        start = 0
+        while start < len(stdout) and stdout[start] in " \t\r\n":
+            start += 1
+        value, end = decoder.raw_decode(stdout, start)
+        trailing = stdout[end:]
+        if trailing.strip(" \t\r\n") or not isinstance(value, dict):
+            return None
+        if not _context_is_bounded(value):
+            return None
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+        return None
+    if len(encoded) + 1 > _MAX_RESULT_BYTES:
+        return None
+    return encoded + b"\n"
+
+
+def _run_native():
+    """Import and run the native hook with Python output fully captured."""
+    try:
+        import io
+
+        captured_stdout = io.StringIO()
+        captured_stderr = io.StringIO()
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        sys.stdout = captured_stdout
+        sys.stderr = captured_stderr
+        try:
+            import json  # noqa: F401 - imported before the guarded module load
+            from pathlib import Path
+
+            sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+            if "--active" in sys.argv:
+                sys.argv.remove("--active")
+                from comms.hub.native_active import main
+            else:
+                from comms.hub.native import main
+
+            return_code = main()
+        except BaseException:
+            return None
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+        return _accepted_result(
+            captured_stdout.getvalue(), captured_stderr.getvalue(), return_code
+        )
+    except BaseException:
+        return None
+
+
+def _write_once(payload):
+    """Write one final result after the alarm has been disarmed."""
+    try:
+        # Ignore a signal that raced with the final validity check before
+        # disarming the timer; otherwise it could append a second `{}`.
+        signal.signal(signal.SIGALRM, signal.SIG_IGN)
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+    except BaseException:
+        # This is only expected on a non-POSIX host.  Let the same direct
+        # handler path own the one fail-open result if disarming is unavailable.
+        _fail_open(None, None)
+    try:
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(1, remaining)
+            if written <= 0:
+                break
+            remaining = remaining[written:]
+    except BaseException:
+        # A closed or failed hook channel cannot be repaired without risking a
+        # second JSON object.  Exit quietly after the bytes already accepted.
+        pass
+    finally:
+        os._exit(0)
+
+
+def _main():
+    try:
+        signal.signal(signal.SIGALRM, _fail_open)
+        signal.setitimer(signal.ITIMER_REAL, _COMMAND_BUDGET_SECONDS)
+    except BaseException:
+        _write_once(_NOOP)
+
+    payload = _run_native()
+    if payload is None:
+        payload = _NOOP
+    else:
+        try:
+            remaining, _interval = signal.getitimer(signal.ITIMER_REAL)
+            if remaining < _MINIMUM_WRITE_REMAINING_SECONDS:
+                payload = _NOOP
+        except BaseException:
+            payload = _NOOP
+    _write_once(payload)
+
+
+_main()

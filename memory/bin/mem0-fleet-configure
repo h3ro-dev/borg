@@ -1,0 +1,1008 @@
+#!/usr/bin/env python3
+"""Field-preserving memory hook provisioning for Codex, Claude, and Grok."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+import os
+import queue
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+class ProvisionError(Exception):
+    """A safe, user-facing provisioning failure."""
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def path_key(path: Path) -> str:
+    return sha256(str(path).encode())[:16]
+
+
+def is_local_machine(machine: str) -> bool:
+    local = os.environ.get("BORG_LOCAL_MACHINE_ID")
+    if not local:
+        raise ProvisionError("BORG_LOCAL_MACHINE_ID is required")
+    return machine == local
+
+
+def roots(home: Path) -> dict[str, Path]:
+    return {
+        "codex": home / "conductors/primary/profile",
+        "profiles": home / "conductors",
+        "claude": home / "clients/claude",
+        "seats": home / "clients/claude-seats",
+    }
+
+
+def explicit_owned_dir(raw: str, allowed: list[Path], label: str) -> Path:
+    candidate = Path(raw).expanduser()
+    resolved = candidate.resolve(strict=False)
+    for root in allowed:
+        if root.is_symlink():
+            continue
+        if within(resolved, root.resolve(strict=False)):
+            if not resolved.is_dir():
+                raise ProvisionError(f"{label} is not an existing directory")
+            return resolved
+    raise ProvisionError(f"{label} is outside owned roots")
+
+
+def installed_driver(home: Path) -> Path:
+    return home / "mem0/bin/mem0-fleet-hook"
+
+
+def shell_value(value: str | Path) -> str:
+    return shlex.quote(str(value))
+
+
+def command_for(home: Path, machine: str, harness: str, mode: str) -> str:
+    if is_local_machine(machine):
+        token = home / "mem0/data/mcp-token"
+        endpoint = os.environ.get("BORG_MEMORY_ENDPOINT")
+        if not endpoint:
+            raise ProvisionError("BORG_MEMORY_ENDPOINT is required for the local machine")
+        env = [
+            f"MEM0_FLEET_TOKEN_FILE={shell_value(token)}",
+            f"MEM0_FLEET_ENDPOINT={shell_value(endpoint)}",
+        ]
+    else:
+        token = home / "mem0/data/fleet-token"
+        endpoint = home / "mem0/data/fleet-endpoint"
+        env = [
+            f"MEM0_FLEET_TOKEN_FILE={shell_value(token)}",
+            f"MEM0_FLEET_ENDPOINT_FILE={shell_value(endpoint)}",
+        ]
+    env.extend([f"MEM0_MACHINE={shell_value(machine)}", f"MEM0_HARNESS={harness}"])
+    return "env " + " ".join(env) + " " + shell_value(installed_driver(home)) + " " + mode
+
+
+def claude_guard(command: str) -> str:
+    if command.startswith('if [ -z "${GROK_HOOK_EVENT:-}" ]; then ') and command.endswith("; fi"):
+        return command
+    return f'if [ -z "${{GROK_HOOK_EVENT:-}}" ]; then {command}; fi'
+
+
+def unguard(command: str) -> str:
+    prefix = 'if [ -z "${GROK_HOOK_EVENT:-}" ]; then '
+    if command.startswith(prefix) and command.endswith("; fi"):
+        return command[len(prefix) : -len("; fi")]
+    return command
+
+
+def is_memory_hook(value: Any) -> bool:
+    return isinstance(value, dict) and isinstance(value.get("command"), str) and bool(re.search(r"(?:^|[\s/])mem0-[A-Za-z0-9_-]+(?:\s|$)", unguard(value["command"])))
+
+
+RECALL_EVENTS = ("SessionStart", "UserPromptSubmit")
+CAPTURE_EVENTS = ("Stop", "SessionEnd")
+
+
+def event_mode(event: str) -> str | None:
+    return {
+        "SessionStart": "prime",
+        "UserPromptSubmit": "start",
+        "PreToolUse": "pre_tool",
+        "PostToolUse": "post_tool",
+        "Stop": "end",
+        "SessionEnd": "end",
+    }.get(event)
+
+
+def command_tokens(command: str) -> tuple[list[str], bool] | None:
+    """Parse only the exact optional Claude guard and shell words."""
+    guarded = command.startswith('if [ -z "${GROK_HOOK_EVENT:-}" ]; then ') and command.endswith("; fi")
+    inner = unguard(command) if guarded else command
+    if any(mark in inner for mark in (";", "&&", "||", "`", "$")):
+        return None
+    try:
+        tokens = shlex.split(inner, posix=True)
+    except ValueError:
+        return None
+    return tokens, guarded
+
+
+def approved_wrapper_paths(home: Path, harness: str, event: str, mode: str) -> set[str]:
+    base = home / "mem0/bin"
+    names: dict[str, tuple[str, ...]] = {
+        "claude": ("mem0-claude-hook", "mem0-claude-hook-env"),
+        "codex": ("mem0-conductor-hook-env", "mem0-codex-hook-env"),
+        "grok": ("mem0-grok-inject-env",) if event == "SessionStart" else (),
+    }
+    if harness == "claude" and event not in {"SessionStart", "UserPromptSubmit"}:
+        return set()
+    if harness == "grok" and event not in {"SessionStart", "PreToolUse", "PostToolUse"}:
+        return set()
+    if harness == "codex" and event not in {"SessionStart", "UserPromptSubmit"}:
+        return set()
+    return {str(base / name) for name in names[harness]}
+
+
+def canonical_command_token(token: str) -> str:
+    path_keys = {"MEM0_FLEET_TOKEN_FILE", "MEM0_FLEET_ENDPOINT_FILE"}
+    if "=" in token:
+        key, value = token.split("=", 1)
+        if key in path_keys and value.startswith("/"):
+            return key + "=" + str(Path(value).resolve(strict=False))
+    if token.startswith("/") and "/mem0/" in token:
+        return str(Path(token).resolve(strict=False))
+    return token
+
+
+def same_command_tokens(actual: list[str], expected: list[str]) -> bool:
+    return [canonical_command_token(token) for token in actual] == [canonical_command_token(token) for token in expected]
+
+
+def memory_path_tokens(home: Path, name: str) -> set[str]:
+    """Return the only home-bound spellings accepted for an old memory command."""
+    relative = f"mem0/bin/{name}"
+    return {str(home / relative)}
+
+
+def memory_path_token_matches(token: str, allowed: set[str]) -> bool:
+    if token in allowed:
+        return True
+    if token.startswith("/"):
+        try:
+            resolved = Path(token).resolve(strict=False)
+            return any(candidate.startswith("/") and Path(candidate).resolve(strict=False) == resolved for candidate in allowed)
+        except OSError:
+            return False
+    return False
+
+
+def without_capture_skip(tokens: list[str], capture: bool) -> tuple[list[str], bool]:
+    if capture and tokens[:1] == ["MEM0_CAPTURE_SKIP=1"]:
+        return tokens[1:], True
+    if capture and tokens[:2] == ["env", "MEM0_CAPTURE_SKIP=1"]:
+        return ["env", *tokens[2:]], True
+    return tokens, False
+
+
+def reviewed_recall(command: str, event: str, harness: str, home: Path, machine: str) -> bool:
+    mode = event_mode(event)
+    if event not in RECALL_EVENTS and event not in {"PreToolUse", "PostToolUse"}:
+        return False
+    parsed = command_tokens(command)
+    if mode is None or parsed is None:
+        return False
+    tokens, guarded = parsed
+    if harness == "claude" and not guarded:
+        return False
+    if harness != "claude" and guarded:
+        return False
+    wrapper_paths = approved_wrapper_paths(home, harness, event, mode)
+    wrapper_commands = [[path] if harness == "grok" else [path, mode] for path in wrapper_paths]
+    if harness == "claude" and event == "UserPromptSubmit" and is_local_machine(machine):
+        ollama = os.environ.get("BORG_OLLAMA_URL")
+        if not ollama:
+            raise ProvisionError("BORG_OLLAMA_URL is required")
+        wrapper_commands.extend([
+            [f"MEM0_GRAPH_IN_SEARCH={graph}", f"MEM0_OLLAMA_URL={ollama}", path, mode]
+            for path in wrapper_paths for graph in ("0", "1")
+        ])
+    if any(same_command_tokens(tokens, expected) for expected in wrapper_commands):
+        return True
+    if not is_local_machine(machine):
+        prefix = ["env", f"MEM0_MACHINE={machine}", f"MEM0_HARNESS={harness}"]
+        if same_command_tokens(tokens, prefix + [str(installed_driver(home)), mode]):
+            return True
+    generated = command_for(home, machine, harness, mode)
+    if harness == "claude":
+        generated = claude_guard(generated)
+    generated_tokens = command_tokens(generated)
+    if generated_tokens is None:
+        return False
+    expected_tokens, expected_guard = generated_tokens
+    return same_command_tokens(tokens, expected_tokens) and guarded == expected_guard
+
+
+def reviewed_capture(command: str, event: str, harness: str, home: Path, machine: str) -> bool:
+    if event not in CAPTURE_EVENTS:
+        return False
+    parsed = command_tokens(command)
+    if parsed is None:
+        return False
+    tokens, guarded = parsed
+    tokens, capture_skip = without_capture_skip(tokens, True)
+    if harness == "claude" and not guarded:
+        return False
+    if harness != "claude" and guarded:
+        return False
+
+    generated = command_for(home, machine, harness, "end")
+    if harness == "claude":
+        generated = claude_guard(generated)
+    generated_tokens = command_tokens(generated)
+    if generated_tokens is not None:
+        expected_tokens, expected_guard = generated_tokens
+        if same_command_tokens(tokens, expected_tokens) and guarded == expected_guard:
+            return True
+
+    if harness in {"claude", "codex"} and not is_local_machine(machine) and capture_skip:
+        driver_default = [
+            "env",
+            f"MEM0_MACHINE={machine}",
+            f"MEM0_HARNESS={harness}",
+            str(installed_driver(home)),
+            "end",
+        ]
+        if same_command_tokens(tokens, driver_default):
+            return True
+
+    # These are the only old writers that may be replaced.  The path and
+    # argument shape are deliberately exact; arbitrary env-prefixed commands
+    # are not trusted merely because they mention a mem0 executable.
+    if harness == "codex":
+        allowed = set()
+        for name in ("mem0-codex-hook-env", "mem0-conductor-hook-env"):
+            allowed.update(memory_path_tokens(home, name))
+        return len(tokens) == 2 and memory_path_token_matches(tokens[0], allowed) and tokens[1] == "end"
+    if harness == "claude":
+        capture = memory_path_tokens(home, "mem0-capture-hook")
+        if len(tokens) == 1 and memory_path_token_matches(tokens[0], capture):
+            return True
+        ollama = os.environ.get("BORG_OLLAMA_URL")
+        return bool(ollama) and len(tokens) == 2 and tokens[0] == f"MEM0_OLLAMA_URL={ollama}" and memory_path_token_matches(tokens[1], capture) and is_local_machine(machine)
+    if harness == "grok":
+        capture = memory_path_tokens(home, "mem0-capture-hook")
+        return len(tokens) == 1 and memory_path_token_matches(tokens[0], capture)
+    return False
+
+
+def reviewed_hook(command: str, event: str, harness: str, home: Path, machine: str) -> bool:
+    if event in CAPTURE_EVENTS:
+        return reviewed_capture(command, event, harness, home, machine)
+    return reviewed_recall(command, event, harness, home, machine)
+
+
+def group_memory_children(group: Any) -> list[dict[str, Any]]:
+    if not isinstance(group, dict) or not isinstance(group.get("hooks", []), list):
+        return []
+    return [child for child in group["hooks"] if is_memory_hook(child)]
+
+
+def choose_memory_group(groups: Any, event: str, harness: str, home: Path, machine: str) -> tuple[int | None, bool]:
+    if not isinstance(groups, list):
+        raise ProvisionError(f"invalid native hook array for {event}")
+    indices = [i for i, group in enumerate(groups) if group_memory_children(group)]
+    deduped = False
+    if len(indices) > 1:
+        selected = [groups[i] for i in indices]
+        if not all(group == selected[0] for group in selected[1:]):
+            raise ProvisionError(f"ambiguous multiple memory groups for {event}")
+        for i in reversed(indices[1:]):
+            groups.pop(i)
+        indices = [indices[0]]
+        deduped = True
+    if not indices:
+        return None, deduped
+    children = group_memory_children(groups[indices[0]])
+    if len(children) != 1 or not reviewed_recall(children[0]["command"], event, harness, home, machine):
+        raise ProvisionError(f"unreviewed or ambiguous memory command for {event}")
+    return indices[0], deduped
+
+
+def capture_child(home: Path, machine: str, harness: str) -> dict[str, Any]:
+    command = command_for(home, machine, harness, "end")
+    if harness == "claude":
+        command = claude_guard(command)
+    return {"type": "command", "command": command, "timeout": 3}
+
+
+def memory_only_group(group: dict[str, Any], child: dict[str, Any]) -> bool:
+    hooks = group.get("hooks")
+    return isinstance(hooks, list) and len(hooks) == 1 and hooks[0] is child
+
+
+def remove_memory_child(group: dict[str, Any], child: dict[str, Any]) -> bool:
+    hooks = group.get("hooks")
+    if not isinstance(hooks, list):
+        return False
+    for index, candidate in enumerate(hooks):
+        if candidate is child:
+            hooks.pop(index)
+            return True
+    return False
+
+
+def modify_capture_event(groups: Any, event: str, home: Path, machine: str, harness: str) -> bool:
+    if not isinstance(groups, list):
+        raise ProvisionError(f"invalid native hook array for {event}")
+    candidates: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    for index, group in enumerate(groups):
+        if not isinstance(group, dict):
+            continue
+        children = group_memory_children(group)
+        if len(children) > 1:
+            raise ProvisionError(f"unreviewed or ambiguous memory command for {event}")
+        if children:
+            child = children[0]
+            if not reviewed_capture(str(child.get("command", "")), event, harness, home, machine):
+                raise ProvisionError(f"unreviewed or ambiguous memory command for {event}")
+            candidates.append((index, group, child))
+
+    before = copy.deepcopy(groups)
+    generated = capture_child(home, machine, harness)
+    if not candidates:
+        groups.append({"hooks": [generated]})
+        return groups != before
+
+    # Removing a group or child changes native position-based hook keys.  Reject
+    # duplicate writers before any write rather than risk rebinding unrelated
+    # trust to a different command.
+    if len(candidates) != 1:
+        raise ProvisionError(f"multiple reviewed memory capture commands for {event}")
+    _, first_group, first_child = candidates[0]
+    if memory_only_group(first_group, first_child):
+        first_group["hooks"][0] = generated
+        if event == "SessionEnd" or harness == "grok":
+            first_group.pop("matcher", None)
+    else:
+        if (event == "SessionEnd" or harness == "grok") and "matcher" in first_group:
+            raise ProvisionError(f"mixed memory capture matcher requires reconciliation for {event}")
+        hooks = first_group.get("hooks")
+        if not isinstance(hooks, list):
+            raise ProvisionError(f"invalid native hook group for {event}")
+        child_index = next((i for i, child in enumerate(hooks) if child is first_child), None)
+        if child_index is None:
+            raise ProvisionError(f"memory capture command disappeared for {event}")
+        hooks[child_index] = generated
+    return groups != before
+
+
+def modify_recall_doc(doc: dict[str, Any], home: Path, machine: str, harness: str, events: tuple[str, ...]) -> tuple[dict[str, Any], list[str]]:
+    after = copy.deepcopy(doc)
+    hooks = after.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ProvisionError("hooks is not an object")
+    changed: list[str] = []
+    for event in events:
+        if event in CAPTURE_EVENTS:
+            groups = hooks.setdefault(event, [])
+            before = copy.deepcopy(groups)
+            if modify_capture_event(groups, event, home, machine, harness):
+                changed.append(f"hooks.{event}")
+            continue
+        groups = hooks.setdefault(event, [])
+        before = copy.deepcopy(groups)
+        index, deduped = choose_memory_group(groups, event, harness, home, machine)
+        if index is None:
+            child: dict[str, Any] = {
+                "type": "command",
+                "command": command_for(home, machine, harness, event_mode(event) or ""),
+                "timeout": 20 if event != "SessionStart" else 3,
+            }
+            if harness == "claude":
+                child["command"] = claude_guard(child["command"])
+            if harness == "codex" and event == "UserPromptSubmit":
+                child["additionalContextLimit"] = 900
+            group: dict[str, Any] = {"hooks": [child]}
+            if harness != "grok" and event == "SessionStart":
+                group["matcher"] = "startup|resume|clear|compact"
+            groups.append(group)
+        else:
+            group = groups[index]
+            child = group_memory_children(group)[0]
+            if harness != "grok" and event == "SessionStart":
+                matcher = group.get("matcher")
+                if not isinstance(matcher, str) or not matcher:
+                    group["matcher"] = "startup|resume|clear|compact"
+                elif "compact" not in matcher.split("|"):
+                    group["matcher"] = matcher + "|compact"
+            if harness == "codex" and event == "UserPromptSubmit":
+                limit = child.get("additionalContextLimit")
+                if not isinstance(limit, int) or limit <= 0:
+                    child["additionalContextLimit"] = 900
+            if harness == "claude":
+                child["command"] = claude_guard(child["command"])
+            if harness == "grok" and event in {"SessionStart", "PreToolUse", "PostToolUse"}:
+                if memory_only_group(group, child):
+                    group.pop("matcher", None)
+                elif "matcher" in group:
+                    remove_memory_child(group, child)
+                    groups.insert(index, {"hooks": [child]})
+        if deduped or groups != before:
+            changed.append(f"hooks.{event}")
+    return after, changed
+
+
+def settings_dirs(home: Path, explicit: str | None) -> list[Path]:
+    r = roots(home)
+    if explicit:
+        return [explicit_owned_dir(explicit, [r["claude"], r["seats"]], "--claude-dir")]
+    result: list[Path] = []
+    if r["claude"].is_dir() and not r["claude"].is_symlink():
+        result.append(r["claude"].resolve())
+    if r["seats"].is_dir() and not r["seats"].is_symlink():
+        for entry in sorted(os.scandir(r["seats"]), key=lambda item: item.name):
+            if entry.is_dir(follow_symlinks=False):
+                result.append(Path(entry.path).resolve())
+    return list(dict.fromkeys(result))
+
+
+def codex_config_paths(home: Path, explicit: str | None) -> list[Path]:
+    r = roots(home)
+    if explicit:
+        profile = explicit_owned_dir(explicit, [r["codex"], r["profiles"]], "--codex-home")
+        config = profile / "config.toml"
+        if not config.is_file() or config.is_symlink():
+            raise ProvisionError("--codex-home has no regular config.toml")
+        return [config.resolve()]
+    result: list[Path] = []
+    if r["codex"].is_dir() and not r["codex"].is_symlink():
+        config = r["codex"] / "config.toml"
+        if config.is_file() and not config.is_symlink():
+            result.append(config.resolve())
+    if r["profiles"].is_dir() and not r["profiles"].is_symlink():
+        root = r["profiles"].resolve()
+
+        def walk(folder: Path) -> None:
+            try:
+                entries = sorted(os.scandir(folder), key=lambda item: item.name)
+            except OSError as exc:
+                raise ProvisionError("cannot enumerate Codex profiles") from exc
+            for entry in entries:
+                child = Path(entry.path)
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    walk(child)
+                elif entry.name == "config.toml" and entry.is_file(follow_symlinks=False):
+                    resolved = child.resolve()
+                    if within(resolved, root):
+                        result.append(resolved)
+
+        walk(root)
+    unique: dict[Path, None] = {}
+    for config in result:
+        unique[config] = None
+    return list(unique)
+
+
+def parse_json(path: Path) -> tuple[bytes, dict[str, Any]]:
+    if not path.exists():
+        return b"", {}
+    raw = path.read_bytes()
+    try:
+        value = json.loads(raw.decode())
+    except Exception as exc:
+        raise ProvisionError(f"invalid JSON in {path.name}") from exc
+    if not isinstance(value, dict):
+        raise ProvisionError(f"JSON root is not an object in {path.name}")
+    return raw, value
+
+
+def configured_policy(home: Path) -> Path | None:
+    raw = os.environ.get("BORG_POLICY_FILE")
+    if not raw:
+        return None
+    path = Path(raw).expanduser().resolve(strict=False)
+    if not within(path, home) or not path.is_file() or path.is_symlink():
+        raise ProvisionError("BORG_POLICY_FILE must be a regular file below BORG_HOME")
+    return path
+
+
+def policy_binding(path: Path, canonical: Path) -> str:
+    if not canonical.is_file():
+        raise ProvisionError("canonical policy is missing")
+    if not path.exists() and not path.is_symlink():
+        return "create"
+    if path.is_symlink():
+        if path.resolve() == canonical.resolve():
+            return "ok"
+        raise ProvisionError(f"policy conflict at {path.name}")
+    try:
+        marker = "@" + os.path.relpath(canonical, path.parent)
+        if any(line.strip() == marker for line in path.read_text(encoding="utf-8").splitlines()):
+            return "ok"
+    except OSError:
+        pass
+    raise ProvisionError(f"policy conflict at {path.name}")
+
+
+def codex_policy_binding(path: Path, canonical: Path) -> tuple[str, str]:
+    if not canonical.is_file():
+        raise ProvisionError("canonical policy is missing")
+    relative = os.path.relpath(canonical, path.parent)
+    if not path.exists() and not path.is_symlink():
+        return "create", relative
+    if path.is_symlink() and path.resolve() == canonical.resolve():
+        return "ok", relative
+    if path.is_file() and path.read_bytes() == canonical.read_bytes():
+        return "ok", relative
+    raise ProvisionError(f"policy conflict at {path.name}")
+
+
+def fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def atomic_replace(path: Path, data: bytes, mode: int, expected: bytes | None) -> None:
+    if expected is not None:
+        try:
+            if path.read_bytes() != expected:
+                raise ProvisionError(f"concurrent change at {path.name}")
+        except FileNotFoundError as exc:
+            raise ProvisionError(f"concurrent removal at {path.name}") from exc
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp = Path(temp_name)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        fsync_dir(path.parent)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def backup_preimage(root: Path, path: Path, raw: bytes) -> Path:
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(root, 0o700)
+    target = root / f"{path_key(path)}.before{path.suffix}"
+    if not target.exists():
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(target, 0o600)
+    return target
+
+
+def backup_root(home: Path) -> Path:
+    return home / "mem0/rollout-backups" / f"{datetime.now().strftime('%Y%m%d')}-memory" / "configure"
+
+
+class NativeRPC:
+    def __init__(self, home: Path, binary: str):
+        env = dict(os.environ)
+        env["CODEX_HOME"] = str(home)
+        try:
+            self.process = subprocess.Popen([binary, "app-server", "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
+        except OSError as exc:
+            raise ProvisionError("native Codex app-server could not start") from exc
+        self.queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.ident = 0
+
+        def read() -> None:
+            assert self.process.stdout is not None
+            for line in self.process.stdout:
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(value, dict):
+                    self.queue.put(value)
+
+        threading.Thread(target=read, daemon=True).start()
+        self.call("initialize", {"clientInfo": {"name": "mem0-fleet-configure", "version": "1"}, "capabilities": {"experimentalApi": True}})
+        self.notify("initialized")
+
+    def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        if self.process.stdin is None:
+            raise ProvisionError("native RPC stdin unavailable")
+        message: dict[str, Any] = {"method": method}
+        if params is not None:
+            message["params"] = params
+        self.process.stdin.write(json.dumps(message) + "\n")
+        self.process.stdin.flush()
+
+    def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if self.process.stdin is None:
+            raise ProvisionError("native RPC stdin unavailable")
+        self.ident += 1
+        request_id = self.ident
+        self.process.stdin.write(json.dumps({"id": request_id, "method": method, "params": params}) + "\n")
+        self.process.stdin.flush()
+        try:
+            while True:
+                response = self.queue.get(timeout=25)
+                if response.get("id") != request_id:
+                    continue
+                if "error" in response:
+                    raise ProvisionError(f"native RPC {method} failed")
+                result = response.get("result")
+                if not isinstance(result, dict):
+                    raise ProvisionError(f"native RPC {method} returned invalid data")
+                return result
+        except queue.Empty as exc:
+            raise ProvisionError(f"native RPC {method} timed out") from exc
+
+    def close(self) -> None:
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+
+
+def raw_user_layer(response: dict[str, Any], config: Path) -> dict[str, Any]:
+    layers = response.get("layers")
+    if not isinstance(layers, list):
+        raise ProvisionError("native config/read omitted layers")
+    matches = [layer for layer in layers if isinstance(layer, dict) and isinstance(layer.get("name"), dict) and layer["name"].get("type") == "user" and Path(str(layer["name"].get("file", ""))).resolve() == config.resolve()]
+    if len(matches) != 1 or not isinstance(matches[0].get("config"), dict):
+        raise ProvisionError("native user config layer is unavailable")
+    return matches[0]
+
+
+def hooks_data(response: dict[str, Any]) -> list[dict[str, Any]]:
+    data = response.get("data")
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        raise ProvisionError("native hooks/list returned invalid data")
+    if data[0].get("errors"):
+        raise ProvisionError("native hooks/list reported errors")
+    rows = data[0].get("hooks", [])
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ProvisionError("native hooks/list returned invalid hooks")
+    return rows
+
+
+def codex_binary(args: argparse.Namespace) -> str:
+    value = args.codex_bin or os.environ.get("MEMORY_CODEX_BIN") or shutil.which("codex")
+    if not value:
+        raise ProvisionError("Codex binary is unavailable")
+    return value
+
+
+def matching_rows(rows: list[dict[str, Any]], config: Path, event: str, home: Path, machine: str, harness: str) -> list[dict[str, Any]]:
+    names = {
+        "SessionStart": "sessionStart",
+        "UserPromptSubmit": "userPromptSubmit",
+        "PreToolUse": "preToolUse",
+        "PostToolUse": "postToolUse",
+        "Stop": "stop",
+        "SessionEnd": "sessionEnd",
+    }
+    if event not in names:
+        raise ProvisionError(f"unsupported native hook event {event}")
+    candidates = [row for row in rows if Path(str(row.get("sourcePath", ""))).resolve() == config.resolve() and row.get("eventName") == names[event]]
+    approved = [row for row in candidates if reviewed_hook(str(row.get("command", "")), event, harness, home, machine)]
+    suspicious = [row for row in candidates if is_memory_hook({"command": row.get("command", "")}) and row not in approved]
+    if suspicious:
+        raise ProvisionError(f"unreviewed native {event} command")
+    return approved
+
+
+def codex_plan(config: Path, codex_home: Path, user_home: Path, machine: str, apply: bool, binary: str) -> dict[str, Any]:
+    rpc = NativeRPC(codex_home, binary)
+    backup: bytes | None = None
+    try:
+        initial_read = rpc.call("config/read", {"includeLayers": True})
+        layer = raw_user_layer(initial_read, config)
+        before = copy.deepcopy(layer["config"])
+        before_version = layer.get("version")
+        initial_rows = hooks_data(rpc.call("hooks/list", {"cwd": str(codex_home)}))
+        after = copy.deepcopy(before)
+        hook_changes: list[str] = []
+        events = RECALL_EVENTS + CAPTURE_EVENTS
+        for event in events:
+            hooks = after.setdefault("hooks", {})
+            if not isinstance(hooks, dict):
+                raise ProvisionError("native hooks field is not an object")
+            event_before = copy.deepcopy(hooks.get(event, []))
+            event_after, changed = modify_recall_doc({"hooks": {event: hooks.get(event, [])}}, user_home, machine, "codex", (event,))
+            hooks[event] = event_after["hooks"][event]
+            if changed and hooks[event] != event_before:
+                hook_changes.extend(changed)
+        edits = [{"keyPath": key, "value": after["hooks"][key.split(".", 1)[1]], "mergeStrategy": "replace"} for key in dict.fromkeys(hook_changes)]
+        receipt: dict[str, Any] = {"path": str(config), "before_sha256": sha256(config.read_bytes()) if config.exists() else None, "before_version": before_version, "changed_fields": list(dict.fromkeys(hook_changes)), "trust": {}, "unrelated_raw_preserved": True}
+        if not apply:
+            current_rows = initial_rows
+        else:
+            if edits:
+                backup = config.read_bytes() if config.exists() else b""
+                if backup:
+                    receipt_backup = backup_preimage(backup_root(user_home) / "codex", config, backup)
+                else:
+                    receipt_backup = None
+                result = rpc.call("config/batchWrite", {"edits": edits, "filePath": str(config), "expectedVersion": before_version, "reloadUserConfig": True})
+                if result.get("status") != "ok":
+                    raise ProvisionError("native config/batchWrite failed")
+                receipt["write_versions"] = [result.get("version")]
+                receipt["backup"] = str(receipt_backup) if receipt_backup else None
+            current_rows = hooks_data(rpc.call("hooks/list", {"cwd": str(codex_home)}))
+        initial_memory_rows: list[dict[str, Any]] = []
+        for event in events:
+            initial_memory_rows.extend(matching_rows(initial_rows, config, event, user_home, machine, "codex"))
+        for row in initial_memory_rows:
+            if not isinstance(row.get("key"), str) or not row.get("key") or not isinstance(row.get("currentHash"), str) or not row.get("currentHash", "").startswith("sha256:"):
+                raise ProvisionError("native memory hook lacks a usable hash identity")
+
+        selected: list[dict[str, Any]] = []
+        for event in events:
+            rows = matching_rows(current_rows, config, event, user_home, machine, "codex")
+            if not apply and not rows and f"hooks.{event}" in hook_changes:
+                continue
+            if not apply and f"hooks.{event}" in hook_changes:
+                # --check reports the planned edit and does not require the
+                # post-apply native shape to exist yet.
+                if len(rows) == 1:
+                    selected.append(rows[0])
+                continue
+            if len(rows) != 1:
+                raise ProvisionError(f"native recall discovery expected one {event} hook")
+            row = rows[0]
+            if not reviewed_hook(str(row.get("command", "")), event, "codex", user_home, machine):
+                raise ProvisionError(f"unreviewed native {event} command")
+            if event == "SessionStart" and "compact" not in str(row.get("matcher", "")) and (apply or "hooks.SessionStart" not in hook_changes):
+                raise ProvisionError("native SessionStart recall omits compact")
+            selected.append(row)
+        # Bind the complete trust replacement and expectedVersion to this one
+        # snapshot.  A change after the read then fails CAS instead of being
+        # erased by a stale full-map replacement.
+        state_read = rpc.call("config/read", {"includeLayers": True}) if apply else initial_read
+        state_layer = raw_user_layer(state_read, config)
+        state_config = copy.deepcopy(state_layer["config"])
+        state_hooks = state_config.setdefault("hooks", {})
+        if not isinstance(state_hooks, dict):
+            raise ProvisionError("native hooks field is not an object")
+        state = state_hooks.setdefault("state", {})
+        if not isinstance(state, dict):
+            raise ProvisionError("native hooks.state is not an object")
+        desired_state = copy.deepcopy(state)
+        initial_memory_keys = {row.get("key") for row in initial_memory_rows if isinstance(row.get("key"), str)}
+        for key in initial_memory_keys:
+            desired_state.pop(key, None)
+        for row in selected:
+            key, current_hash = row.get("key"), row.get("currentHash")
+            if not isinstance(key, str) or not key or not isinstance(current_hash, str) or not current_hash.startswith("sha256:"):
+                raise ProvisionError("native recall hook lacks a usable hash identity")
+            desired_state[key] = {"trusted_hash": current_hash}
+            receipt["trust"][key] = {"event": row.get("eventName"), "current_hash": current_hash, "status_before": row.get("trustStatus")}
+        state_edits = [{"keyPath": "hooks.state", "value": desired_state, "mergeStrategy": "replace"}] if desired_state != state else []
+        if not apply:
+            receipt["missing_fields"] = list(dict.fromkeys(hook_changes + (["hooks.state"] if state_edits else [])))
+            receipt["trust"]["state_upsert_required"] = bool(state_edits)
+            receipt["capture_rows"] = sum(1 for row in initial_rows if row.get("eventName") in {"stop", "sessionEnd"})
+            return receipt
+        if state_edits:
+            if backup is None:
+                backup = config.read_bytes() if config.exists() else b""
+                if backup:
+                    receipt["backup"] = str(backup_preimage(backup_root(user_home) / "codex", config, backup))
+            result = rpc.call("config/batchWrite", {"edits": state_edits, "filePath": str(config), "expectedVersion": state_layer.get("version"), "reloadUserConfig": True})
+            if result.get("status") != "ok":
+                raise ProvisionError("native trust config/batchWrite failed")
+            receipt.setdefault("write_versions", []).append(result.get("version"))
+        final_read = rpc.call("config/read", {"includeLayers": True})
+        final_layer = raw_user_layer(final_read, config)
+        final_config = final_layer["config"]
+        final_rows = hooks_data(rpc.call("hooks/list", {"cwd": str(codex_home)}))
+        for row in selected:
+            found = next((item for item in final_rows if item.get("key") == row.get("key")), None)
+            if not found or found.get("trustStatus") != "trusted" or found.get("currentHash") != row.get("currentHash"):
+                raise ProvisionError("native recall trust readback failed")
+        final_by_key = {row.get("key"): row for row in final_rows if isinstance(row.get("key"), str)}
+        for row in initial_rows:
+            key = row.get("key")
+            if key in initial_memory_keys:
+                continue
+            found = final_by_key.get(key)
+            if found is None:
+                raise ProvisionError("unrelated native hook disappeared")
+            for field in ("eventName", "command", "matcher", "currentHash", "trustStatus"):
+                if found.get(field) != row.get(field):
+                    raise ProvisionError("unrelated native hook or trust changed")
+        expected = copy.deepcopy(state_config)
+        expected["hooks"]["state"] = desired_state
+        if final_config != expected:
+            raise ProvisionError("native raw config readback changed unrelated fields")
+        receipt["after_sha256"] = sha256(config.read_bytes()) if config.exists() else None
+        receipt["changed_fields"] = list(dict.fromkeys(hook_changes + (["hooks.state"] if state_edits else [])))
+        receipt["unrelated_trust_preserved"] = True
+        receipt["capture_trust_preserved"] = True
+        receipt["unrelated_capture_trust_preserved"] = True
+        receipt["trust"] = {key: {**value, "status_after": "trusted"} for key, value in receipt["trust"].items() if key != "state_upsert_required"}
+        return receipt
+    finally:
+        rpc.close()
+
+
+def apply_policy(path: Path, relative: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    try:
+        if path.exists() or path.is_symlink():
+            raise ProvisionError(f"policy appeared during provisioning at {path.name}")
+        os.symlink(relative, temp)
+        os.replace(temp, path)
+        fsync_dir(path.parent)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def claude_plan(directory: Path, home: Path, machine: str) -> dict[str, Any]:
+    settings = directory / "settings.json"
+    raw, doc = parse_json(settings)
+    after, changed = modify_recall_doc(doc, home, machine, "claude", RECALL_EVENTS + CAPTURE_EVENTS)
+    policy = directory / "CLAUDE.md"
+    canonical = configured_policy(home)
+    policy_action = policy_binding(policy, canonical) if canonical else "skip"
+    relative = os.path.relpath(canonical, policy.parent) if canonical else None
+    return {"path": str(settings), "before_sha256": sha256(raw) if raw else None, "after_doc": after, "changed_fields": changed, "policy_path": str(policy), "policy_action": policy_action, "policy_relative": relative, "policy_sha256": sha256(policy.read_bytes()) if policy.exists() and not policy.is_symlink() else None, "mode": stat.S_IMODE(settings.stat().st_mode) if settings.exists() else 0o600, "raw": raw, "unrelated_settings_preserved": True}
+
+
+def grok_plan(home: Path, machine: str) -> dict[str, Any]:
+    candidates = [home / ".grok/hooks/mem0.json", home / ".grok/hooks/mem0-fleet.json"]
+    existing = [path for path in candidates if path.exists()]
+    if len(existing) > 1:
+        raise ProvisionError("multiple Grok memory configuration files require reconciliation")
+    path = existing[0] if existing else candidates[1]
+    raw, doc = parse_json(path)
+    after, changed = modify_recall_doc(doc, home, machine, "grok", ("SessionStart", "PreToolUse", "PostToolUse", "SessionEnd"))
+    return {"path": str(path), "before_sha256": sha256(raw) if raw else None, "after_doc": after, "changed_fields": changed, "mode": stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600, "raw": raw, "unrelated_settings_preserved": True}
+
+
+def codex_policy_plan(config: Path, home: Path) -> dict[str, Any] | None:
+    profile = config.parent
+    if profile == (home / ".codex").resolve():
+        return None
+    policy = profile / "AGENTS.md"
+    canonical = configured_policy(home)
+    if canonical is None:
+        return None
+    action, relative = codex_policy_binding(policy, canonical)
+    return {"path": str(policy), "action": action, "relative": relative, "sha256": sha256(policy.read_bytes()) if policy.is_file() and not policy.is_symlink() else None}
+
+
+def commit_json_plan(plan: dict[str, Any], backup: Path, apply: bool) -> dict[str, Any]:
+    path = Path(plan["path"])
+    if not apply:
+        plan.pop("after_doc", None)
+        plan.pop("raw", None)
+        return plan
+    if plan["changed_fields"]:
+        raw = plan["raw"]
+        if raw:
+            backup_preimage(backup, path, raw)
+        data = (json.dumps(plan["after_doc"], indent=2, ensure_ascii=False) + "\n").encode()
+        atomic_replace(path, data, plan["mode"], raw if raw else None)
+        plan["after_sha256"] = sha256(path.read_bytes())
+    else:
+        plan["after_sha256"] = plan["before_sha256"]
+    plan.pop("after_doc", None)
+    plan.pop("raw", None)
+    return plan
+
+
+def configure_claude(home: Path, machine: str, explicit: str | None, apply: bool) -> dict[str, Any]:
+    plans = [claude_plan(directory, home, machine) for directory in settings_dirs(home, explicit)]
+    backup = backup_root(home) / "claude"
+    for plan in plans:
+        policy = Path(plan["policy_path"])
+        if apply and plan["policy_action"] == "create":
+            apply_policy(policy, plan["policy_relative"])
+        commit_json_plan(plan, backup, apply)
+    return {"selected": len(plans), "profiles": plans, "changed": sum(bool(p["changed_fields"]) for p in plans)}
+
+
+def configure_grok(home: Path, machine: str, apply: bool) -> dict[str, Any]:
+    plan = grok_plan(home, machine)
+    commit_json_plan(plan, backup_root(home) / "grok", apply)
+    return {"selected": 1, "profiles": [plan], "changed": int(bool(plan["changed_fields"]))}
+
+
+def sanitize_error(exc: Exception) -> str:
+    message = re.sub(r"(?i)(token|secret|authorization)[^\s,;]*", r"\1=<redacted>", str(exc))
+    return message[:240]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--machine", required=True)
+    parser.add_argument("--codex", action="store_true", help="configure discovered Codex homes")
+    parser.add_argument("--check", action="store_true", help="read-only plan and native verification")
+    parser.add_argument("--codex-home", help="limit Codex selection to an owned profile directory")
+    parser.add_argument("--claude-dir", help="limit Claude selection to an owned profile directory")
+    parser.add_argument("--codex-bin", help="Codex app-server binary")
+    args = parser.parse_args(argv)
+    apply = not args.check
+    raw_home = os.environ.get("BORG_HOME")
+    if not raw_home:
+        raise ProvisionError("BORG_HOME is required")
+    home = Path(raw_home).expanduser().resolve()
+    if not installed_driver(home).is_file():
+        raise ProvisionError("installed memory hook driver is unavailable")
+    if args.claude_dir and args.codex and not args.codex_home:
+        raise ProvisionError("--codex with --claude-dir requires --codex-home for selector isolation")
+    receipt: dict[str, Any] = {"schema": 1, "status": "CHECK" if args.check else "PASS", "mode": "check" if args.check else "apply", "machine": args.machine, "codex": {"selected": 0}, "claude": {}, "grok": {}}
+    explicit_scope = bool(args.codex_home or args.claude_dir)
+    if args.claude_dir:
+        receipt["claude"] = configure_claude(home, args.machine, args.claude_dir, apply)
+    elif not explicit_scope:
+        receipt["claude"] = configure_claude(home, args.machine, None, apply)
+    else:
+        receipt["claude"] = {"selected": 0, "profiles": [], "changed": 0}
+    if not explicit_scope:
+        receipt["grok"] = configure_grok(home, args.machine, apply)
+    else:
+        receipt["grok"] = {"selected": 0, "profiles": [], "changed": 0}
+    include_codex = bool(args.codex or args.codex_home)
+    if include_codex:
+        binary = codex_binary(args)
+        configs = codex_config_paths(home, args.codex_home)
+        policy_plans = {config: codex_policy_plan(config, home) for config in configs}
+        if apply:
+            for policy in policy_plans.values():
+                if policy and policy["action"] == "create":
+                    apply_policy(Path(policy["path"]), policy["relative"])
+        profiles = []
+        for config in configs:
+            profile = codex_plan(config, config.parent, home, args.machine, apply, binary)
+            profile["policy"] = policy_plans[config]
+            profiles.append(profile)
+        receipt["codex"] = {"selected": len(profiles), "profiles": profiles, "changed": sum(bool(p["changed_fields"]) for p in profiles)}
+    receipt["driver_path"] = str(installed_driver(home))
+    print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except ProvisionError as exc:
+        print(json.dumps({"schema": 1, "status": "ERROR", "reason": sanitize_error(exc)}, separators=(",", ":")), file=sys.stderr)
+        raise SystemExit(2)

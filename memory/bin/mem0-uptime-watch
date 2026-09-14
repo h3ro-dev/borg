@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""Client-site uptime watch — instant awareness when a site breaks.
+
+Checks every site in an explicitly configured client registry. Deterministic,
+no LLM. Notification is disabled unless a command and destination are set.
+
+A site is DOWN when its configured checks fail. Most clients retain the
+homepage check. A client may also require a correct branded homepage, valid
+REST JSON, and a valid sitemap index. A critical-error
+page is a failure even when it ships with HTTP 200. On DOWN, /robots.txt is
+probed to classify app-level fatal versus host/server/DNS failure.
+
+Alert discipline: 2 consecutive failed rounds (~3-6 min) before ONE
+"SITE DOWN" notification; TWO healthy rounds before ONE "RECOVERED".
+At four failures a staged escalation is recorded but never sent. Public
+WordPress/plugin version changes cause the same GET-only checks to be
+recorded as an automatic post-update smoke test.
+
+Usage: mem0-uptime-watch [--no-send]   (--no-send prints alerts instead)
+       mem0-uptime-watch --post-update-smoke --no-send
+       mem0-uptime-watch --selftest    (throwaway state, fake dead site,
+                                        proves transitions; never texts)
+"""
+
+import hashlib
+import html
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+import tomllib
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
+
+import httpx
+from borg_config import CONFIG, BorgConfigError
+
+REG = Path(os.environ["BORG_CLIENT_REGISTRY"]).expanduser() if os.environ.get("BORG_CLIENT_REGISTRY") else None
+STATE_F = CONFIG.data_root / "uptime-state.json"
+EVENTS_F = CONFIG.data_root / "uptime-events.jsonl"
+LOCK_F = CONFIG.data_root / "uptime-watch.lock"
+OUTPUT_F = Path(os.environ["BORG_UPTIME_STATUS_FILE"]).expanduser() if os.environ.get("BORG_UPTIME_STATUS_FILE") else None
+UA = {"User-Agent": "BORG-UptimeWatch/1.0"}
+FAILS_TO_ALERT = 2
+FAILS_TO_ESCALATE = 4
+HEALTHY_TO_RECOVER = 2
+DEATH_MARKERS = [
+    "critical error on this website",          # WP fatal page (can be HTTP 200)
+    "WordPress &rsaquo; Error",                # WP error title
+    "Error establishing a database connection",
+]
+
+
+def now():
+    return datetime.now(ZoneInfo("America/Denver"))
+
+
+def target_site(target):
+    return target["site"] if isinstance(target, dict) else target
+
+
+def public_software_fingerprint(body):
+    """Stable public version hints. This detects exposed updates, not every plugin update."""
+    versions = set()
+    for value in re.findall(r"/wp-includes/[^\"']+?[?&]ver=([^&\"'\s]+)", body, re.I):
+        versions.add(f"wordpress:{html.unescape(value)}")
+    for slug, value in re.findall(
+        r"/wp-content/plugins/([^/\"']+)/[^\"']+?[?&]ver=([^&\"'\s]+)", body, re.I
+    ):
+        versions.add(f"plugin:{slug}:{html.unescape(value)}")
+    ordered = sorted(versions)
+    if not ordered:
+        return None, []
+    digest = hashlib.sha256("\n".join(ordered).encode()).hexdigest()
+    return digest, ordered
+
+
+def _configured_endpoint(site, path, uptime):
+    url = urljoin(site.rstrip("/") + "/", path.lstrip("/"))
+    try:
+        r = httpx.get(url, headers=UA, follow_redirects=True, timeout=15)
+    except Exception as e:
+        return {"path": path, "ok": False,
+                "detail": f"{type(e).__name__}: {str(e)[:80]}"}, None
+
+    body = r.text[:500000]
+    problems = []
+    if r.status_code != 200:
+        problems.append(f"HTTP {r.status_code}")
+    marker = next((m for m in DEATH_MARKERS if m.lower() in body.lower()), None)
+    if marker:
+        problems.append(f"page shows '{marker[:40]}'")
+
+    if path == "/":
+        expected_marker = uptime.get("homepage_marker")
+        if expected_marker and expected_marker not in body:
+            problems.append(f"missing marker '{expected_marker}'")
+        expected_title = uptime.get("homepage_title")
+        if expected_title:
+            match = re.search(r"<title[^>]*>(.*?)</title>", body, re.I | re.S)
+            actual = html.unescape(re.sub(r"\s+", " ", match.group(1)).strip()) if match else ""
+            if actual != expected_title:
+                problems.append(f"title mismatch ({actual[:70] or 'missing'})")
+
+    if path == "/wp-json/" and uptime.get("require_rest_json"):
+        try:
+            payload = r.json()
+            if not isinstance(payload, dict):
+                problems.append("REST body is not a JSON object")
+        except Exception:
+            problems.append("REST body is not valid JSON")
+
+    if path == "/sitemap_index.xml" and uptime.get("require_sitemap_loc"):
+        if not re.search(r"<(?:\w+:)?(?:sitemapindex|urlset)\b", body, re.I):
+            problems.append("sitemap XML root missing")
+        if not re.search(r"<(?:\w+:)?loc\b", body, re.I):
+            problems.append("sitemap has no loc")
+
+    detail = ", ".join(problems) if problems else f"HTTP 200 {r.elapsed.total_seconds():.1f}s"
+    return {"path": path, "ok": not problems, "detail": detail}, body if path == "/" else None
+
+
+def check(name, target):
+    """One site check -> dict(ok, detail), with optional configured endpoints."""
+    site = target_site(target)
+    uptime = target.get("uptime", {}) if isinstance(target, dict) else {}
+    paths = uptime.get("paths", [])
+    if paths:
+        endpoints = []
+        homepage = None
+        for path in paths:
+            endpoint, body = _configured_endpoint(site, path, uptime)
+            endpoints.append(endpoint)
+            if body is not None:
+                homepage = body
+        failed = [e["path"] for e in endpoints if not e["ok"]]
+        fingerprint, versions = public_software_fingerprint(homepage or "")
+        detail = "; ".join(f"{e['path']} {e['detail']}" for e in endpoints)
+        return {"ok": not failed, "detail": detail, "endpoints": endpoints,
+                "failed_paths": failed, "software_fingerprint": fingerprint,
+                "software_versions": versions}
+
+    try:
+        r = httpx.get(site, headers=UA, follow_redirects=True, timeout=15)
+        body = r.text[:20000] if r.status_code < 400 else r.text[:20000]
+        marker = next((m for m in DEATH_MARKERS if m.lower() in body.lower()), None)
+        if r.status_code >= 500:
+            return {"ok": False, "detail": f"HTTP {r.status_code}", "failed_paths": ["/"]}
+        if marker:
+            return {"ok": False, "detail": f"HTTP {r.status_code} but page shows '{marker[:40]}'",
+                    "failed_paths": ["/"]}
+        return {"ok": True, "detail": f"HTTP {r.status_code} {r.elapsed.total_seconds():.1f}s",
+                "failed_paths": []}
+    except Exception as e:
+        return {"ok": False, "detail": f"{type(e).__name__}: {str(e)[:80]}",
+                "failed_paths": ["/"]}
+
+
+def classify(site):
+    """When down: does a static file still serve? Separates app fatal from host-down."""
+    try:
+        r = httpx.get(site.rstrip("/") + "/robots.txt", headers=UA, follow_redirects=True, timeout=10)
+        if r.status_code == 200:
+            return "static files still serve — app-level fatal (plugin/code), host is up"
+    except Exception:
+        pass
+    return "static files dead too — host/server/DNS level"
+
+
+def notify(text):
+    command = os.environ.get("BORG_NOTIFICATION_COMMAND")
+    destination = os.environ.get("BORG_NOTIFICATION_DESTINATION")
+    if not command or not destination:
+        raise BorgConfigError(
+            "notifications require BORG_NOTIFICATION_COMMAND and BORG_NOTIFICATION_DESTINATION"
+        )
+    subprocess.run([*shlex.split(command), destination, text[:1400]], check=True, capture_output=True, timeout=60)
+
+
+def alert(text, send):
+    print(f"ALERT: {text}", flush=True)
+    if send:
+        try:
+            notify(text)
+        except Exception as e:
+            print(f"[alert send failed: {e}]", flush=True)
+
+
+_EVENTS_OVERRIDE = None  # selftest points this at a throwaway file
+
+
+def event(row):
+    with open(_EVENTS_OVERRIDE or EVENTS_F, "a") as f:
+        f.write(json.dumps(row) + "\n")
+
+
+def lock_alive():
+    try:
+        import os
+        os.kill(int(LOCK_F.read_text()), 0)
+        return True
+    except Exception:
+        return False
+
+
+# ── monitor-of-monitors cross-check (REDUNDANCY-PLAN rank 1, 2026-08-27) ──
+# system-watch observes this watcher's run counter; this closes the other
+# direction: when system-watch's own heartbeat goes stale, the one program
+# that already emits alerts says so. Same alert discipline as sites: one
+# alert, two good rounds to recover, honest wording when unreadable.
+SW_HEARTBEAT_F = Path(os.environ["BORG_SYSTEM_WATCH_FILE"]).expanduser() if os.environ.get("BORG_SYSTEM_WATCH_FILE") else None
+SW_STALE_S = 3000        # >3 missed 15-minute cycles
+_SW_KEY = "_system-watch-heartbeat"   # leading _ cannot collide with a site
+
+
+def watchdog_system_watch(state, send, t):
+    if SW_HEARTBEAT_F is None:
+        return
+    st = state.get(_SW_KEY, {"alerted": False, "healthy_streak": 0,
+                             "stale_since": None})
+    age, why = None, None
+    try:
+        hb = json.loads(SW_HEARTBEAT_F.read_text())
+        age = time.time() - float(hb["generated_epoch"])
+        if age > SW_STALE_S:
+            why = f"heartbeat is {int(age // 60)} min old (budget {SW_STALE_S // 60} min)"
+    except Exception as e:
+        why = f"heartbeat unreadable ({type(e).__name__}: {str(e)[:80]})"
+    if why:
+        st["healthy_streak"] = 0
+        st["stale_since"] = st.get("stale_since") or t.strftime("%Y-%m-%d %H:%M")
+        if not st.get("alerted"):
+            alert(f"MONITOR DOWN: configured system watch — {why}. "
+                  f"Job checks + feed checks are blind until it runs again.", send)
+            event({"at": t.strftime("%Y-%m-%d %H:%M"), "site": "system-watch",
+                   "event": "monitor_down", "why": why})
+            st["alerted"] = True
+    else:
+        if st.get("alerted"):
+            st["healthy_streak"] = st.get("healthy_streak", 0) + 1
+            if st["healthy_streak"] >= HEALTHY_TO_RECOVER:
+                alert(f"RECOVERED: system-watch heartbeat is fresh again "
+                      f"(age {int(age)}s; stale since {st.get('stale_since')}).", send)
+                event({"at": t.strftime("%Y-%m-%d %H:%M"), "site": "system-watch",
+                       "event": "monitor_recovered"})
+                st = {"alerted": False, "healthy_streak": 0, "stale_since": None}
+        else:
+            st = {"alerted": False, "healthy_streak": 0, "stale_since": None}
+    state[_SW_KEY] = st
+
+
+def run(targets, state_f, send):
+    t = now()
+    state = json.loads(state_f.read_text()) if state_f.exists() else {}
+    with ThreadPoolExecutor(max_workers=min(9, len(targets))) as ex:
+        results = list(ex.map(lambda kv: (kv[0], kv[1], check(kv[0], kv[1])), targets))
+    for name, target, res in results:
+        site = target_site(target)
+        st = state.get(name, {"ok": True, "fails": 0, "down_since": None,
+                              "alerted": False, "healthy_streak": 0,
+                              "escalated": False})
+        previous_fingerprint = st.get("software_fingerprint")
+        current_fingerprint = res.get("software_fingerprint")
+        current_versions = res.get("software_versions") or st.get("software_versions", [])
+        if previous_fingerprint and current_fingerprint and previous_fingerprint != current_fingerprint:
+            passed = bool(res["ok"])
+            print(f"post-update smoke {'PASS' if passed else 'FAIL'}: {site}", flush=True)
+            event({"at": t.strftime("%Y-%m-%d %H:%M"), "site": site,
+                   "event": "post_update_smoke", "passed": passed,
+                   "previous_fingerprint": previous_fingerprint[:12],
+                   "current_fingerprint": current_fingerprint[:12],
+                   "detail": res["detail"]})
+
+        if res["ok"]:
+            if st.get("alerted"):
+                healthy_streak = st.get("healthy_streak", 0) + 1
+                if healthy_streak < HEALTHY_TO_RECOVER:
+                    print(f"recovering {healthy_streak}/{HEALTHY_TO_RECOVER}: {site}", flush=True)
+                    state[name] = {"ok": False, "fails": st.get("fails", 0),
+                                   "down_since": st.get("down_since"), "alerted": True,
+                                   "healthy_streak": healthy_streak,
+                                   "recovering": True, "escalated": st.get("escalated", False),
+                                   "software_fingerprint": current_fingerprint or previous_fingerprint,
+                                   "software_versions": current_versions}
+                    continue
+                mins = int((t.timestamp() - st["down_since"]) / 60) if st.get("down_since") else 0
+                alert(f"RECOVERED: {site} is back up ({res['detail']}) after ~{mins} min down.", send)
+                event({"at": t.strftime("%Y-%m-%d %H:%M"), "site": site,
+                       "event": "recovered", "down_min": mins})
+            state[name] = {"ok": True, "fails": 0, "down_since": None,
+                           "alerted": False, "healthy_streak": 0,
+                           "recovering": False, "escalated": False,
+                           "software_fingerprint": current_fingerprint or previous_fingerprint,
+                           "software_versions": current_versions}
+        else:
+            fails = st.get("fails", 0) + 1
+            down_since = st.get("down_since") or t.timestamp()
+            alerted = st.get("alerted", False)
+            escalated = st.get("escalated", False)
+            print(f"fail {fails}: {site} — {res['detail']}", flush=True)
+            if fails >= FAILS_TO_ALERT and not alerted:
+                cause = classify(site)
+                alert(f"SITE DOWN: {site} — {res['detail']} on {fails} checks in a row. "
+                      f"{cause}. Since {datetime.fromtimestamp(down_since, ZoneInfo('America/Denver')).strftime('%-I:%M %p')} MDT.", send)
+                event({"at": t.strftime("%Y-%m-%d %H:%M"), "site": site, "event": "down",
+                       "detail": res["detail"], "failed_paths": res.get("failed_paths", []),
+                       "class": cause})
+                alerted = True
+            if fails >= FAILS_TO_ESCALATE and not escalated:
+                alert(f"ESCALATION STAGED (not sent): {site} is still down after {fails} checks. "
+                      f"Failed paths: {', '.join(res.get('failed_paths', [])) or 'unknown'}.", send=False)
+                event({"at": t.strftime("%Y-%m-%d %H:%M"), "site": site,
+                       "event": "escalation", "staged": True, "fails": fails,
+                       "failed_paths": res.get("failed_paths", []), "detail": res["detail"]})
+                escalated = True
+            state[name] = {"ok": False, "fails": fails, "down_since": down_since,
+                           "alerted": alerted, "healthy_streak": 0,
+                           "recovering": False, "escalated": escalated,
+                           "software_fingerprint": current_fingerprint or previous_fingerprint,
+                           "software_versions": current_versions}
+    watchdog_system_watch(state, send, t)
+    state_f.write_text(json.dumps(state, indent=1))
+    return results
+
+
+def main():
+    args = sys.argv[1:]
+    send = "--no-send" not in args and "--selftest" not in args and "--post-update-smoke" not in args
+    if "--selftest" in args:
+        import tempfile
+        global _EVENTS_OVERRIDE
+        tmpdir = Path(tempfile.mkdtemp())
+        _EVENTS_OVERRIDE = tmpdir / "uptime-selftest-events.jsonl"
+        tmp = tmpdir / "uptime-selftest-state.json"
+        marker_probe = check("selftest-marker", {
+            "site": "https://example.com",
+            "uptime": {"paths": ["/"], "homepage_marker": "synthetic-missing-marker"},
+        })
+        assert not marker_probe["ok"] and marker_probe["failed_paths"] == ["/"]
+        print("selftest configured generic-200 rejection: PASS")
+        targets = [("selftest-dead", "http://127.0.0.1:9")]
+        print("selftest round 1 (fail 1 — must stay silent):")
+        run(targets, tmp, send=False)
+        print("selftest round 2 (fail 2 — must print DOWN alert):")
+        run(targets, tmp, send=False)
+        print("selftest rounds 3-4 (four failures — must stage one escalation, never send):")
+        run(targets, tmp, send=False)
+        run(targets, tmp, send=False)
+        print("selftest recovery round 1 (must not recover yet):")
+        run([("selftest-dead", "https://example.com")], tmp, send=False)
+        print("selftest recovery round 2 (must print RECOVERED):")
+        run([("selftest-dead", "https://example.com")], tmp, send=False)
+        rows = [json.loads(line) for line in _EVENTS_OVERRIDE.read_text().splitlines()]
+        assert [row["event"] for row in rows] == ["down", "escalation", "recovered"]
+        assert rows[1]["staged"] is True
+        print("selftest transition and event assertions: PASS")
+        return 0
+    if REG is None or OUTPUT_F is None:
+        raise BorgConfigError("BORG_CLIENT_REGISTRY and BORG_UPTIME_STATUS_FILE are required")
+    reg = tomllib.load(open(REG, "rb"))["clients"]
+    if "--post-update-smoke" in args:
+        key = os.environ.get("BORG_POST_UPDATE_CLIENT")
+        if not key:
+            raise BorgConfigError("--post-update-smoke requires BORG_POST_UPDATE_CLIENT")
+        target = reg.get(key)
+        if not target or not target.get("site"):
+            print("configured post-update client is missing from the registry", file=sys.stderr)
+            return 1
+        result = check(key, target)
+        print(json.dumps({"site": target["site"], "ok": result["ok"],
+                          "detail": result["detail"],
+                          "failed_paths": result.get("failed_paths", [])}, indent=1))
+        return 0 if result["ok"] else 1
+    if lock_alive():
+        return 0  # previous round still probing; skip
+    LOCK_F.write_text(str(__import__("os").getpid()))
+    try:
+        targets = [(k, c) for k, c in reg.items() if c.get("site")]
+        results = run(targets, STATE_F, send)
+        committed = json.loads(STATE_F.read_text()) if STATE_F.exists() else {}
+        up = sum(1 for name, _, _ in results if committed.get(name, {}).get("ok"))
+        if up != len(results):
+            print(f"{now().strftime('%H:%M')} {up}/{len(results)} up", flush=True)
+        export_feed(targets, results)
+    finally:
+        LOCK_F.unlink(missing_ok=True)
+    return 0
+
+
+def export_feed(targets, results):
+    """Hub-safe feed for the ops cockpit (and, allowlist-copied by the
+    ecosystem builder, the gated hub at /ops/uptime.json). Client names are
+    allowed on the gated hub (owner ruling); no machine telemetry rides here."""
+    t = now()
+    state = json.loads(STATE_F.read_text()) if STATE_F.exists() else {}
+    sites = []
+    for (name, target), (_, _, res) in zip(targets, results):
+        site = target_site(target)
+        st = state.get(name, {})
+        down_min = int((t.timestamp() - st["down_since"]) / 60) if st.get("down_since") else None
+        sites.append({"name": name, "site": site, "ok": bool(st.get("ok", res["ok"])),
+                      "recovering": bool(st.get("recovering", False)),
+                      "detail": res["detail"], "down_min": down_min,
+                      "failed_paths": res.get("failed_paths", [])})
+    events = []
+    if EVENTS_F.exists():
+        for line in EVENTS_F.read_text(errors="ignore").splitlines()[-8:]:
+            try:
+                e = json.loads(line)
+                events.append({k: e.get(k) for k in ("at", "site", "event", "down_min", "detail")})
+            except Exception:
+                pass
+    feed = {"generated": t.strftime("%Y-%m-%d %H:%M MDT"), "interval_s": 180,
+            "up": sum(1 for s in sites if s["ok"]), "total": len(sites),
+            "sites": sorted(sites, key=lambda s: (s["ok"], s["name"])), "events": events[::-1]}
+    if OUTPUT_F is None:
+        raise BorgConfigError("BORG_UPTIME_STATUS_FILE is required")
+    out = OUTPUT_F
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(feed, indent=1))
+    tmp.replace(out)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Optional deep-read driver for fact extraction from configured histories.
+
+Scales the 2026-08-18 pilot (luna:ae78a4cc, 31 verified facts) per the
+commitment "verify quality, then scale to 12 lanes". Each lane is a
+an owner-configured read-only worker command that reads one dumped thread
+and prints candidate facts; this driver owns every write:
+  select largest un-read threads -> dump (mem0-ingest-threads --dump)
+  -> launch lanes -> wait -> validate + DROP-filter -> append
+  data/luna-conductor.jsonl -> store via mem0-receive-facts -> state.
+
+Usage: mem0-luna-deepread [--lanes 12] [--wait-mins 60]
+State: data/luna-deepread-state.json (a thread is never deep-read twice).
+"""
+
+import importlib.machinery
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+BASE = Path(__file__).resolve().parent.parent
+BIN = BASE / "bin"
+DATA = BASE / "data"
+LANE_DIR = DATA / "luna"
+STATE_F = DATA / "luna-deepread-state.json"
+BANK = DATA / "luna-conductor.jsonl"
+THREADS = importlib.machinery.SourceFileLoader("threads_mod", str(BIN / "mem0-ingest-threads")).load_module()
+HOOK = importlib.machinery.SourceFileLoader("mem0hook_mod", str(BIN / "mem0-capture-hook")).load_module()
+from borg_config import CONFIG, BorgConfigError
+ENV_PATH = os.environ.get("PATH", "/usr/bin:/bin")
+LIVE_GRACE_S = 1800
+
+BRIEF = """You are a read-only deep-read worker in the configured BORG environment. Your one job is to extract durable, load-bearing facts from ONE explicitly selected archived work-session transcript.
+
+Transcript dump ({size_kb} KB): {dump}
+It is plain text (SESSION DATE header, then ROLE: text lines). If it is large, read it in sequential slices (head/tail/sed ranges of ~200KB) and take notes as you go — never load huge chunks into context at once.
+
+Extract 10-40 facts a future agent or the configured owner would need months from now: decisions and owner rulings, exact file paths and artifact locations, system/port/config facts, issue and PR outcomes with numbers, operating rules, measured lessons. Each fact must be one self-contained plain sentence, specific, true to the transcript, and durable. NEVER include secrets, tokens, passwords, cookies, or client contact details.
+
+Print exactly this final block and nothing after it:
+LUNA-FACTS-BEGIN
+{{"text": "first fact sentence"}}
+{{"text": "second fact sentence"}}
+LUNA-FACTS-END"""
+
+
+def now_mdt():
+    return datetime.now(ZoneInfo("America/Denver")).strftime("%Y-%m-%d %H:%M MDT")
+
+
+def thread_id(p: Path) -> str:
+    # Hash the full filename: session-id PREFIXES collide (time-ordered v7
+    # uuids from one parallel cluster share their first 8 hex chars, which
+    # crossed two lanes' dump/out files on the first run). The state file
+    # maps id -> full path.
+    import hashlib
+    return hashlib.sha1(p.name.encode()).hexdigest()[:8]
+
+
+def candidates(state):
+    """Largest un-read threads, size-capped and diversity-capped: parallel
+    lanes of one session (same parent dir) are near-duplicates, so at most
+    two files per directory per run — the rest surface in later runs."""
+    seen = set(state)
+    out = []
+    for p, _kind in list(THREADS.claude_files()) + list(THREADS.codex_files()):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if str(p) in seen or "ae78a4cc" in p.name:  # pilot thread
+            continue
+        if time.time() - st.st_mtime < LIVE_GRACE_S:  # live session
+            continue
+        if st.st_size > 300 * 1024 * 1024:
+            print(f"skip >300MB outlier: {p.name[:60]} ({st.st_size//(1024*1024)} MB)", flush=True)
+            continue
+        out.append((st.st_size, p))
+    out.sort(reverse=True, key=lambda t: t[0])
+    picked, per_dir = [], {}
+    for _, p in out:
+        d = str(p.parent)
+        if per_dir.get(d, 0) >= 2:
+            continue
+        per_dir[d] = per_dir.get(d, 0) + 1
+        picked.append(p)
+    return picked
+
+
+def main():
+    args = sys.argv[1:]
+    lanes = int(args[args.index("--lanes") + 1]) if "--lanes" in args else 12
+    wait_mins = int(args[args.index("--wait-mins") + 1]) if "--wait-mins" in args else 60
+    command = os.environ.get("BORG_DEEPREAD_COMMAND")
+    if not command:
+        raise BorgConfigError("BORG_DEEPREAD_COMMAND is required for optional deep-read acquisition")
+    LANE_DIR.mkdir(parents=True, exist_ok=True)
+    state = json.loads(STATE_F.read_text()) if STATE_F.exists() else {}
+
+    picked = candidates(state)[:lanes]
+    if not picked:
+        print("no un-read threads left")
+        return 0
+
+    live = []
+    for i, p in enumerate(picked):
+        tid = thread_id(p)
+        dump = LANE_DIR / f"dump-{tid}.txt"
+        with open(dump, "w") as f:
+            subprocess.run([str(BIN / "mem0-ingest-threads"), "--dump", str(p)],
+                           stdout=f, stderr=subprocess.DEVNULL, timeout=600,
+                           env={**os.environ, "PATH": ENV_PATH, "BORG_HOME": str(CONFIG.home)})
+        m = re.search(r"SESSION DATE: (\d{4}-\d{2}-\d{2})", dump.read_text(errors="ignore")[:200])
+        date = m.group(1) if m else datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d")
+        out = LANE_DIR / f"lane-{tid}.out"
+        brief = BRIEF.format(dump=dump, size_kb=dump.stat().st_size // 1024)
+        # MEM0_INTERNAL marks this as one of mem0's own analysis runs. Once the
+        # conductor CODEX_HOMEs carry mem0 lifecycle hooks, the hook sees this
+        # marker and no-ops, so mem0 never captures its own homework. (P1.1)
+        env = {**os.environ, "PATH": ENV_PATH, "MEM0_INTERNAL": "1", "BORG_HOME": str(CONFIG.home)}
+        with open(out, "w") as f:
+            proc = subprocess.Popen([*shlex.split(command), brief],
+                                    stdout=f, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+        live.append({"p": p, "tid": tid, "date": date, "dump": dump, "out": out,
+                     "proc": proc})
+        print(f"lane {tid} <- {p.name[:60]} ({p.stat().st_size//1024} KB)", flush=True)
+
+    deadline = time.time() + wait_mins * 60
+    for L in live:
+        try:
+            L["proc"].wait(timeout=max(1, deadline - time.time()))
+            print(f"lane {L['tid']} exited {L['proc'].returncode}", flush=True)
+        except subprocess.TimeoutExpired:
+            print(f"lane {L['tid']} STILL RUNNING at {wait_mins}m cap — harvesting partial output", flush=True)
+
+    total_stored = 0
+    for L in live:
+        text = L["out"].read_text(errors="ignore")
+        i0, i1 = text.rfind("LUNA-FACTS-BEGIN"), text.rfind("LUNA-FACTS-END")
+        facts = []
+        if 0 <= i0 < i1:
+            for line in text[i0 + len("LUNA-FACTS-BEGIN"):i1].splitlines():
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    t = " ".join(str(json.loads(line)["text"]).split())
+                except Exception:
+                    continue
+                if not (20 <= len(t) <= 4000) or any(pt.search(t) for pt in HOOK.DROP_PATTERNS):
+                    continue
+                facts.append({"text": t, "run_id": f"thr-luna-{L['tid']}", "kind": "luna-thread",
+                              "source": f"luna:{L['tid']}", "date": L["date"]})
+        # dedupe within lane, then bank + store through the guarded receiver
+        uniq = list({f["text"]: f for f in facts}.values())
+        if uniq:
+            with open(BANK, "a") as f:
+                for row in uniq:
+                    f.write(json.dumps(row) + "\n")
+            r = subprocess.run([str(BIN / "mem0-receive-facts")],
+                               input="\n".join(json.dumps(x) for x in uniq), text=True,
+                               capture_output=True, timeout=900,
+                               env={**os.environ, "PATH": ENV_PATH, "BORG_HOME": str(CONFIG.home)})
+            print(f"lane {L['tid']}: {len(uniq)} facts banked; store says: {r.stdout.strip() or r.stderr.strip()}", flush=True)
+        else:
+            print(f"lane {L['tid']}: NO parseable facts (see {L['out'].name})", flush=True)
+        state[str(L["p"])] = {"id": L["tid"], "at": now_mdt(), "facts": len(uniq),
+                              "lane_exit": L["proc"].poll()}
+        STATE_F.write_text(json.dumps(state, indent=1))
+        total_stored += len(uniq)
+        if L["dump"].exists() and len(uniq):
+            L["dump"].unlink()  # keep dumps only for lanes that need debugging
+
+    print(f"\nDEEPREAD SUMMARY: {len(live)} lanes, {total_stored} facts banked -> {BANK.name}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

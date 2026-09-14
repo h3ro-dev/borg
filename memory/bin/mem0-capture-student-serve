@@ -1,0 +1,681 @@
+#!/usr/bin/env python3
+"""Capture-student extraction server — 2026-08-30.
+
+Serves the mem0 CAPTURE student (runs/capture-4b-lora-v1 over
+mlx-community/Qwen3-4B-Instruct-2507-4bit) on a dedicated port as an
+OpenAI-compatible endpoint, for use as the production extraction engine behind
+mem0-codex-hook's MEM0_EXTRACT_URL door.
+
+It is a sibling of graphiti/training/eval/serve_v3_hardened.py — the same five
+hardening patches, deliberately COPIED rather than imported so that a live
+production service can never break because an evaluation file changed under an
+active training lane. Two patches are added on top:
+
+  PATCH 6 — temperature clamp.  RECANARY-B-2026-08-29 established that leaving
+      temperature unpinned costs ~80 points of shape conformance: a client that
+      forgets it samples the whole 151k-token tail. graphiti's LLMConfig
+      defaulted to 1 and nobody noticed for two days. This server is dedicated
+      to one job — deterministic JSON extraction — so temperature 0 is the only
+      correct setting, and it is enforced HERE as well as in the caller. Every
+      clamp is logged and counted; nothing is silent.
+
+  PATCH 7 — startup trust gate.  Standing law since 08-29: PROVE THE SERVED
+      MODEL IS THE TRAINED ONE BEFORE MEASURING ANYTHING. An adapter that
+      silently fails to load looks exactly like an adapter that loaded and did
+      not help — that failure served two student servers for two days. So on
+      boot this process feeds the live HTTP endpoint its own homework: rows out
+      of the CAPTURE training set, replayed through the real serving path. It
+      writes a trust receipt either way. If the probes fail, it exits NONZERO,
+      launchd's last-exit shows it, and the lying server does not stay up.
+
+The trust probe deliberately goes over HTTP to the port this process just
+bound, not through an in-process model handle: the serving path is the thing
+that lied before, so the serving path is the thing that gets tested.
+
+Usage:
+  mem0-capture-student-serve \
+      --model mlx-community/Qwen3-4B-Instruct-2507-4bit \
+      --adapter-path /absolute/path/to/capture-adapter \
+      --host 127.0.0.1 --port 11450 --max-tokens-cap 4096
+
+Extra flags beyond mlx_lm.server:
+  --max-tokens-cap N        hard stop on generated tokens        (default 4096)
+  --integrity-log-every N   log the integrity counters every N   (default 25)
+  --force-temperature X     clamp every request's temperature    (default 0.0)
+  --no-force-temperature    disable the clamp
+  --trust-probes N          training rows replayed on boot       (default 3)
+  --no-trust-gate           write the receipt but never exit on failure
+                            (for manual investigation ONLY; never in the plist)
+"""
+import argparse
+import importlib.machinery
+import json
+import logging
+import os
+import random
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_capture_student", str(Path(__file__).resolve().parent / "borg_config.py")
+).load_module().CONFIG
+
+_trust_rows = os.environ.get("BORG_CAPTURE_TRUST_ROWS", "").strip()
+if not _trust_rows:
+    raise RuntimeError("BORG_CAPTURE_TRUST_ROWS is required for the capture trust gate")
+
+from mlx_lm import server as mlx_server
+from mlx_lm.tokenizer_utils import TokenizerWrapper
+
+MEM0_BASE = str(CONFIG.mem0_root)
+TRAIN_JSONL = str(Path(_trust_rows).expanduser().resolve())
+RECEIPT_DIR = str(CONFIG.data_root / "capture-student")
+RECEIPT_PATH = str(Path(RECEIPT_DIR) / "TRUST-RECEIPT.json")
+
+# ---------------------------------------------------------------- PATCH 1
+# mlx_lm 0.31.3 ModelProvider.load() resolves the model alias BEFORE looking the
+# adapter up, then looks it up under the RESOLVED name while _adapter_map is
+# keyed by "default_model". The lookup can never hit, so --adapter-path is
+# dropped for every request and the plain base model answers, silently.
+
+_orig_load = mlx_server.ModelProvider.load
+
+
+def load(self, model_path, adapter_path=None, draft_model_path=None):
+    requested = model_path
+    resolved = self._model_map.get(model_path, model_path)
+
+    adapter_path = self._adapter_map.get(requested, adapter_path)
+    if adapter_path is None:
+        cli_adapter = getattr(self.cli_args, "adapter_path", None)
+        if cli_adapter and resolved == self.cli_args.model:
+            adapter_path = cli_adapter
+
+    draft_model_path = self._draft_model_map.get(draft_model_path, draft_model_path)
+
+    model_key = (resolved, adapter_path, draft_model_path)
+    if self.model_key != model_key:
+        print(f"[capture-student] loading model={resolved!r} adapter={adapter_path!r}",
+              flush=True)
+        self._load(*model_key)
+    return self.model, self.tokenizer
+
+
+mlx_server.ModelProvider.load = load
+
+# ---------------------------------------------------------------- counters
+
+STATS = {
+    "responses": 0, "clean_json": 0, "junk_prefix": 0, "multi_object": 0,
+    "degenerate": 0, "empty": 0, "truncated_json": 0,
+    "tool_format_errors": 0, "max_tokens_clamped": 0, "temperature_clamped": 0,
+}
+_LOCK = threading.Lock()
+_LOG_EVERY = 25
+
+
+def _bump(key, n=1):
+    with _LOCK:
+        STATS[key] += n
+
+
+def _log_stats(force=False):
+    with _LOCK:
+        n = STATS["responses"]
+        snapshot = dict(STATS)
+    if force or (n and n % _LOG_EVERY == 0):
+        logging.info("[integrity] " + json.dumps(snapshot))
+
+
+# ---------------------------------------------------------------- PATCH 2
+# ToolCallFormatter._format does tc["arguments"] unguarded, and __call__ only
+# catches ValueError/JSONDecodeError. A tool call with no "arguments" key raises
+# KeyError out of the handler thread and the client gets a dead connection.
+
+_orig_format = mlx_server.ToolCallFormatter._format
+
+
+def _safe_format(self, tc):
+    try:
+        if isinstance(tc, dict) and "arguments" not in tc:
+            tc = {**tc, "arguments": {}}
+            _bump("tool_format_errors")
+            logging.warning("[hardened] tool call had no 'arguments' key; "
+                            "defaulted to {} instead of crashing the request")
+        return _orig_format(self, tc)
+    except Exception as e:
+        _bump("tool_format_errors")
+        logging.warning(f"[hardened] tool call could not be formatted "
+                        f"({type(e).__name__}: {e}); dropped")
+        return None
+
+
+def _safe_call(self, tool_calls):
+    if not tool_calls:
+        return []
+    result = []
+    for tool_text in tool_calls:
+        try:
+            parsed = self._tool_parser(tool_text, self._tools)
+        except Exception as e:
+            _bump("tool_format_errors")
+            logging.warning(f"[hardened] tool text unparseable "
+                            f"({type(e).__name__}: {e}); dropped")
+            continue
+        if not isinstance(parsed, list):
+            parsed = [parsed]
+        for tc in parsed:
+            out = _safe_format(self, tc)
+            if out is not None:
+                result.append(out)
+    return result
+
+
+mlx_server.ToolCallFormatter._format = _safe_format
+mlx_server.ToolCallFormatter.__call__ = _safe_call
+
+# ---------------------------------------------------------------- PATCH 3
+# The caller never sends `tools`. A stray <tool_call> control token otherwise
+# puts the server's state machine into tool mode and SIPHONS that text out of
+# `content`. Off means the caller sees MORE of the raw output, never less.
+# Thinking detection stays ON: the model does emit real <think> blocks.
+
+TokenizerWrapper.has_tool_calling = property(lambda self: False)
+
+# --------------------------------------------------- PATCH 4 + 5 + 6
+
+MAX_TOKENS_CAP = None
+FORCE_TEMPERATURE = 0.0
+
+_orig_handle_completion = mlx_server.APIHandler.handle_completion
+
+
+def handle_completion(self, request, stop_words):
+    if MAX_TOKENS_CAP and getattr(self, "max_tokens", 0) > MAX_TOKENS_CAP:
+        _bump("max_tokens_clamped")
+        logging.info(f"[hardened] max_tokens {self.max_tokens} -> {MAX_TOKENS_CAP} "
+                     f"(hard stop)")
+        self.max_tokens = MAX_TOKENS_CAP
+    # PATCH 6 — never sample from the tail on an extraction job.
+    if FORCE_TEMPERATURE is not None:
+        requested = getattr(self, "temperature", None)
+        if requested is None or float(requested) != float(FORCE_TEMPERATURE):
+            _bump("temperature_clamped")
+            logging.info(f"[hardened] temperature {requested} -> {FORCE_TEMPERATURE} "
+                         f"(deterministic extraction)")
+            self.temperature = float(FORCE_TEMPERATURE)
+    return _orig_handle_completion(self, request, stop_words)
+
+
+mlx_server.APIHandler.handle_completion = handle_completion
+
+
+def _classify(text):
+    if not text:
+        return "empty"
+    s = text.strip()
+    try:
+        if isinstance(json.loads(s), dict):
+            return "clean_json"
+    except Exception:
+        pass
+    i = text.find("{")
+    if i == -1:
+        return "degenerate"
+    if text[:i].strip():
+        return "junk_prefix"
+    dec = json.JSONDecoder()
+    try:
+        _, end = dec.raw_decode(text[i:])
+        return "multi_object" if text[i + end:].strip() else "clean_json"
+    except Exception:
+        return "truncated_json"
+
+
+_orig_generate_response = mlx_server.APIHandler.generate_response
+
+
+def generate_response(self, text, finish_reason, *a, **k):
+    # Count only completed, non-streaming responses. NEVER alter `text`.
+    if finish_reason is not None and not getattr(self, "stream", False):
+        klass = _classify(text)
+        _bump("responses")
+        _bump(klass if klass in STATS else "degenerate")
+        if klass != "clean_json":
+            logging.warning(f"[integrity] {klass} len={len(text or '')} "
+                            f"head={(text or '')[:80]!r}")
+        _log_stats()
+    return _orig_generate_response(self, text, finish_reason, *a, **k)
+
+
+mlx_server.APIHandler.generate_response = generate_response
+
+
+# ------------------------------------------------------------- PATCH 7
+# THE TRUST GATE. Replay CAPTURE training rows through the live HTTP endpoint
+# and check the served model behaves like the trained one.
+#
+# THRESHOLDS ARE MEASURED, NOT GUESSED — see TRUST-CALIBRATION.json, 12 held-in
+# training rows put through BOTH the adapter server and the plain base model
+# (same weights, no adapter — what a silently dropped adapter actually serves):
+#
+#   axis                            student   plain base   teacher target
+#   candidates in the required shape  12/12       9/12         --
+#   support refs all real             12/12      11/12         --
+#   PRODUCTION gate survival (mean)   0.902      0.573        1.000
+#   ...aggregate                      75/83      55/88          --
+#   memorised facts reproduced        0.026      0.000          --
+#
+# TWO measured lessons are baked in here.
+#
+# 1. FACT REPRODUCTION DOES NOT WORK AS THE DISCRIMINATOR FOR THIS STUDENT.
+#    It is the axis RECANARY-B used for graphiti v3, and the obvious choice —
+#    but measured on capture it is 0.026, because extraction from long, varied
+#    evidence produces DIFFERENT-BUT-VALID facts rather than the teacher's exact
+#    sentences. This is the same metric artifact the exam recorded as a naive
+#    Jaccard of 0.008. A gate built on it would have refused the real student.
+#
+# 2. SHAPE ALONE PROVES NOTHING. The prompt states the output schema verbatim,
+#    so the base model can satisfy it 9 times in 12 — exactly the weak evidence
+#    RECANARY-B flagged for the v2 student.
+#
+# So the gate is PRODUCTION GATE SURVIVAL: the answers are scored by the live
+# hook's own validate_candidate against the row's own evidence. That is the
+# programme's standard capture metric (the exam's 86.8% vs the incumbent's 65%),
+# and it separates 0.902 from 0.573 here. The gate requires all three axes.
+
+# 5, not 3 — measured. At 3 probes the sample lands on train row 1897, a row
+# the student consistently scores 0.429 on, and the aggregate falls to 0.810
+# against a 0.750 bar: a real pass, but only 8% of headroom, and a KeepAlive
+# service that occasionally refuses a GOOD model is its own outage. At 5 the
+# student measures 0.886 and the plain base 0.650, so the bar sits 18% below
+# the student and 13% above a dropped adapter. Both arms proven — see
+# TRUST-GATE-REFUSAL-PROOF.json (3 probes) and -5probe.json.
+TRUST_PROBES = 5
+TRUST_GATE_ENABLED = True
+# Aggregate production-gate survival across the probes that ANSWERED. Sits
+# between the measured student (0.904 aggregate) and the measured base (0.625),
+# with more room below the student than above the base.
+#
+# This is deliberately the ONLY thing that can fail the gate. An earlier version
+# also demanded that every single probe be well-shaped and cite only real refs,
+# and that hair trigger cost a false refusal within hours: under load one probe
+# timed out and the service exited 70 with 0.857 survival on the four that did
+# answer — comfortably above the bar. Shape and ref problems already drag this
+# number down on their own, because a malformed answer keeps no candidates. The
+# two flags are still measured and written into the receipt as diagnostics; they
+# just no longer hold a veto.
+TRUST_MIN_GATE_SURVIVAL = 0.75
+# A TIMEOUT IS NOT A LIE. The gate exists to catch a server quietly answering
+# from the base model, which is a QUALITY fault. A busy machine is an
+# ENVIRONMENT fault, and treating the two the same turns load into an outage —
+# the "loaded box fails timing tests" trap. So probes that never came back are
+# not evidence of anything: the run needs this many ANSWERS before it is allowed
+# to reach a verdict at all, and short of that it retries instead of accusing.
+TRUST_MIN_COMPLETED = 3
+TRUST_INCONCLUSIVE_RETRIES = 3
+TRUST_INCONCLUSIVE_BACKOFF = 60.0
+# Deterministic row choice so two receipts are comparable.
+TRUST_SEED = 20260830
+TRUST_ROW_POOL = 4000
+# Generous on purpose: this is a boot-time correctness check, not a latency
+# test. Probes measured 62-105 s while the machine was carrying a harvest, and
+# the old 180 s ceiling clipped one of them.
+TRUST_REQUEST_TIMEOUT = 300.0
+TRUST_BOOT_TIMEOUT = 900.0
+HOOK_PATH = f"{MEM0_BASE}/bin/mem0-codex-hook"
+
+ALLOWED_KINDS = {"fact", "decision", "preference", "procedure"}
+
+
+def _load_hook():
+    """Load the LIVE hook so the gate scores with the production validator, not
+    a copy of it. A copy drifts; the real function cannot."""
+    import importlib.machinery
+    os.environ.setdefault("MEM0_HOOK_SCOPES", "team:memory-stack")
+    return importlib.machinery.SourceFileLoader(
+        "mem0_codex_hook_trustgate", HOOK_PATH).load_module()
+
+
+def _parse_candidates(text):
+    """The hook's own parse, kept byte-compatible with mem0-codex-hook."""
+    clean = (text or "").strip()
+    if clean.startswith("```"):
+        clean = clean.split("\n", 1)[-1]
+        if clean.endswith("```"):
+            clean = clean[: -3]
+        clean = clean.strip()
+    payload = None
+    try:
+        payload = json.loads(clean)
+    except Exception:
+        start, end = clean.find("{"), clean.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                payload = json.loads(clean[start:end + 1])
+            except Exception:
+                return None
+        else:
+            return None
+    rows = payload.get("candidates") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return None
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _shape_ok(rows):
+    if not rows:
+        return False
+    for r in rows:
+        if not str(r.get("fact") or "").strip():
+            return False
+        if str(r.get("kind") or "").lower() not in ALLOWED_KINDS:
+            return False
+        if not isinstance(r.get("support"), list) or not r["support"]:
+            return False
+    return True
+
+
+def _load_trust_rows(n):
+    """Deterministic sample of CAPTURE training rows (memorised on purpose)."""
+    rows = []
+    with open(TRAIN_JSONL, "r", encoding="utf-8") as fh:
+        for i, line in enumerate(fh):
+            if i >= TRUST_ROW_POOL:
+                break
+            rows.append(line)
+    idxs = random.Random(TRUST_SEED).sample(range(len(rows)), min(n, len(rows)))
+    out = []
+    for i in sorted(idxs):
+        msgs = json.loads(rows[i])["messages"]
+        prompt = next(m["content"] for m in msgs if m["role"] == "user")
+        target = next(m["content"] for m in msgs if m["role"] == "assistant")
+        out.append({"row": i, "prompt": prompt, "target": target})
+    return out
+
+
+def _evidence_records(hook, prompt):
+    """The prompt is EXTRACTION_PROMPT + json.dumps(records). Slice at the
+    constant's LENGTH — never at the first '[', which lands inside the prompt
+    template's own `["T1"]` example and silently scores everything against
+    garbage (it scored the teacher's own targets at 0%)."""
+    if not prompt.startswith(hook.EXTRACTION_PROMPT):
+        raise ValueError("corpus prompt no longer carries the production "
+                         "EXTRACTION_PROMPT — hook and corpus have drifted")
+    rows = json.loads(prompt[len(hook.EXTRACTION_PROMPT):])
+    return rows if isinstance(rows, list) else []
+
+
+def _refs_all_real(rows, records):
+    known = {r.get("ref") for r in records}
+    cited = [ref for r in (rows or []) for ref in (r.get("support") or [])]
+    return bool(cited) and all(ref in known for ref in cited)
+
+
+def _post_chat(url, prompt, timeout):
+    body = json.dumps({
+        "model": "default_model",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 1200,
+        "stream": False,
+    }).encode()
+    req = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"})
+    t0 = time.monotonic()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode())
+    dt = time.monotonic() - t0
+    return payload["choices"][0]["message"]["content"], dt
+
+
+def _wait_for_listen(base, deadline):
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(base + "/v1/models", timeout=10) as r:
+                r.read()
+            return True
+        except Exception:
+            time.sleep(2.0)
+    return False
+
+
+def run_trust_probes(host, port, n_probes):
+    """Returns (passed: bool, receipt: dict). Never raises."""
+    base = f"http://{host}:{port}"
+    receipt = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "endpoint": base,
+        "pid": os.getpid(),
+        "probes_requested": n_probes,
+        "gate": {
+            "min_gate_survival": TRUST_MIN_GATE_SURVIVAL,
+            "min_completed_probes": TRUST_MIN_COMPLETED,
+            "metric": "production validate_candidate survival, scored by the "
+                      "live mem0-codex-hook against each row's own evidence",
+            "calibration": "TRUST-CALIBRATION.json — student 0.904 aggregate, "
+                           "plain base 0.625, teacher target 1.000",
+            "note": "shape_ok and refs_all_real are diagnostics, not vetoes. A "
+                    "probe that never came back is an environment fault and is "
+                    "never on its own a trust verdict.",
+        },
+        "probes": [],
+    }
+    if not _wait_for_listen(base, time.monotonic() + TRUST_BOOT_TIMEOUT):
+        # Never came up. That is the machine, not the adapter — INCONCLUSIVE,
+        # so the watchdog retries instead of accusing a model it never reached.
+        receipt["verdict"] = "INCONCLUSIVE"
+        receipt["reason"] = ("the endpoint never accepted a request before the "
+                             "boot timeout, so nothing about the adapter was "
+                             "measured. Environment fault, not a trust verdict.")
+        return None, receipt
+
+    try:
+        hook = _load_hook()
+        rows = _load_trust_rows(n_probes)
+    except Exception as e:
+        # Also not the model's fault: the gate itself could not be assembled.
+        receipt["verdict"] = "INCONCLUSIVE"
+        receipt["reason"] = (f"could not load the production gate or the training "
+                             f"corpus, so no verdict was reachable: "
+                             f"{type(e).__name__}: {e}")
+        return None, receipt
+
+    kept_total = considered_total = 0
+    for row in rows:
+        entry = {"train_row": row["row"]}
+        try:
+            records = _evidence_records(hook, row["prompt"])
+            answer, dt = _post_chat(base + "/v1/chat/completions",
+                                    row["prompt"], TRUST_REQUEST_TIMEOUT)
+        except Exception as e:
+            entry.update(completed=False, reason=f"{type(e).__name__}: {e}")
+            receipt["probes"].append(entry)
+            continue
+        got = _parse_candidates(answer) or []
+        considered = got[:8]
+        kept = sum(1 for r in considered
+                   if hook.validate_candidate(r, records)[0])
+        survival = (kept / len(considered)) if considered else 0.0
+        shape = _shape_ok(got)
+        refs_ok = _refs_all_real(got, records)
+        kept_total += kept
+        considered_total += len(considered)
+        entry.update(
+            completed=True, seconds=round(dt, 2), answer_chars=len(answer or ""),
+            candidates=len(got), evidence_records=len(records),
+            shape_ok=shape, refs_all_real=refs_ok,
+            gate_kept=kept, gate_considered=len(considered),
+            gate_survival=round(survival, 3),
+            classification=_classify(answer),
+        )
+        if not (shape and refs_ok):
+            # Diagnostic only — it already costs this probe its kept candidates.
+            entry["diagnostic"] = ("candidates malformed" if not shape
+                                   else "cited a support ref not in the evidence")
+            entry["answer_head"] = (answer or "")[:200]
+        receipt["probes"].append(entry)
+
+    completed = [p for p in receipt["probes"] if p.get("completed")]
+    aggregate = (kept_total / considered_total) if considered_total else 0.0
+    receipt["probes_run"] = len(rows)
+    receipt["probes_completed"] = len(completed)
+    receipt["probes_well_formed"] = sum(
+        1 for p in completed if p.get("shape_ok") and p.get("refs_all_real"))
+    receipt["gate_kept_total"] = kept_total
+    receipt["gate_considered_total"] = considered_total
+    receipt["gate_survival_aggregate"] = round(aggregate, 3)
+
+    # Not enough answers to judge quality at all. That is the machine's fault,
+    # not the model's, so it is INCONCLUSIVE — never a trust verdict.
+    if len(completed) < TRUST_MIN_COMPLETED:
+        receipt["verdict"] = "INCONCLUSIVE"
+        receipt["reason"] = (
+            f"only {len(completed)} of {len(rows)} probes came back (needed "
+            f"{TRUST_MIN_COMPLETED}). This is an environment fault — a busy or "
+            f"wedged machine — and says nothing about whether the adapter "
+            f"loaded. Retrying rather than accusing the model.")
+        return None, receipt
+
+    ok = aggregate >= TRUST_MIN_GATE_SURVIVAL
+    receipt["verdict"] = "PASS" if ok else "FAIL"
+    if not ok:
+        receipt["reason"] = (
+            f"production-gate survival {aggregate:.3f} < {TRUST_MIN_GATE_SURVIVAL} "
+            f"over {len(completed)} answers (the plain base model measures 0.625 "
+            f"— this is what a DROPPED ADAPTER looks like). Refusing to serve.")
+    return ok, receipt
+
+
+def _write_receipt(receipt):
+    try:
+        os.makedirs(RECEIPT_DIR, exist_ok=True)
+        tmp = RECEIPT_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(receipt, fh, indent=2, sort_keys=True)
+        os.replace(tmp, RECEIPT_PATH)
+    except Exception as e:
+        print(f"[capture-student] could not write trust receipt: {e}", flush=True)
+
+
+def _trust_watchdog(host, port, n_probes):
+    """PASS -> serve.  FAIL -> exit 70.  INCONCLUSIVE -> retry, then exit 75.
+
+    The three outcomes are kept apart on purpose. Exit 70 means the model
+    answered and answered badly, which is the fault this gate exists to catch.
+    Exit 75 means the gate could not get enough answers to judge — a busy
+    machine — and it is a different code so the two are never confused when
+    reading launchd's last-exit column.
+    """
+    for attempt in range(1, TRUST_INCONCLUSIVE_RETRIES + 1):
+        ok, receipt = run_trust_probes(host, port, n_probes)
+        receipt["attempt"] = attempt
+        _write_receipt(receipt)
+        print("[capture-student] trust verdict=" + receipt.get("verdict", "?")
+              + f" attempt={attempt}/{TRUST_INCONCLUSIVE_RETRIES}"
+              f" completed={receipt.get('probes_completed', 0)}"
+              f"/{receipt.get('probes_run', 0)}"
+              f" well_formed={receipt.get('probes_well_formed', 0)}"
+              f" gate_survival={receipt.get('gate_survival_aggregate')}"
+              f" (bar {TRUST_MIN_GATE_SURVIVAL})"
+              + " receipt=" + RECEIPT_PATH, flush=True)
+        if ok:
+            return
+        if ok is False:
+            print("[capture-student] TRUST GATE FAILED: " + str(receipt.get("reason")),
+                  flush=True)
+            print("[capture-student] exiting 70 — a lying server must not stay up.",
+                  flush=True)
+            sys.stderr.flush()
+            sys.stdout.flush()
+            os._exit(70)
+        # INCONCLUSIVE
+        print("[capture-student] " + str(receipt.get("reason")), flush=True)
+        if attempt < TRUST_INCONCLUSIVE_RETRIES:
+            time.sleep(TRUST_INCONCLUSIVE_BACKOFF)
+
+    print("[capture-student] exiting 75 — could not MEASURE the model after "
+          f"{TRUST_INCONCLUSIVE_RETRIES} attempts. This is not a verdict on the "
+          "adapter; the machine never gave enough answers back.", flush=True)
+    sys.stderr.flush()
+    sys.stdout.flush()
+    os._exit(75)
+
+
+# ---------------------------------------------------------------- main
+
+def main():
+    global MAX_TOKENS_CAP, _LOG_EVERY, FORCE_TEMPERATURE, TRUST_PROBES, TRUST_GATE_ENABLED
+    MAX_TOKENS_CAP = 4096
+    argv, extra = [], []
+    host, port = "127.0.0.1", 11450
+    it = iter(sys.argv[1:])
+    for tok in it:
+        if tok == "--max-tokens-cap":
+            extra.append(("cap", int(next(it))))
+        elif tok.startswith("--max-tokens-cap="):
+            extra.append(("cap", int(tok.split("=", 1)[1])))
+        elif tok == "--integrity-log-every":
+            extra.append(("every", int(next(it))))
+        elif tok.startswith("--integrity-log-every="):
+            extra.append(("every", int(tok.split("=", 1)[1])))
+        elif tok == "--force-temperature":
+            extra.append(("temp", float(next(it))))
+        elif tok.startswith("--force-temperature="):
+            extra.append(("temp", float(tok.split("=", 1)[1])))
+        elif tok == "--no-force-temperature":
+            extra.append(("temp", None))
+        elif tok == "--trust-probes":
+            extra.append(("probes", int(next(it))))
+        elif tok.startswith("--trust-probes="):
+            extra.append(("probes", int(tok.split("=", 1)[1])))
+        elif tok == "--no-trust-gate":
+            extra.append(("gate", False))
+        else:
+            if tok == "--host":
+                nxt = next(it)
+                host = nxt
+                argv += [tok, nxt]
+                continue
+            if tok.startswith("--host="):
+                host = tok.split("=", 1)[1]
+            if tok == "--port":
+                nxt = next(it)
+                port = int(nxt)
+                argv += [tok, nxt]
+                continue
+            if tok.startswith("--port="):
+                port = int(tok.split("=", 1)[1])
+            argv.append(tok)
+    for k, v in extra:
+        if k == "cap":
+            MAX_TOKENS_CAP = v
+        elif k == "every":
+            _LOG_EVERY = v
+        elif k == "temp":
+            FORCE_TEMPERATURE = v
+        elif k == "probes":
+            TRUST_PROBES = v
+        elif k == "gate":
+            TRUST_GATE_ENABLED = v
+    sys.argv = [sys.argv[0]] + argv
+    print(f"[capture-student] max_tokens_cap={MAX_TOKENS_CAP} "
+          f"force_temperature={FORCE_TEMPERATURE} tool_call_detection=OFF "
+          f"thinking_detection=ON integrity_log_every={_LOG_EVERY} "
+          f"trust_probes={TRUST_PROBES} trust_gate={TRUST_GATE_ENABLED}", flush=True)
+
+    if TRUST_PROBES > 0:
+        target = _trust_watchdog if TRUST_GATE_ENABLED else (
+            lambda h, p, n: _write_receipt(run_trust_probes(h, p, n)[1]))
+        threading.Thread(target=target, args=(host, port, TRUST_PROBES),
+                         daemon=True, name="trust-gate").start()
+
+    return mlx_server.main()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

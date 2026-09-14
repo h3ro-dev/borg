@@ -6,7 +6,7 @@ Why: Ollama's OpenAI-compat /v1 endpoint IGNORES response_format json_schema
 there is no way to disable qwen thinking through it. Ollama's NATIVE /api/chat
 enforces `format=<json schema>` at the decoder and accepts think:false.
 
-This shim listens on 127.0.0.1:11500, translates:
+This shim listens on the loopback port configured by BORG_GRAPH_LLM_URL and translates:
   POST /v1/chat/completions -> POST {upstream}/api/chat
     - response_format json_schema  -> format=<schema>   (grammar-enforced)
     - response_format json_object  -> format="json"
@@ -15,14 +15,12 @@ This shim listens on 127.0.0.1:11500, translates:
     - logprobs/top_logprobs passed through
   POST /v1/embeddings -> forwarded verbatim to {upstream}/v1/embeddings
 
-Upstream: OLLAMA_UPSTREAM env (default http://127.0.0.1:11434).
-Run: nohup .../ollama-schema-shim >> .../data/shim.log 2>&1 &
-     (on :11500 launchd owns it — com.studio0.ollama-schema-shim, KeepAlive)
+Upstream: BORG_OLLAMA_URL from the installation configuration.
 
 PAIR TEE (added 2026-08-28)
 --------------------------
-Every /chat/completions round-trip is copied to data/shim-pairs.jsonl so the
-live backfill's own traffic becomes the training corpus for the next student.
+When explicitly enabled, /chat/completions round-trips are copied to the
+owner-configured private destination for optional training.
 The 2026-08-28 canary proved a student is only a drop-in replacement for the
 callsite it was trained on: the crowned 4B aced extract_nodes.extract_text and
 scored 0/534 on dedupe_edges.resolve_edge, a shape it had never seen. graphiti
@@ -31,11 +29,13 @@ generates all six shapes here, so this is where to harvest them.
 The tee is fire-and-forget and structurally cannot touch the response path:
 the request thread only does one bounded `put_nowait`; a single daemon thread
 does every string, JSON and file operation. Queue full, write error or any
-other failure bumps a counter in data/shim-pairs.jsonl.stats.json and is
-otherwise ignored. Turn it off with SHIM_PAIRS=off.
+other failure bumps a sidecar counter and is otherwise ignored. Capture is off
+unless BORG_GRAPH_CAPTURE_OPT_IN=1 and SHIM_PAIRS_LOG names an absolute path
+inside BORG_HOME.
 """
 
 import json
+import importlib.machinery
 import os
 import queue
 import threading
@@ -43,19 +43,42 @@ import time
 import urllib.request
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
-UPSTREAM = os.environ.get("OLLAMA_UPSTREAM", "http://127.0.0.1:11434")
-PORT = int(os.environ.get("SHIM_PORT", "11500"))
+CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_config_ollama_shim", str(Path(__file__).resolve().parent / "borg_config.py")
+).load_module().CONFIG
+
+UPSTREAM = str(CONFIG.values["BORG_OLLAMA_URL"])
+from urllib.parse import urlparse
+PORT = urlparse(str(CONFIG.values["BORG_GRAPH_LLM_URL"])).port
 # SHIM_THINK=on lets qwen reason privately while the grammar locks the output
 # shape (GGUF engine supports both simultaneously — measured 2026-08-20, and
 # thinking recovered the supersession judgment that no-think missed).
 THINK = os.environ.get("SHIM_THINK", "off").lower() == "on"
 
 # --- pair tee ---------------------------------------------------------------
-_BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEE_ON = os.environ.get("SHIM_PAIRS", "on").lower() != "off"
-TEE_F = os.environ.get("SHIM_PAIRS_LOG",
-                       os.path.join(_BASE, "data", "shim-pairs.jsonl"))
+_BASE = str(CONFIG.graph_root)
+TEE_ON = os.environ.get("BORG_GRAPH_CAPTURE_OPT_IN", "0").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+_tee_destination = os.environ.get("SHIM_PAIRS_LOG", "").strip()
+if TEE_ON and not _tee_destination:
+    raise RuntimeError(
+        "SHIM_PAIRS_LOG is required when BORG_GRAPH_CAPTURE_OPT_IN is enabled"
+    )
+if _tee_destination:
+    _tee_path = Path(_tee_destination).expanduser()
+    if not _tee_path.is_absolute():
+        raise RuntimeError("SHIM_PAIRS_LOG must be an absolute path inside BORG_HOME")
+    _tee_path = _tee_path.resolve()
+    try:
+        _tee_path.relative_to(CONFIG.home)
+    except ValueError as exc:
+        raise RuntimeError("SHIM_PAIRS_LOG must remain inside BORG_HOME") from exc
+    TEE_F = str(_tee_path)
+else:
+    TEE_F = str(CONFIG.graph_data_root / "shim-pairs.disabled")
 TEE_STATS_F = TEE_F + ".stats.json"
 TEE_MAX_BYTES = int(os.environ.get("SHIM_PAIRS_MAX_BYTES", "65536"))
 TEE_QUEUE_MAX = int(os.environ.get("SHIM_PAIRS_QUEUE", "2000"))
@@ -398,6 +421,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    if CONFIG.portable:
+        endpoint = urlparse(str(CONFIG.values["BORG_GRAPH_LLM_URL"]))
+        upstream = urlparse(UPSTREAM)
+        if endpoint.hostname not in {"127.0.0.1", "localhost", "::1"} or PORT is None or (endpoint.hostname, PORT) == (upstream.hostname, upstream.port):
+            raise SystemExit("optional schema shim unavailable: configure a separate local BORG_GRAPH_LLM_URL port")
     print(f"schema-shim on 127.0.0.1:{PORT} -> {UPSTREAM}", flush=True)
     if TEE_ON:
         # Daemon: the tee must never hold the shim open at shutdown.

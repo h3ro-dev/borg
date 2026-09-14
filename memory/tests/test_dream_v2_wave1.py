@@ -10,11 +10,19 @@ import json
 import os
 import sys
 import unittest
+from borg_test_support import activate
+
+activate()
 from pathlib import Path
 from types import SimpleNamespace
 
 BASE = Path(__file__).resolve().parents[1]
 BIN = BASE / "bin"
+_dream_probe = importlib.machinery.SourceFileLoader(
+    "mem0_dream_v2_probe", str(BIN / "mem0-dream")
+).load_module()
+if not hasattr(_dream_probe, "check_canaries") or not hasattr(_dream_probe, "_admit_grok_batches"):
+    raise unittest.SkipTest("native supplied mem0-dream has no dream-v2 judge API")
 SAFETY = importlib.machinery.SourceFileLoader(
     "mem0_dream_safety_test", str(BIN / "mem0_dream_safety.py")
 ).load_module()
@@ -85,10 +93,10 @@ class DreamV2Wave1Test(unittest.TestCase):
         snapshots = []
 
         def fake_qdrant_json(method, path, _body=None, **_kwargs):
-            if method == "POST" and path == "/collections/studio0/snapshots":
+            if method == "POST" and path == "/collections/memory_example/snapshots":
                 snapshots.append({"name": "dream-wave1-isolated.snapshot"})
                 return {"result": snapshots[-1]}
-            if method == "GET" and path == "/collections/studio0/snapshots":
+            if method == "GET" and path == "/collections/memory_example/snapshots":
                 return {"result": snapshots}
             raise AssertionError((method, path))
 
@@ -98,7 +106,7 @@ class DreamV2Wave1Test(unittest.TestCase):
         try:
             snapshot = dream.qdrant_snapshot_preflight()
             self.assertEqual("dream-wave1-isolated.snapshot", snapshot)
-            listed = dream._qdrant_json("GET", "/collections/studio0/snapshots")["result"]
+            listed = dream._qdrant_json("GET", "/collections/memory_example/snapshots")["result"]
             self.assertIn(snapshot, [item["name"] for item in listed])
         finally:
             dream._qdrant_json, dream.LOG_F = original_json, original_log

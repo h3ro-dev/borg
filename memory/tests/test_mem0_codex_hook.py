@@ -6,10 +6,15 @@ import os
 import tempfile
 import threading
 import unittest
+from borg_test_support import activate
+
+activate()
 from pathlib import Path
 
 
-SCRIPT = Path(os.path.expanduser("~/Library/Memory/mem0/bin/mem0-codex-hook"))
+SCRIPT = Path(__file__).resolve().parents[1] / "bin" / "mem0-codex-hook"
+_isolated_base = tempfile.mkdtemp(prefix="borg-codex-hook-test-")
+os.environ["MEM0_CODEX_BASE"] = _isolated_base
 
 # FINDING A1 made recall default-closed: without a MEM0_HOOK_SCOPES grant the
 # hook drops every row. Grant one deterministic scope before the module load
@@ -126,7 +131,7 @@ class CodexHookTests(unittest.TestCase):
         return {
             "session_id": "session-1",
             "turn_id": "turn-1",
-            "cwd": os.path.expanduser("~/Library/Memory"),
+            "cwd": "/tmp/mem0",
             "hook_event_name": "UserPromptSubmit",
             "prompt": prompt,
         }
@@ -142,7 +147,7 @@ class CodexHookTests(unittest.TestCase):
                     "memory": "The Mem0 lifecycle design keeps Graphiti unchanged and uses scoped Codex hook recall.",
                     "score": 0.86,
                     "agent_id": "seeder",
-                    "metadata": {"source": os.path.expanduser("~/Library/Memory/mem0/README.md"), "scope": TEST_SCOPE},
+                    "metadata": {"source": "/tmp/mem0/README.md", "scope": TEST_SCOPE},
                 },
                 {
                     "id": "irrelevant",
@@ -154,11 +159,12 @@ class CodexHookTests(unittest.TestCase):
             ]
         )
         payload = self.start_payload(
-            "Implement Mem0 and Graphiti-safe Codex hooks under ~/Library/Memory/mem0/bin"
+            "Implement Mem0 lifecycle hooks under /tmp/mem0/bin"
         )
         output = hook.handle_start(payload)
         self.assertIn("relevant", output)
-        self.assertIn("source=~/Library/Memory/mem0/README.md", output)
+        self.assertIn("source=", output)
+        self.assertIn("README.md", output)
         self.assertNotIn("roofing", output)
         context = json.loads(output)["hookSpecificOutput"]["additionalContext"]
         self.assertLessEqual(hook.approx_tokens(context), hook.MAX_RECALL_TOKENS)
