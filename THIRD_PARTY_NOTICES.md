@@ -137,3 +137,8 @@ owners' trademark rights and are not relicensed under BORG's MIT grant.
 Sources, original proportions and distributed hashes are recorded in
 `site/assets/providers/README.md` and `SHA256SUMS` in that directory. Their use
 does not imply a partnership or endorsement.
+
+The five-vessel fleet still at `site/assets/borg-fleet.webp` includes those same
+provider identifiers on plain identification plates. The original scene and
+hulls use MIT; the embedded provider marks remain excluded from that grant.
+See `art/FLEET.md` for the editable scene build, input provenance and asset hash.

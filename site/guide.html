@@ -1,0 +1,815 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#080b09">
+  <meta name="description" content="Install your own BORG: full and blueprint paths, provider setup, remote machines, verification and recovery. Source-backed instructions for people and agents.">
+  <title>Installation &amp; setup guide — BORG Collective</title>
+  <link rel="canonical" href="https://borg.utlyze.com/guide.html">
+  <link rel="icon" href="./assets/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./guide.css">
+  <script src="./guide.js" defer></script>
+</head>
+<body class="guide-page">
+<a class="skip-link" href="#main">Skip to guide</a>
+<header class="guide-header guide-shell">
+  <a class="brand" href="./" aria-label="BORG Collective home"><img src="./assets/mark.svg" width="36" height="40" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+  <nav aria-label="Main navigation"><a href="./#configure">Configure</a><a href="./#fleet">Fleet</a><a href="./#setup">Install</a><a href="https://github.com/h3ro-dev/borg">Source ↗</a></nav>
+</header>
+<main id="main" class="guide-shell" tabindex="-1">
+  <section class="guide-hero" aria-labelledby="guide-title">
+    <p class="eyebrow"><span class="square" aria-hidden="true"></span> FIELD GUIDE / OWNER SETUP</p>
+    <h1 id="guide-title">BUILD YOUR OWN.<br><span>KNOW WHAT RUNS.</span></h1>
+    <p>From a fresh checkout to a verified workflow. Install BORG on your machine, connect your accounts, and grow only the system you choose.</p>
+    <div class="guide-actions"><a class="button primary" href="#install">Start installation <span aria-hidden="true">↓</span></a><a class="text-link" href="./agent-guide.md">Agent-readable runbook ↗</a><a class="text-link" href="#agent-prompt">Copy a setup brief ↓</a></div>
+    <div class="guide-meta"><span>APPLE SILICON NATIVE INSTALL VERIFIED</span><span>FULL + TOOLS PROFILES</span><span>SOURCE REVIEW / 2026-09-16</span></div>
+  </section>
+  <div class="guide-grid">
+    <aside class="guide-sidebar">
+      <nav class="guide-toc" aria-label="Guide contents"><h2>ON THIS PAGE</h2><ol><li><a href="#understand"><span>01</span>Understand BORG</a></li>
+<li><a href="#prerequisites"><span>02</span>Check the host</a></li>
+<li><a href="#install"><span>03</span>Choose your install</a></li>
+<li><a href="#onboard"><span>04</span>Read the setup plan</a></li>
+<li><a href="#providers"><span>05</span>Connect a provider</a></li>
+<li><a href="#fleet"><span>06</span>Enroll machines</a></li>
+<li><a href="#web"><span>07</span>ChatGPT web gateway</a></li>
+<li><a href="#verify"><span>08</span>Prove the workflow</a></li>
+<li><a href="#troubleshoot"><span>09</span>Troubleshoot</a></li>
+<li><a href="#operate"><span>10</span>Maintain &amp; recover</a></li>
+<li><a href="#agent-prompt"><span>11</span>Brief your agent</a></li></ol></nav>
+      <p>One machine first.<br>One real canary next.<br><a href="./#configure">Plan your collective ↗</a></p>
+    </aside>
+    <article class="guide-content" aria-label="Installation and setup instructions">
+    <noscript><p class="guide-nojs">All instructions are available without JavaScript. Select command text to copy it; optional sections open normally.</p></noscript>
+<div class="guide-intro">
+<p>This is documentation for the public <a
+href="https://github.com/h3ro-dev/borg">BORG source</a>, not an
+instruction that overrides an agent’s owner, work assignment or safety
+policies. The owner confirms the desired deployment scope: machines,
+private homes, selected components, provider accounts and any external
+access. Carry out only that requested setup. Handle credentials through
+private files and native sign-in; never paste secrets into prompts,
+blueprints, tool arguments or public reports.</p>
+<p>Read the <a href="./guide.html">web guide</a>,
+<a href="./#configure">configure a blueprint</a>,
+or inspect the <a
+href="./platform/catalog.json">catalog</a>.
+Commands below describe the public installer source reviewed on
+2026-09-16. Use documentation from the same release as your
+checkout.</p>
+</div>
+<h2 id="understand">01 / Understand the system</h2>
+<p>A BORG home is an independent installation with a new owner identity,
+instance UUID, private credentials and empty stores. It does not join
+the author’s installation or import their accounts, machines, memories
+or browser sessions.</p>
+<div class="guide-table" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+
+<thead>
+<tr>
+<th>Part</th>
+<th>What it does</th>
+<th>What still needs verification</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Local brain</td>
+<td>Full profile: semantic memory in Qdrant, temporal graph in FalkorDB,
+local Ollama models and a background graph/recall cycle</td>
+<td>Authenticated storage, correct model identity and actual
+capture/recall</td>
+</tr>
+<tr>
+<td>Native connector</td>
+<td>MCP tools for files, commands, durable jobs, browser sessions and
+supported desktop actions</td>
+<td>A real tool call, operation receipt and required OS permissions</td>
+</tr>
+<tr>
+<td>Conductors</td>
+<td>Isolated provider lanes and agent execution; Codex bootstrap is
+integrated</td>
+<td>Owner login, matching account pin, fresh capacity, allowance and
+work claims</td>
+</tr>
+<tr>
+<td>Inbox + Beads</td>
+<td>Selected coordination services and a private project work store</td>
+<td>Authenticated Inbox and the installed Beads wrapper</td>
+</tr>
+<tr>
+<td>Fleet</td>
+<td>Explicit identity-pinned routing to enrolled resident
+connectors</td>
+<td>Each host’s identity, native operation and separate agent
+admission</td>
+</tr>
+<tr>
+<td>External integrations</td>
+<td>Catalog instructions for services the owner chooses</td>
+<td>Owner credentials, provider setup, deployment and a live acceptance
+check</td>
+</tr>
+</tbody>
+</table></div>
+<p>Memory is <strong>not automatically shared among hosts</strong>.
+Enrollment routes tools; it does not replicate stores or merge
+independent BORG identities. A fleet diagram describes a possible
+topology, not a discovered or running deployment. Sizing estimates are
+planning inputs, not measured throughput or permission to launch
+agents.</p>
+<p>Source: <a
+href="https://github.com/h3ro-dev/borg/blob/master/docs/INSTALL.md">installation</a>,
+<a
+href="https://github.com/h3ro-dev/borg/blob/master/connector/README.md">connector</a>,
+<a
+href="https://github.com/h3ro-dev/borg/blob/master/conductor/INTEGRATION.md">conductor
+integration</a>.</p>
+<h2 id="prerequisites">02 / Check the host</h2>
+<div class="guide-table" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+
+<thead>
+<tr>
+<th>Platform</th>
+<th>Acceptance boundary</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Apple Silicon macOS</td>
+<td>Native full and tools blueprint installation verified; your provider
+sign-in and optional integrations still need acceptance</td>
+</tr>
+<tr>
+<td>Intel macOS</td>
+<td>Pinned downloads available; full native acceptance pending</td>
+</tr>
+<tr>
+<td>Linux ARM64 / x86-64</td>
+<td>Pinned downloads available; full native acceptance pending</td>
+</tr>
+<tr>
+<td>Windows</td>
+<td>Unsupported for installation; a blueprint can describe it but the
+installer refuses it</td>
+</tr>
+</tbody>
+</table></div>
+<p>Use an ordinary owner session and a POSIX shell. Have Git, HTTPS
+package access and at least <strong>20 GB free</strong> for initial
+runtimes, caches and models, plus room for project data. The bootstrap
+uses <code>curl</code>, <code>tar</code> and a SHA-256 utility. A
+blueprint requires <strong>Python 3 on PATH before bootstrap</strong>;
+use Python 3.11+ for the source-side Python commands here. The installer
+supplies its own pinned managed Python and Node; a system Python is not
+the installed runtime.</p>
+<div class="guide-code" data-label="shell commands 1"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">git --version
+python3 --version</code></pre></div>
+<p>The full default installation can bootstrap managed Python without a
+preinstalled Python; blueprint validation cannot.</p>
+<p>Choose a stable lowercase owner ID matching
+<code>[a-z][a-z0-9_-]{0,47}</code>. Examples use <code>yourname</code>:
+replace it before installing. Choose a new absolute private home without
+symlinks. If you create that directory yourself, it must be owned by
+your user and mode <code>0700</code>. Do not use <code>sudo</code> for
+the owner installation.</p>
+<p>The default home is <code>$HOME/.borg</code>. Services bind to
+loopback and use <strong>eleven ports, 18760–18770 by default</strong>.
+A second installation needs a separate home and non-overlapping
+eleven-port range. <code>--port-base 20760</code> selects 20760–20770.
+Do not stop another service to free a port without checking its
+owner.</p>
+<p>The full model’s default context is 16,384 tokens; increasing context
+raises memory use. UI work may need macOS Accessibility, Screen
+Recording or Automation permission for the app performing it. Headless
+Chromium success does not prove desktop permissions or a signed-in
+browser.</p>
+<p>Source: <a
+href="https://github.com/h3ro-dev/borg/blob/master/docs/INSTALL.md">requirements</a>,
+<a
+href="https://github.com/h3ro-dev/borg/blob/master/install.sh">bootstrap</a>,
+<a
+href="https://github.com/h3ro-dev/borg/blob/master/installer/config.py">configuration
+contract</a>.</p>
+<h2 id="install">03 / Choose one installation path</h2>
+<p>First obtain and inspect the public checkout. Retain the exact
+checkout/release used for future same-release recovery.</p>
+<div class="guide-code" data-label="shell commands 2"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">git clone https://github.com/h3ro-dev/borg.git
+cd borg
+./install.sh --help</code></pre></div>
+<h3 id="full-install">Path A — First-time full installation</h3>
+<p>Use this for a full local brain, Codex, Inbox, Beads and four native
+Codex memory lifecycle hooks. This downloads dependencies and models and
+starts services. Use a new home.</p>
+<div class="guide-code" data-label="shell commands 3"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">./install.sh --home &quot;$HOME/.borg&quot; --owner yourname
+export BORG_HOME=&quot;$HOME/.borg&quot;
+&quot;$BORG_HOME/bin/borg&quot; onboard
+&quot;$BORG_HOME/bin/borg&quot; doctor</code></pre></div>
+<p>A <code>provider_sign_in_required</code> result can be expected
+before section 05. Read the reported fields; a nonzero
+<code>doctor</code> exit does not by itself mean installation
+failed.</p>
+<h3 id="blueprint-install">Path B — Install your exported blueprint</h3>
+<p>Build and download <code>borg-blueprint.json</code> from the <a
+href="./#configure">configurator</a>. Put the file
+in the checkout, inspect the whole plan, then select the actual machine
+ID. The example uses <code>node-1</code>; replace it with the ID in your
+file. Run these commands on the matching target platform.</p>
+<div class="guide-code" data-label="shell commands 4"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">python3 borg.py blueprint inspect borg-blueprint.json
+python3 borg.py blueprint inspect borg-blueprint.json --machine node-1
+./install.sh --home &quot;$HOME/.borg&quot; --owner yourname \
+  --blueprint borg-blueprint.json --machine node-1
+export BORG_HOME=&quot;$HOME/.borg&quot;
+&quot;$BORG_HOME/bin/borg&quot; onboard
+&quot;$BORG_HOME/bin/borg&quot; doctor</code></pre></div>
+<p>Inspection needs no BORG home, login or network. It validates every
+machine, even when displaying one. The format is
+<code>borg-blueprint/v1</code>; the catalog version must match this
+release. Required dependencies must be selected. Unknown or duplicate
+choices, invalid input and mismatched host platforms are refused. An
+exported multi-machine plan <strong>does not install its other
+machines</strong>: repeat owner-reviewed setup on each target.</p>
+<div class="guide-table" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+
+<thead>
+<tr>
+<th>Choice</th>
+<th>Installation behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>full</code> profile</td>
+<td>Starts Qdrant, graph, Ollama, graph LLM shim, memory, brain,
+connector and watchdog</td>
+</tr>
+<tr>
+<td><code>tools</code> profile</td>
+<td>Starts connector and watchdog; skips memory/graph startup, model
+pulls and memory hooks</td>
+</tr>
+<tr>
+<td>Codex</td>
+<td>Adds isolated client profile, MCP configuration and conductor;
+native login is still required</td>
+</tr>
+<tr>
+<td>Inbox / Beads</td>
+<td>Starts selected Inbox; initializes selected Beads store and its
+wrapper</td>
+</tr>
+<tr>
+<td>Fleet</td>
+<td>Supplies enrollment instructions; enrolls no machines
+automatically</td>
+</tr>
+<tr>
+<td>Claude / Grok / launch bus / router</td>
+<td>Prepares bundled source/configuration; additional provider binaries,
+login and operational checks remain owner work</td>
+</tr>
+<tr>
+<td>Integrations</td>
+<td>Supplies catalog setup steps; does not deploy or authenticate
+external services</td>
+</tr>
+<tr>
+<td>Adapters / training</td>
+<td>Records preparation intent only; full Apple Silicon nodes only; no
+automatic downloads, training or activation</td>
+</tr>
+</tbody>
+</table></div>
+<p>Both profiles install the complete source and locked runtime package.
+Selection controls services and setup, not a smaller dependency
+download. Tools-only Codex has MCP access with zero memory hooks. Beads
+without Inbox prepares the coordination configuration its custody
+wrapper needs without starting an Inbox service.</p>
+<h3 id="custom-home">Alternative home or existing project roots</h3>
+<p>This is an alternative installation command, not a step to run after
+Path A or B. <code>--projects</code> may be repeated for owner-selected
+existing directories. For a blueprint install, also retain its
+<code>--blueprint</code> and <code>--machine</code> arguments.</p>
+<div class="guide-code" data-label="shell commands 5"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">./install.sh --home &quot;$HOME/my-borg&quot; --owner yourname --port-base 20760 \
+  --projects &quot;$HOME/Projects/example&quot;
+export BORG_HOME=&quot;$HOME/my-borg&quot;</code></pre></div>
+<p>The remaining examples assume <code>BORG_HOME</code> points to the
+home you actually installed. Export it again in each new terminal
+session. Avoid using a default-home example against the wrong
+installation.</p>
+<p>Source: <a
+href="https://github.com/h3ro-dev/borg/blob/master/docs/INSTALL.md">installation</a>,
+<a
+href="https://github.com/h3ro-dev/borg/blob/master/docs/BLUEPRINT.md">blueprints</a>,
+<a
+href="https://github.com/h3ro-dev/borg/blob/master/installer/cli.py">CLI
+parser</a>.</p>
+<h2 id="onboard">04 / Read the setup plan</h2>
+<div class="guide-code" data-label="shell commands 6"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/borg&quot; onboard
+&quot;$BORG_HOME/bin/borg&quot; doctor
+&quot;$BORG_HOME/bin/borg&quot; call borg_status</code></pre></div>
+<p><code>onboard</code> is a read-only metadata plan. It does not run
+its suggested commands, perform login or contact providers. Its
+<code>commands</code> contain argument arrays, environment overrides,
+working directories and prerequisites. Replace placeholders with your
+own facts. <code>ready: null</code> means unverified; a configured
+receipt or account pin does not prove current readiness.</p>
+<p><code>doctor</code> checks the selected local services,
+authentication, storage, models and applicable client configuration.
+<code>local_services_ready</code> describes the selected native
+services. Overall <code>ready</code> can remain false for missing
+provider sign-in or selected external/research capabilities without an
+automatic acceptance probe. Inspect <code>selected_setup</code> and
+complete the relevant owner checks; do not change the plan merely to
+make the indicator green.</p>
+<p>If you used <code>--no-start</code>, rerun the <strong>same release’s
+installer without <code>--no-start</code></strong>, preserving the same
+home, owner, port range, project roots and blueprint/machine selection.
+This initializes selected stores and pulls models where required.
+<code>borg start</code> alone does not do that work. Onboarding supplies
+the home/blueprint rerun arguments; also preserve your original custom
+install options.</p>
+<p>Source: <a
+href="https://github.com/h3ro-dev/borg/blob/master/installer/onboarding.py">onboarding
+implementation</a>, <a
+href="https://github.com/h3ro-dev/borg/blob/master/installer/health.py">health
+checks</a>.</p>
+<h2 id="providers">05 / Connect your own provider</h2>
+<h3 id="codex">Codex — Integrated installer path</h3>
+<p>Use this when Codex is selected. The conductor must be running for
+login’s account-pin readback. Sign in with your own account; do not copy
+another profile’s credentials.</p>
+<div class="guide-code" data-label="shell commands 7"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/borg&quot; auth codex
+&quot;$BORG_HOME/bin/borg&quot; doctor
+&quot;$BORG_HOME/bin/borg&quot; tools</code></pre></div>
+<p>This uses <code>conductors/primary/profile</code> and pins the
+observed provider account to the lane. It does not configure your global
+Codex profile. Full installs configure four recall/capture hooks; tools
+profiles do not.</p>
+<p>Open the client with the exact command emitted by
+<code>borg onboard</code>. The equivalent below requires you to set
+<code>NODE_BIN</code> to <strong><code>runtime.nodeBin</code> from your
+own <code>conductors/config.json</code></strong>. The example path is a
+placeholder, not an assumed archive layout.</p>
+<div class="guide-code" data-label="shell commands 8"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">export NODE_BIN=/absolute/path/to/your/borg/runtime/node/bin/node
+CODEX_HOME=&quot;$BORG_HOME/conductors/primary/profile&quot; \
+  PATH=&quot;$(dirname &quot;$NODE_BIN&quot;):/usr/bin:/bin&quot; \
+  &quot;$BORG_HOME/runtime/npm/node_modules/.bin/codex&quot;</code></pre></div>
+<p>Inspect BORG’s MCP connection in that client and perform the
+disposable canary in section 08. These optional readbacks inspect the
+conductor and native account pin:</p>
+<div class="guide-code" data-label="shell commands 9"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">BORG_HOME=&quot;$BORG_HOME&quot; &quot;$NODE_BIN&quot; \
+  &quot;$BORG_HOME/app/conductor/borg-conductor.mjs&quot; status \
+  --config &quot;$BORG_HOME/conductors/config.json&quot;
+BORG_HOME=&quot;$BORG_HOME&quot; &quot;$NODE_BIN&quot; \
+  &quot;$BORG_HOME/app/conductor/borg-conductor.mjs&quot; auth status \
+  --config &quot;$BORG_HOME/conductors/config.json&quot; --lane primary</code></pre></div>
+<p>Routing real agents additionally requires fresh machine capacity,
+active work claims, matching accounts and usable provider allowance. A
+process, lane or listening port alone proves none of these.</p>
+<details>
+<summary>
+Optional: Claude Code and Grok clients
+</summary>
+<p>Install a compatible CLI through the provider’s supported
+distribution. BORG does not install these CLIs or provide
+<code>borg auth claude</code> / <code>borg auth grok</code>. The
+following commands match the native help audited with the source; check
+your installed version’s help before using them.</p>
+<p>Create private dedicated profiles, preserving any existing profile.
+Run from your BORG home so unrelated project configuration is not
+loaded.</p>
+<div class="guide-code" data-label="shell commands 10"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">cd &quot;$BORG_HOME&quot;
+umask 077
+mkdir -p &quot;$BORG_HOME/providers/claude/profile&quot; &quot;$BORG_HOME/providers/grok/profile&quot;</code></pre></div>
+<p>Claude Code:</p>
+<div class="guide-code" data-label="shell commands 11"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">CLAUDE_CONFIG_DIR=&quot;$BORG_HOME/providers/claude/profile&quot; claude auth login
+CLAUDE_CONFIG_DIR=&quot;$BORG_HOME/providers/claude/profile&quot; \
+  claude mcp add --scope user --transport stdio borg -- \
+  &quot;$BORG_HOME/bin/borg&quot; mcp-stdio --home &quot;$BORG_HOME&quot;
+CLAUDE_CONFIG_DIR=&quot;$BORG_HOME/providers/claude/profile&quot; claude auth status
+CLAUDE_CONFIG_DIR=&quot;$BORG_HOME/providers/claude/profile&quot; claude</code></pre></div>
+<p>Compatible Grok Build CLI:</p>
+<div class="guide-code" data-label="shell commands 12"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">GROK_HOME=&quot;$BORG_HOME/providers/grok/profile&quot; grok login --oauth
+GROK_HOME=&quot;$BORG_HOME/providers/grok/profile&quot; \
+  grok mcp add --scope user --transport stdio borg -- \
+  &quot;$BORG_HOME/bin/borg&quot; mcp-stdio --home &quot;$BORG_HOME&quot;
+GROK_HOME=&quot;$BORG_HOME/providers/grok/profile&quot; grok mcp doctor
+GROK_HOME=&quot;$BORG_HOME/providers/grok/profile&quot; grok</code></pre></div>
+<p>Test BORG in the chosen client. MCP configuration does not register
+Codex’s four lifecycle hooks in another provider. Diagnostics do not
+prove a live provider login, available model or allowance. The stdio
+bridge consumes the home’s credential privately.</p>
+<p><strong>Optional provider execution is a separate
+integration.</strong> Claude’s launch bus needs an explicit
+<code>providers.claude.binary</code>, enablement in
+<code>conductors/config.json</code> and <code>CLAUDE_CONFIG_DIR</code>
+in its launch environment. The included headless path has no native
+thread-status, mid-turn steering or provider allowance routing. A launch
+packet starts real work and may incur charges; it is not a setup
+probe.</p>
+<p>Grok’s conductor needs explicit <code>grokBin</code>,
+<code>grokHome</code>, <code>expectedVersion</code>,
+<code>readinessMarkerPath</code>, <code>statePath</code> and a distinct
+loopback port. There is no installer service, login orchestration or
+supported readiness-marker provisioning flow. A matching version/marker
+is not live account evidence. Do not fabricate a marker; leave this
+provider disabled until an owner-controlled provisioning and
+login-evidence workflow is verified.</p>
+</details>
+<p>Source: <a
+href="https://github.com/h3ro-dev/borg/blob/master/docs/SETUP.md">provider
+setup and execution boundaries</a>, <a
+href="https://github.com/h3ro-dev/borg/blob/master/conductor/INTEGRATION.md">conductor
+integration</a>.</p>
+<h2 id="fleet">06 / Enroll another machine</h2>
+<p>This optional track connects only owner-selected machines. Prepare a
+resident connector on each target, a trusted SSH alias with a known host
+key, and its exact installation identity. Enrollment does not import
+credentials or sign in to providers.</p>
+<p>On a <strong>new target</strong>, clone and enter the source checkout
+as in section 03, then use an empty default home:</p>
+<div class="guide-code" data-label="shell commands 13"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">./install.sh --owner yourname --no-start
+&quot;$HOME/.borg/bin/borg&quot; start connector
+&quot;$HOME/.borg/bin/borg&quot; call borg_identity</code></pre></div>
+<p>This prepares the complete runtime/browser package but starts only
+the connector. It does not pull model weights, initialize a full running
+brain or start a conductor. It is not a minimal dependency package. An
+existing full installation can use its existing connector instead. For
+custom homes use their actual paths and separate ports.</p>
+<p>Record the target’s exact <code>home</code>, <code>owner</code> and
+<code>instance_id</code>. On the <strong>controlling BORG</strong>,
+substitute those facts and your trusted SSH alias for every example
+below. <code>/absolute/target/.borg</code> and <code>TARGET_UUID</code>
+are placeholders; they are not defaults.</p>
+<div class="guide-code" data-label="shell commands 14"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/borg&quot; fleet add build-a \
+  --ssh-alias build-a \
+  --remote-home /absolute/target/.borg \
+  --owner yourname \
+  --instance-id TARGET_UUID
+&quot;$BORG_HOME/bin/borg&quot; call fleet_hosts
+&quot;$BORG_HOME/bin/borg&quot; call fleet_tools \
+  --arguments &#39;{&quot;host&quot;:&quot;build-a&quot;,&quot;prefix&quot;:&quot;computer_&quot;}&#39;</code></pre></div>
+<p>Enrollment verifies identity first. Host IDs are stable routing
+names; use a new ID for a changed installation. Configuration is read
+per request; follow any connector restart instruction reported by the
+CLI. Discover the actual target schema, then call it with the explicit
+host. Replace the example path with that target’s project directory:</p>
+<div class="guide-code" data-label="shell commands 15"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/borg&quot; call fleet_call \
+  --arguments &#39;{&quot;host&quot;:&quot;build-a&quot;,&quot;tool&quot;:&quot;computer_list_directory&quot;,&quot;arguments&quot;:{&quot;path&quot;:&quot;/absolute/target/.borg/projects&quot;,&quot;depth&quot;:1}}&#39;</code></pre></div>
+<p>All paths and process, browser or job IDs belong to the selected
+target. The resident connector retains state across an SSH bridge
+closing. Independent requests can run concurrently; shared files and the
+physical desktop still need coordination. Enrollment and tool discovery
+do not prove OS permissions, provider authentication, usable capacity or
+a completed job.</p>
+<p>For remote <strong>agents</strong>, configure machine/account lanes,
+dedicated profiles, endpoints, pins and fresh capacity/claims collectors
+under <code>conductors/config.json</code> using the <a
+href="https://github.com/h3ro-dev/borg/blob/master/conductor/INTEGRATION.md#multi-machine-or-multi-account-extension">multi-machine
+integration contract</a>. A remote file operation is not a conductor
+dispatch. Unknown capacity or accounts fail admission.</p>
+<p>To disable new calls to an enrolled host:</p>
+<div class="guide-code" data-label="shell commands 16"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/borg&quot; fleet disable build-a</code></pre></div>
+<p>Disabling routing or closing SSH does not establish cancellation of
+work already running. After a lost response inspect target state and
+target receipts before retrying:</p>
+<div class="guide-code" data-label="shell commands 17"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/borg&quot; call fleet_call \
+  --arguments &#39;{&quot;host&quot;:&quot;build-a&quot;,&quot;tool&quot;:&quot;borg_operations_recent&quot;,&quot;arguments&quot;:{&quot;limit&quot;:10}}&#39;</code></pre></div>
+<p>Controlling-host and target receipts are distinct. No exactly-once
+guarantee is made. Source: <a
+href="https://github.com/h3ro-dev/borg/blob/master/docs/SETUP.md#7-enroll-your-own-machines">fleet
+setup</a>, <a
+href="https://github.com/h3ro-dev/borg/blob/master/connector/fleet_tools.py">fleet
+implementation</a>.</p>
+<h2 id="web">07 / Optional ChatGPT web gateway</h2>
+<p>A web app connects to an already running BORG. It does not install
+the software, enroll machines or make a sleeping computer available.
+Local setup works without this track.</p>
+<ol type="1">
+<li>Complete local setup and inspect <code>doctor</code>.</li>
+<li>In your own Cloudflare account, create a locally managed tunnel and
+DNS hostname. Store its private credential JSON beneath
+<code>BORG_HOME/cloudflare</code> with mode <code>0600</code>. The
+bundled cloudflared executable is under
+<code>BORG_HOME/runtime/cloudflared</code>.</li>
+<li>Create an Access MCP server application with Managed OAuth for that
+hostname. Restrict its policy to your exact sign-in email. Record the
+issuer and audience; these are not bearer credentials.</li>
+<li>Replace all example identifiers and the credential path below. BORG
+configures local files; it does not create Cloudflare resources or
+DNS.</li>
+</ol>
+<div class="guide-code" data-label="shell commands 18"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/borg&quot; web \
+  --public-url https://borg.example.com \
+  --issuer YOUR_ACCESS_ISSUER \
+  --audience YOUR_APPLICATION_AUDIENCE \
+  --owner-email you@example.com \
+  --tunnel-credentials &quot;$BORG_HOME/cloudflare/credentials.json&quot;
+&quot;$BORG_HOME/bin/borg&quot; stop watchdog
+&quot;$BORG_HOME/bin/borg&quot; start gateway tunnel watchdog
+&quot;$BORG_HOME/bin/borg&quot; doctor</code></pre></div>
+<p>Use your ChatGPT account/workspace’s supported custom MCP app
+controls, your actual hostname in the example <code>https://borg.example.com/mcp</code> URL and
+OAuth. Complete your own Access sign-in, inspect the current actions and
+enable those in scope. In a fresh chat, call <code>borg_status</code>,
+then perform a reversible file write/read in a disposable project. Local
+gateway health is not successful client OAuth.</p>
+<p>The bare hostname deliberately returns 404; the endpoint is
+<code>/mcp</code>. Unauthenticated requests must encounter
+authentication rather than expose tools. Account/workspace controls
+still apply. Refresh and review client actions when server schemas
+change; old chats may retain cached schemas. Follow the current client
+documentation linked from the source guide.</p>
+<p>Source: <a
+href="https://github.com/h3ro-dev/borg/blob/master/docs/WEB.md">web
+setup, Cloudflare and current client documentation</a>.</p>
+<h2 id="verify">08 / Prove the workflow</h2>
+<p>Run the selected local checks first:</p>
+<div class="guide-code" data-label="shell commands 19"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/borg&quot; doctor
+&quot;$BORG_HOME/bin/borg&quot; tools computer_
+&quot;$BORG_HOME/bin/borg&quot; tools browser_
+&quot;$BORG_HOME/bin/borg&quot; call borg_status
+&quot;$BORG_HOME/bin/borg&quot; call borg_operations_recent --arguments &#39;{&quot;limit&quot;:10}&#39;</code></pre></div>
+<p>Then verify the actual client and chosen target using its live
+schemas:</p>
+<ol type="1">
+<li><strong>Files:</strong> in a new disposable project under this
+home’s configured project roots, create a uniquely named text file
+containing a non-secret canary string. Read it back and compare exact
+content. Keep the operation receipt and clean up only your canary
+artifacts.</li>
+<li><strong>Commands:</strong> run a harmless command and inspect its
+exit status and captured output. This direct local example should return
+<code>borg-canary</code> followed by a newline; follow the returned
+process ID with the discovered output tool if it is still running.</li>
+</ol>
+<div class="guide-code" data-label="shell commands 20"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/borg&quot; call computer_start_process \
+  --arguments &#39;{&quot;command&quot;:&quot;echo borg-canary&quot;}&#39;</code></pre></div>
+<ol start="3" type="1">
+<li><strong>Memory, full profile only:</strong> use a non-sensitive
+disposable fact to exercise the configured capture/recall path. Verify
+the expected fact is recalled and inspect the graph/brain health.
+Confirm current hook trust; a configuration receipt alone is
+insufficient. Remove only the test fact through the supported tool if
+appropriate. A tools profile has no memory service to prove.</li>
+<li><strong>Coordination, when selected:</strong> confirm authenticated
+Inbox in <code>doctor</code> and read the selected Beads store through
+its wrapper:</li>
+</ol>
+<div class="guide-code" data-label="shell commands 21"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/bd&quot; list --json</code></pre></div>
+<ol start="5" type="1">
+<li><strong>Optional boundaries:</strong> verify a real remote operation
+and its target receipt; web OAuth and an action from a fresh chat;
+required desktop permissions; and each chosen external integration’s
+documented acceptance. A headless browser probe proves only that browser
+path.</li>
+</ol>
+<p>Record the release, home/instance identity, selected services,
+outcomes, receipt references and remaining gaps privately. Report each
+capability as configured, verified or still requiring setup. Do not
+claim universal readiness from <code>doctor</code>, enrollment, a
+checkbox or a directory of source code.</p>
+<p>Source: <a
+href="https://github.com/h3ro-dev/borg/blob/master/docs/SETUP.md#8-verify-os-gates-and-the-real-workflow">acceptance
+boundaries</a>, <a
+href="https://github.com/h3ro-dev/borg/blob/master/connector/computer_tools.py">native
+tool implementation</a>.</p>
+<h2 id="troubleshoot">09 / Troubleshoot from evidence</h2>
+<div class="guide-table" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Next action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>provider_sign_in_required</code></td>
+<td>For selected Codex, ensure the conductor is running, complete
+<code>borg auth codex</code>, then check the native account/pin and
+<code>doctor</code></td>
+</tr>
+<tr>
+<td><code>selected_setup_required</code></td>
+<td>Inspect <code>selected_setup</code> and the catalog/onboarding
+steps; manual integrations and research selections do not have automatic
+acceptance</td>
+</tr>
+<tr>
+<td><code>setup_incomplete</code> or a failed local call</td>
+<td>Inspect the named component in <code>doctor</code> and its log under
+<code>BORG_HOME/logs</code>; check authenticated service health, not
+only a process/port</td>
+</tr>
+<tr>
+<td>Source differs, owner/home conflict, unsafe directory, occupied
+port</td>
+<td>Preserve the existing installation; inspect the refusal. Use the
+same source for recovery or a new home and port range for changed
+choices. Do not overwrite owner edits or foreign services</td>
+</tr>
+<tr>
+<td><code>busy</code>, <code>borg_busy</code>, queue full</td>
+<td>Inspect <code>borg_status</code> concurrency and active work; a
+resource or host capacity limit was reached. Coordinate the shared
+resource and reduce simultaneous work. More clients do not create more
+host capacity</td>
+</tr>
+<tr>
+<td><code>timeout</code>, disconnect, <code>outcome_unknown</code></td>
+<td>Inspect the native file/process/job and
+<code>borg_operations_recent</code> on the actual target before
+repeating a mutation. A response loss is not failure or
+cancellation</td>
+</tr>
+<tr>
+<td><code>authentication_required</code></td>
+<td>Complete the relevant owner-native login; do not copy or expose
+credentials</td>
+</tr>
+<tr>
+<td><code>permission_denied</code></td>
+<td>Verify the specific OS/provider permission required for the selected
+operation</td>
+</tr>
+<tr>
+<td><code>policy_refused</code> or changed target identity</td>
+<td>Inspect ownership/admission or the target identity. Use a narrower
+supported operation; do not bypass the refusal or silently repin a
+different machine</td>
+</tr>
+<tr>
+<td><code>capability_unavailable</code>, missing tool, rejected
+inputs</td>
+<td>Compare <code>borg tools</code> or target <code>fleet_tools</code>
+with the client’s refreshed actions and actual schema</td>
+</tr>
+<tr>
+<td>Local calls work, <code>/mcp</code> returns 404</td>
+<td>Check exact path, hostname, DNS route and tunnel ingress; bare
+<code>/</code> is intentionally 404</td>
+</tr>
+<tr>
+<td>OAuth fails or expires</td>
+<td>Check Access issuer, audience, exact email policy and provider
+refresh configuration; reauthenticate in the client as needed</td>
+</tr>
+<tr>
+<td>Blueprint rejected</td>
+<td>Check catalog version, complete schema, unique machine IDs, required
+dependencies and host platform; inspect the whole file before
+installation</td>
+</tr>
+</tbody>
+</table></div>
+<p>The native connector defaults to 64 in-flight operations, 256 queued
+operations and a 30-second queue wait. These are configurable operation
+limits, <strong>not an agent count or throughput promise</strong>. Size
+concurrency against measured host capacity; preserve resource
+coordination. A timed-out process-input call may have delivered a
+prefix, so inspect the process before resending input.</p>
+<p>Source: <a
+href="https://github.com/h3ro-dev/borg/blob/master/connector/README.md">connector
+limits</a>, <a
+href="https://github.com/h3ro-dev/borg/blob/master/connector/computer_tools.py">error
+classification</a>, <a
+href="https://github.com/h3ro-dev/borg/blob/master/connector/operation_receipts.py">operation
+receipts</a>.</p>
+<h2 id="operate">10 / Stop, maintain and recover</h2>
+<p>Use the launcher from the intended home. These commands operate that
+installation’s selected services:</p>
+<div class="guide-code" data-label="shell commands 22"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/borg&quot; stop
+&quot;$BORG_HOME/bin/borg&quot; start
+&quot;$BORG_HOME/bin/borg&quot; doctor</code></pre></div>
+<p>Stop/start retains data. After restart, verify authenticated services
+and the workflow you actually use. Coordinate active jobs before service
+maintenance and reconcile interrupted operations afterward.</p>
+<div class="guide-table" tabindex="0" role="region" aria-label="Scrollable reference table"><table>
+
+<thead>
+<tr>
+<th>Private location under BORG_HOME</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>config.json</code>, <code>blueprint.json</code> when
+selected</td>
+<td>Owner, installation identity, ports, projects and preserved machine
+plan</td>
+</tr>
+<tr>
+<td><code>app/</code></td>
+<td>Exact source and hash manifest</td>
+</tr>
+<tr>
+<td><code>runtime/</code>, <code>cache/</code>,
+<code>models/</code></td>
+<td>Managed runtimes, verified downloads and model weights</td>
+</tr>
+<tr>
+<td><code>mem0/</code>, <code>graphiti/</code></td>
+<td>Memory, temporal graph, history and scoped credentials</td>
+</tr>
+<tr>
+<td><code>borg-context/</code></td>
+<td>Connector configuration, operation receipts, jobs and browser
+state</td>
+</tr>
+<tr>
+<td><code>conductors/</code>, <code>providers/</code> when
+configured</td>
+<td>Dedicated provider profiles, account pin and conductor
+configuration</td>
+</tr>
+<tr>
+<td><code>coordination/</code>, <code>beads/</code></td>
+<td>Installation-owned messaging, identities and project work</td>
+</tr>
+<tr>
+<td><code>logs/</code>, <code>services/</code></td>
+<td>Component logs and installation-specific service definitions</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Same-release reruns:</strong> retain the exact source, home,
+owner and install options. Blueprint reruns must use the identical plan
+and machine; the installer saves <code>blueprint.json</code> privately
+with mode <code>0600</code>. A changed blueprint/owner/machine is
+rejected. A default/full home cannot be converted into a blueprint/tools
+home. Use a new home for different choices.</p>
+<p><strong>New releases:</strong> there is no in-place release
+migration. Preserve the old home and evaluate a new release in a
+separate home with non-overlapping ports. Do not blindly
+<code>git pull</code> and run a changed installer over existing state. A
+missing dependency may be restored from verified cache; inspect the
+component’s log and source refusal before repair.</p>
+<p><strong>Backups and removal:</strong> coordinate work, stop services,
+retain a private backup of state and configuration, and verify recovery
+before removal. Remove only the chosen home and service definitions
+whose UUID matches its <code>config.json</code>. Unrelated services and
+global provider profiles are outside that installation. No blanket
+deletion command is needed.</p>
+<details>
+<summary>
+Optional research: inspect inactive LoRA adapters
+</summary>
+<div class="guide-code" data-label="shell commands 23"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">&quot;$BORG_HOME/bin/borg&quot; adapters list
+&quot;$BORG_HOME/bin/borg&quot; adapters prepare all</code></pre></div>
+<p>Run preparation only when requested, on a full Apple Silicon
+installation, with disk/network capacity for roughly 3.3 GB of base
+models plus runtime/cache. It verifies pinned files, creates a separate
+MLX runtime and emits generation commands for canaries. <strong>It does
+not activate adapters, train on your data or prove extraction
+quality.</strong> Historical training revisions remain unknown. Require
+reproducible compatibility and real extraction canaries before any
+separate promotion decision. Training-pair capture and historical
+imports are disabled by default.</p>
+</details>
+<p>Source: <a
+href="https://github.com/h3ro-dev/borg/blob/master/docs/INSTALL.md">recovery
+and adapters</a>, <a
+href="https://github.com/h3ro-dev/borg/blob/master/docs/BLUEPRINT.md">blueprint
+preservation</a>.</p>
+<h2 id="agent-prompt">11 / Give your agent a bounded setup brief</h2>
+<p>Attach your exported blueprint if you chose one. Fill in the scope
+before handing this prompt to your agent. This brief requests setup and
+verification; it does not grant unrelated account, fleet or publishing
+authority.</p>
+<div class="guide-code" data-label="setup brief"><div class="guide-code-label"><span>COPYABLE SETUP BRIEF</span></div><pre tabindex="0"><code class="language-text">Help me set up my own BORG using https://borg.utlyze.com/guide.html
+and the self-contained runbook at https://borg.utlyze.com/agent-guide.md.
+Use the public source at https://github.com/h3ro-dev/borg and inspect
+its installer/docs at the same release before running commands.
+
+My requested scope:
+- Target machine and OS: [my machine]
+- Private BORG home and lowercase owner ID: [my choices]
+- Installation: [full default OR attached borg-blueprint.json + machine ID]
+- Providers: [my selected providers and own accounts]
+- Remote machines and web access: [none OR explicitly listed targets]
+
+Confirm these deployment choices are complete, inspect prerequisites,
+and carry out only this requested setup under my existing instructions.
+Keep secrets private and use native login. Preserve existing homes,
+profiles and unrelated services. Follow the documented release/rerun limits.
+A selected integration still needs its own setup and acceptance.
+Verify doctor, a real client tool call and a disposable file/command canary.
+Verify remote operations or web OAuth only if included in my scope.
+Report what is configured, what is verified, and any remaining setup gaps.</code></pre></div>
+<p>Continue: <a href="./#configure">configure your
+plan</a> · <a href="./#fleet">fleet overview</a> ·
+<a href="./#setup">installation overview</a> · <a
+href="./llms.txt">agent orientation</a>.</p>
+</article>
+  </div>
+</main>
+<footer class="guide-footer guide-shell"><p>BORG COLLECTIVE / YOUR SYSTEM. YOUR SCOPE.</p><nav aria-label="Guide resources"><a href="./agent-guide.md">Agent runbook</a><a href="./llms.txt">llms.txt</a><a href="https://github.com/h3ro-dev/borg">Source ↗</a><a href="#main">Back to top ↑</a></nav></footer>
+<div id="guide-copy-status" class="copy-status" role="status" aria-live="polite"></div>
+</body>
+</html>

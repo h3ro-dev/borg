@@ -55,9 +55,9 @@
           throw new Error("Clipboard unavailable");
         await navigator.clipboard.writeText(command);
         feedback(
-          button.dataset.copy === "install-command"
+          button.dataset.copySuccess || (button.dataset.copy === "install-command"
             ? "Commands copied. Replace yourname before running."
-            : "Inspection commands copied.",
+            : "Inspection commands copied."),
         );
       } catch {
         // Clipboard access may be blocked by browser permissions or an insecure origin.

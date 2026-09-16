@@ -22,6 +22,9 @@ jobs:
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - name: Verify machine planning contract
         run: |
+          node --check site/app.js
+          node --check site/guide.js
+          node site/verify-links.mjs
           node --test platform/planner.test.mjs
           python3 borg.py blueprint inspect platform/examples/single-node.json
           python3 borg.py blueprint inspect platform/examples/build-fleet.json
@@ -30,6 +33,8 @@ jobs:
           mkdir -p _site/assets _site/platform
           cp site/index.html site/styles.css site/app.js site/scene.js _site/
           cp site/configure.css site/configure.mjs _site/
+          cp site/fleet.css site/guide.html site/guide.css site/guide.js _site/
+          cp site/llms.txt site/agent-guide.md _site/
           cp platform/catalog.json platform/planner.mjs _site/platform/
           cp -R site/assets/. _site/assets/
           cp -R site/vendor _site/vendor

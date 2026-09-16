@@ -123,6 +123,7 @@ PUBLIC_BINARY_ASSETS = {
     "site/assets/chakra-petch-bold.ttf": (78384, "65fbf76d95651697275e19db4d717c0e95a789ddd3476478b05292104db278a0"),
     "site/assets/borg-ship.glb": (1709776, "05fd62b658ba07593d9754c530f7229be55f9646acdac706bee21e13969aa2c7"),
     "site/assets/borg-ship-poster.webp": (175862, "1f148822cef00792c725464c091f1ad2c4a0fe831f1e911d4f847252cd30dc70"),
+    "site/assets/borg-fleet.webp": (234470, "f7d0fd992b3fa0eb8f5d7e30cc89d2644f38ae5f7e7a68fb1517686641351cca"),
 }
 APPROVED_NETWORK_SUFFIXES = (
     ".example",
