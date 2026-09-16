@@ -1,0 +1,1324 @@
+{
+  "schema": "borg-catalog/v1",
+  "version": "2026-09-16.1",
+  "reviewed": "2026-09-16",
+  "profiles": [
+    {
+      "id": "full",
+      "name": "Full BORG node",
+      "description": "Local semantic memory, temporal graph, small extraction models and native connector; add your orchestration choices."
+    },
+    {
+      "id": "tools",
+      "name": "Tools and worker node",
+      "description": "Native connector and selected work services. Full runtime package is installed, but local memory models and graph services stay off."
+    }
+  ],
+  "platforms": [
+    {
+      "id": "macos-arm64",
+      "name": "Apple Silicon Mac",
+      "status": "verified",
+      "note": "The existing complete installation has native acceptance. Provider login and selected optional services still need your checks."
+    },
+    {
+      "id": "macos-x64",
+      "name": "Intel Mac",
+      "status": "unverified",
+      "note": "Artifacts are pinned; complete native installation acceptance is pending."
+    },
+    {
+      "id": "linux-x64",
+      "name": "Linux x86-64",
+      "status": "unverified",
+      "note": "Artifacts are pinned; complete native installation acceptance is pending. A user systemd session is required."
+    },
+    {
+      "id": "linux-arm64",
+      "name": "Linux ARM64",
+      "status": "unverified",
+      "note": "Artifacts are pinned; complete native installation acceptance is pending. A user systemd session is required."
+    },
+    {
+      "id": "windows",
+      "name": "Windows",
+      "status": "unsupported",
+      "note": "This native installer does not support Windows. Choose a supported target; this selection produces a planning warning only."
+    }
+  ],
+  "goals": [
+    {
+      "id": "coding",
+      "name": "Build software",
+      "description": "Coding agents, browser checks and durable project work.",
+      "profile": "full",
+      "components": [
+        "codex",
+        "router",
+        "inbox",
+        "beads",
+        "fleet",
+        "browser"
+      ],
+      "integrations": [
+        "github"
+      ],
+      "workload": {
+        "agents": 2,
+        "browsers": 1,
+        "builds": 1,
+        "memory_millions": 0.1,
+        "project_gb": 50,
+        "context_tokens": 16384,
+        "training": false
+      }
+    },
+    {
+      "id": "research",
+      "name": "Research and recall",
+      "description": "Knowledge gathering, retained context and source-based review.",
+      "profile": "full",
+      "components": [
+        "codex",
+        "inbox",
+        "beads",
+        "browser"
+      ],
+      "integrations": [
+        "google-workspace",
+        "notion"
+      ],
+      "workload": {
+        "agents": 2,
+        "browsers": 2,
+        "builds": 0,
+        "memory_millions": 0.5,
+        "project_gb": 50,
+        "context_tokens": 16384,
+        "training": false
+      }
+    },
+    {
+      "id": "automation",
+      "name": "Run operations",
+      "description": "Coordinate agents with your existing workflows and business tools.",
+      "profile": "full",
+      "components": [
+        "codex",
+        "router",
+        "launch-bus",
+        "inbox",
+        "beads",
+        "fleet"
+      ],
+      "integrations": [
+        "n8n",
+        "grafana"
+      ],
+      "workload": {
+        "agents": 2,
+        "browsers": 1,
+        "builds": 0,
+        "memory_millions": 0.1,
+        "project_gb": 50,
+        "context_tokens": 16384,
+        "training": false
+      }
+    },
+    {
+      "id": "learning",
+      "name": "Evaluate local models",
+      "description": "Keep research adapters separate from daily memory and review every promotion.",
+      "profile": "full",
+      "components": [
+        "codex",
+        "inbox",
+        "beads",
+        "adapters",
+        "training"
+      ],
+      "integrations": [
+        "label-studio",
+        "mlflow"
+      ],
+      "workload": {
+        "agents": 1,
+        "browsers": 0,
+        "builds": 0,
+        "memory_millions": 0.1,
+        "project_gb": 100,
+        "context_tokens": 16384,
+        "training": true
+      }
+    },
+    {
+      "id": "custom",
+      "name": "Start from a core node",
+      "description": "Select only the orchestration and integrations you need.",
+      "profile": "full",
+      "components": [],
+      "integrations": [],
+      "workload": {
+        "agents": 0,
+        "browsers": 0,
+        "builds": 0,
+        "memory_millions": 0.1,
+        "project_gb": 25,
+        "context_tokens": 16384,
+        "training": false
+      }
+    }
+  ],
+  "items": [
+    {
+      "id": "codex",
+      "type": "component",
+      "name": "Codex conductor",
+      "category": "Orchestration",
+      "summary": "Start, inspect, steer and interrupt native Codex work in an installation-owned profile.",
+      "status": "packaged",
+      "status_label": "Included",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "conductor/borg-conductor.mjs",
+      "docs": "docs/COMPONENTS.md#codex",
+      "setup": [
+        "Run borg auth codex on this machine, then borg doctor.",
+        "Use the installed conductor with your own project path and a unique work ID."
+      ],
+      "limitations": [
+        "Your provider account, allowance and live machine admission are required. A selected conductor is not a running agent."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "router",
+      "type": "component",
+      "name": "Machine and account router",
+      "category": "Orchestration",
+      "summary": "Choose among your configured Codex lanes using live capacity, account identity, work claims and allowance.",
+      "status": "packaged",
+      "status_label": "Included",
+      "requires": [
+        "codex"
+      ],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "conductor/router/router.mjs",
+      "docs": "docs/COMPONENTS.md#router",
+      "setup": [
+        "Configure your own machine/account lanes in conductors/config.json.",
+        "Verify current capacity and claims collectors before dispatch; follow conductor/INTEGRATION.md."
+      ],
+      "limitations": [
+        "Remote tool enrollment does not add conductor lanes. Unknown capacity or account state fails admission."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "grok",
+      "type": "component",
+      "name": "Grok conductor",
+      "category": "Orchestration",
+      "summary": "Run the bundled Grok bridge with interruption and same-session resume.",
+      "status": "owner-setup",
+      "status_label": "Owner setup",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "conductor/providers/grok-conductor.mjs",
+      "docs": "docs/COMPONENTS.md#grok",
+      "setup": [
+        "Install and sign in to a compatible Grok CLI in your own dedicated profile.",
+        "Configure its binary, profile, version, private state and loopback port in conductors/config.json; follow the provider setup guide.",
+        "Qualify the actual CLI and create its readiness receipt before starting the bundled bridge."
+      ],
+      "limitations": [
+        "Grok CLI and credentials are not installed by BORG. The bridge is not part of Codex allowance routing."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "claude",
+      "type": "component",
+      "name": "Claude launch adapter",
+      "category": "Orchestration",
+      "summary": "Launch bounded Claude Code headless work through the provider launch bus.",
+      "status": "owner-setup",
+      "status_label": "Owner setup",
+      "requires": [
+        "launch-bus"
+      ],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "conductor/providers/launch-bus.mjs",
+      "docs": "docs/COMPONENTS.md#claude",
+      "setup": [
+        "Install Claude Code and complete its native sign-in with your own account.",
+        "Set the Claude binary and enable the provider in your private conductor configuration.",
+        "Use the documented launch packet with a bounded work ID, prompt and project path."
+      ],
+      "limitations": [
+        "This adapter does not provide native thread status, mid-turn steering or provider allowance routing."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "launch-bus",
+      "type": "component",
+      "name": "Provider launch bus",
+      "category": "Orchestration",
+      "summary": "Send a common work packet to the selected Codex, Grok or Claude backend and retain a launch receipt.",
+      "status": "packaged",
+      "status_label": "Included",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "conductor/providers/launch-bus.mjs",
+      "docs": "docs/COMPONENTS.md#launch-bus",
+      "setup": [
+        "Configure the provider you will use, then validate its native readiness.",
+        "Submit a bounded packet through the launch-bus CLI; inspect the provider result as well as the launch receipt."
+      ],
+      "limitations": [
+        "A launch receipt is not completed work. Provider capabilities differ."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "inbox",
+      "type": "component",
+      "name": "Agent Inbox",
+      "category": "Coordination",
+      "summary": "Authenticated identities, grants, leased messages, assignments and shared discoveries.",
+      "status": "packaged",
+      "status_label": "Included",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "coordination/borg_coordination/portable.py",
+      "docs": "docs/COMPONENTS.md#inbox",
+      "setup": [
+        "Use the installation-owned Inbox; create scoped identities for your agents.",
+        "Verify a send, recipient read and acknowledgment using those identities."
+      ],
+      "limitations": [
+        "Each installation starts with its own Hub and empty records; selecting Inbox does not federate multiple Hubs."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "beads",
+      "type": "component",
+      "name": "Beads work tracking",
+      "category": "Coordination",
+      "summary": "Durable projects, owned tasks, dependencies and acceptance evidence.",
+      "status": "packaged",
+      "status_label": "Included",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "coordination/borg_coordination/cli.py",
+      "docs": "docs/COMPONENTS.md#beads",
+      "setup": [
+        "Use the installed borg home/bin/bd wrapper to access this installation’s work store.",
+        "Create a project, claim work and record acceptance before closing it."
+      ],
+      "limitations": [],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "fleet-context",
+      "type": "component",
+      "name": "Fleet context extension",
+      "category": "Coordination",
+      "summary": "Public source for a bounded view of machine, account and work observations from your own collectors.",
+      "status": "owner-setup",
+      "status_label": "Owner setup",
+      "requires": [
+        "inbox"
+      ],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "coordination/comms/hub/fleet_context.py",
+      "docs": "docs/COMPONENTS.md#fleet-context",
+      "setup": [
+        "Build or connect your own telemetry and account/work collectors using the documented source contract.",
+        "Embed the fleet context reader with explicit owner-controlled sources; the default source list is empty.",
+        "Verify fresh coverage and actual work ownership before using its observations."
+      ],
+      "limitations": [
+        "Source extension only: the installer does not deploy collectors or operational dashboards. Missing and stale observations stay unknown."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "maintenance",
+      "type": "component",
+      "name": "Memory maintenance scripts",
+      "category": "Learning",
+      "summary": "Source for scoped ingestion, consolidation, decay and cleanup under your own retention policy.",
+      "status": "owner-setup",
+      "status_label": "Owner setup",
+      "requires": [],
+      "profiles": [
+        "full"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "memory/bin/mem0-dream",
+      "docs": "docs/COMPONENTS.md#maintenance",
+      "setup": [
+        "Review the shipped script and its configuration/help before running against your data.",
+        "Set your own retention, backup, allowed sources and scheduling; verify a bounded operation first."
+      ],
+      "limitations": [
+        "Scripts are included; historical schedules and private ingestion sources are not. The background graph feed is a separate service."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "credential-handles",
+      "type": "component",
+      "name": "Provider login handles",
+      "category": "Tools",
+      "summary": "Keep nonsecret provider metadata and route an agent to the correct native login or consent screen.",
+      "status": "owner-setup",
+      "status_label": "Owner setup",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "connector/service_handles.py",
+      "docs": "docs/COMPONENTS.md#credential-handles",
+      "setup": [
+        "Configure provider names, HTTPS login URLs and intended scopes in the private borg-context/credentials.json registry.",
+        "Discover credential_ tools and verify the returned native login handoff."
+      ],
+      "limitations": [
+        "Handles contain metadata only. They do not hold credentials, proxy authenticated APIs or prove current provider authorization."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "fleet",
+      "type": "component",
+      "name": "Multi-machine connector",
+      "category": "Coordination",
+      "summary": "Route files, commands, jobs and browser tools to explicitly enrolled machines.",
+      "status": "packaged",
+      "status_label": "Included",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "connector/fleet_tools.py",
+      "docs": "docs/COMPONENTS.md#fleet",
+      "setup": [
+        "Install each target independently and verify its borg_identity.",
+        "Establish trusted SSH, then enroll its exact owner, home and instance ID with borg fleet add.",
+        "Verify fleet_hosts and perform a reversible tool call on the selected machine."
+      ],
+      "limitations": [
+        "Enrollment is explicit. Memory is not replicated between machines. Shared desktop resources remain serialized."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "browser",
+      "type": "component",
+      "name": "Native browser tools",
+      "category": "Tools",
+      "summary": "BORG-owned browser sessions with inspect, click, navigation and durable operation receipts.",
+      "status": "packaged",
+      "status_label": "Included",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "connector/native_browser.py",
+      "docs": "docs/COMPONENTS.md#browser",
+      "setup": [
+        "Use borg tools browser_ to discover the installed schema.",
+        "Open an allowed page and verify a reversible interaction."
+      ],
+      "limitations": [
+        "Browser runtime is included even if this planning option is unselected. Account sign-in and website permissions remain yours."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "desktop",
+      "type": "component",
+      "name": "macOS desktop tools",
+      "category": "Tools",
+      "summary": "Inspect and operate native apps in an interactive macOS session.",
+      "status": "owner-setup",
+      "status_label": "Owner setup",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64"
+      ],
+      "source": "connector/native_ui.py",
+      "docs": "docs/COMPONENTS.md#desktop",
+      "setup": [
+        "Grant the OS permissions required by your chosen apps and tools.",
+        "Use ui_permissions and a reversible native app action to verify access."
+      ],
+      "limitations": [
+        "Requires an interactive macOS session. One physical desktop cannot serve independent simultaneous focus actions."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "adapters",
+      "type": "component",
+      "name": "Extraction LoRA adapters",
+      "category": "Learning",
+      "summary": "Three shipped adapter weight sets and model cards for local extraction research.",
+      "status": "research",
+      "status_label": "Research — inactive",
+      "requires": [],
+      "profiles": [
+        "full"
+      ],
+      "platforms": [
+        "macos-arm64"
+      ],
+      "source": "adapters/MANIFEST.json",
+      "docs": "docs/COMPONENTS.md#adapters",
+      "setup": [
+        "Inspect borg adapters list.",
+        "On Apple Silicon, use borg adapters prepare only when you want the separately downloaded, pinned MLX base models.",
+        "Run your own held-out evaluation and real-pipeline canary before any promotion."
+      ],
+      "limitations": [
+        "Inactive by default. Preparation does not enable extraction or establish semantic quality."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "training",
+      "type": "component",
+      "name": "Training and evaluation",
+      "category": "Learning",
+      "summary": "Private dataset builders, training chains, held-out exams and promotion canaries.",
+      "status": "research",
+      "status_label": "Research — inactive",
+      "requires": [
+        "adapters"
+      ],
+      "profiles": [
+        "full"
+      ],
+      "platforms": [
+        "macos-arm64"
+      ],
+      "source": "training",
+      "docs": "docs/COMPONENTS.md#training",
+      "setup": [
+        "Set a private dataset and checkpoint budget; use only data you are permitted to train on.",
+        "Read the training and adapter model cards before running an isolated experiment.",
+        "Keep the daily memory pipeline separate from resource-heavy training."
+      ],
+      "limitations": [
+        "No unattended training or promotion is enabled. Hardware allowances are not measured training minimums."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
+      "id": "github",
+      "type": "integration",
+      "name": "GitHub",
+      "category": "Development",
+      "summary": "Repository context, issues, pull requests and code review.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://github.com/github/github-mcp-server",
+      "docs": "https://github.com/github/github-mcp-server",
+      "setup": [
+        "Install or use your own GitHub service/account.",
+        "Follow the official GitHub integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "GitHub MCP server MIT; GitHub terms"
+    },
+    {
+      "id": "figma",
+      "type": "integration",
+      "name": "Figma",
+      "category": "Development",
+      "summary": "Design context and implementation handoff through the official MCP server.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://developers.figma.com/docs/figma-mcp-server/",
+      "docs": "https://developers.figma.com/docs/figma-mcp-server/",
+      "setup": [
+        "Install or use your own Figma service/account.",
+        "Follow the official Figma integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Figma account and product terms"
+    },
+    {
+      "id": "sentry",
+      "type": "integration",
+      "name": "Sentry",
+      "category": "Development",
+      "summary": "Application error and issue context.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://docs.sentry.io/product/sentry-mcp/",
+      "docs": "https://docs.sentry.io/product/sentry-mcp/",
+      "setup": [
+        "Install or use your own Sentry service/account.",
+        "Follow the official Sentry integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Sentry service and upstream terms"
+    },
+    {
+      "id": "vercel",
+      "type": "integration",
+      "name": "Vercel",
+      "category": "Development",
+      "summary": "Project and deployment context for your Vercel account.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://vercel.com/docs/mcp",
+      "docs": "https://vercel.com/docs/mcp",
+      "setup": [
+        "Install or use your own Vercel service/account.",
+        "Follow the official Vercel integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Vercel service terms"
+    },
+    {
+      "id": "railway",
+      "type": "integration",
+      "name": "Railway",
+      "category": "Development",
+      "summary": "Owner-controlled projects, services and deployments.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://docs.railway.com/ai/mcp-server",
+      "docs": "https://docs.railway.com/ai/mcp-server",
+      "setup": [
+        "Install or use your own Railway service/account.",
+        "Follow the official Railway integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Railway service and upstream terms"
+    },
+    {
+      "id": "cloudflare",
+      "type": "integration",
+      "name": "Cloudflare / web ChatGPT",
+      "category": "Development",
+      "summary": "Expose your BORG MCP through your own domain, Access policy and tunnel.",
+      "status": "owner-setup",
+      "status_label": "Owner setup",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "connector/cloudflare_gateway.py",
+      "docs": "docs/WEB.md",
+      "setup": [
+        "Create your own Cloudflare tunnel, domain, Access application and owner policy.",
+        "Run borg web with your own public URL, issuer, audience, email and private tunnel credential file.",
+        "Start the configured gateway/tunnel and verify OAuth plus an actual tool call from your web client."
+      ],
+      "limitations": [
+        "The BORG gateway code is included; domain, DNS, Cloudflare account and web-client acceptance are owner setup. A checkbox does not expose a server."
+      ],
+      "license": "Cloudflare service terms; cloudflared Apache-2.0"
+    },
+    {
+      "id": "google-workspace",
+      "type": "integration",
+      "name": "Google Workspace",
+      "category": "Knowledge",
+      "summary": "Owner-authorized files, calendars and workspace data via the chosen client connector or official APIs.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://developers.google.com/workspace",
+      "docs": "https://developers.google.com/workspace",
+      "setup": [
+        "Install or use your own Google Workspace service/account.",
+        "Follow the official Google Workspace integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Google Workspace and API terms"
+    },
+    {
+      "id": "microsoft-365",
+      "type": "integration",
+      "name": "Microsoft 365",
+      "category": "Knowledge",
+      "summary": "Owner-scoped Microsoft Graph access to mail, files and calendar.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://learn.microsoft.com/en-us/graph/overview",
+      "docs": "https://learn.microsoft.com/en-us/graph/overview",
+      "setup": [
+        "Install or use your own Microsoft 365 service/account.",
+        "Follow the official Microsoft 365 integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Microsoft service and API terms"
+    },
+    {
+      "id": "slack",
+      "type": "integration",
+      "name": "Slack",
+      "category": "Knowledge",
+      "summary": "Team context and authorized workflow actions.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://docs.slack.dev/",
+      "docs": "https://docs.slack.dev/",
+      "setup": [
+        "Install or use your own Slack service/account.",
+        "Follow the official Slack integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Slack service and API terms"
+    },
+    {
+      "id": "notion",
+      "type": "integration",
+      "name": "Notion",
+      "category": "Knowledge",
+      "summary": "Workspace pages and knowledge through Notion MCP.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://developers.notion.com/docs/mcp",
+      "docs": "https://developers.notion.com/docs/mcp",
+      "setup": [
+        "Install or use your own Notion service/account.",
+        "Follow the official Notion integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Notion service terms"
+    },
+    {
+      "id": "n8n",
+      "type": "integration",
+      "name": "n8n",
+      "category": "Automation",
+      "summary": "Visual workflows, scheduled tasks, webhooks and API glue.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://docs.n8n.io/advanced-ai/accessing-n8n-mcp-server/",
+      "docs": "https://docs.n8n.io/advanced-ai/accessing-n8n-mcp-server/",
+      "setup": [
+        "Install or use your own n8n service/account.",
+        "Follow the official n8n integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Sustainable Use License; additional commercial terms may apply"
+    },
+    {
+      "id": "twenty",
+      "type": "integration",
+      "name": "Twenty CRM",
+      "category": "Operations",
+      "summary": "Owner-hosted customer and pipeline data.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://docs.twenty.com/",
+      "docs": "https://docs.twenty.com/",
+      "setup": [
+        "Install or use your own Twenty CRM service/account.",
+        "Follow the official Twenty CRM integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "AGPL-3.0; hosted terms where applicable"
+    },
+    {
+      "id": "penpot",
+      "type": "integration",
+      "name": "Penpot",
+      "category": "Development",
+      "summary": "Owner-hosted collaborative design and design-system context.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://help.penpot.app/",
+      "docs": "https://help.penpot.app/",
+      "setup": [
+        "Install or use your own Penpot service/account.",
+        "Follow the official Penpot integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "MPL-2.0; hosted terms where applicable"
+    },
+    {
+      "id": "erpnext",
+      "type": "integration",
+      "name": "ERPNext / Frappe",
+      "category": "Operations",
+      "summary": "Accounting and operational records via your scoped Frappe API.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://docs.frappe.io/framework/user/en/api/rest",
+      "docs": "https://docs.frappe.io/framework/user/en/api/rest",
+      "setup": [
+        "Install or use your own ERPNext / Frappe service/account.",
+        "Follow the official ERPNext / Frappe integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "ERPNext GPL-3.0; Frappe MIT"
+    },
+    {
+      "id": "grafana",
+      "type": "integration",
+      "name": "Grafana / Prometheus",
+      "category": "Operations",
+      "summary": "Machine and service metrics to support capacity decisions.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://grafana.com/docs/",
+      "docs": "https://grafana.com/docs/",
+      "setup": [
+        "Install or use your own Grafana / Prometheus service/account.",
+        "Follow the official Grafana / Prometheus integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Grafana AGPL-3.0; Prometheus Apache-2.0"
+    },
+    {
+      "id": "metabase",
+      "type": "integration",
+      "name": "Metabase",
+      "category": "Operations",
+      "summary": "Business reporting against your selected data sources.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://www.metabase.com/docs/latest/",
+      "docs": "https://www.metabase.com/docs/latest/",
+      "setup": [
+        "Install or use your own Metabase service/account.",
+        "Follow the official Metabase integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Metabase open source AGPL; commercial editions separate"
+    },
+    {
+      "id": "postgres",
+      "type": "integration",
+      "name": "PostgreSQL / PostGIS",
+      "category": "Operations",
+      "summary": "Owner-managed relational and spatial data.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://www.postgresql.org/docs/",
+      "docs": "https://www.postgresql.org/docs/",
+      "setup": [
+        "Install or use your own PostgreSQL / PostGIS service/account.",
+        "Follow the official PostgreSQL / PostGIS integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "PostgreSQL License; PostGIS GPL-2.0+"
+    },
+    {
+      "id": "label-studio",
+      "type": "integration",
+      "name": "Label Studio",
+      "category": "Learning",
+      "summary": "Human-reviewed annotations for evaluation and training.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://labelstud.io/guide/",
+      "docs": "https://labelstud.io/guide/",
+      "setup": [
+        "Install or use your own Label Studio service/account.",
+        "Follow the official Label Studio integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Apache-2.0; commercial editions separate"
+    },
+    {
+      "id": "mlflow",
+      "type": "integration",
+      "name": "MLflow / dbt / DuckDB",
+      "category": "Learning",
+      "summary": "Experiment tracking and reproducible local data transformations.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://mlflow.org/docs/latest/",
+      "docs": "https://mlflow.org/docs/latest/",
+      "setup": [
+        "Install or use your own MLflow / dbt / DuckDB service/account.",
+        "Follow the official MLflow / dbt / DuckDB integration guide. Add its supported MCP server or API client to the agent runtime you chose.",
+        "Keep credentials in your own local secret store. Verify an authorized read before enabling writes."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "MLflow/dbt Apache-2.0; DuckDB MIT"
+    },
+    {
+      "id": "custom-mcp",
+      "type": "integration",
+      "name": "Custom MCP or API",
+      "category": "Extensions",
+      "summary": "Bring a compatible connector or an owner-built tool.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://modelcontextprotocol.io/docs/develop/connect-local-servers",
+      "docs": "https://modelcontextprotocol.io/docs/develop/connect-local-servers",
+      "setup": [
+        "Choose a trusted MCP server or API client and inspect its required permissions.",
+        "Configure it in your chosen agent client using your own endpoint, local executable and credential references.",
+        "Document its tool contract and verify identity, authorized read and a reversible action."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Your chosen server and service licenses"
+    },
+    {
+      "id": "local-tools",
+      "type": "integration",
+      "name": "Document, media and science tools",
+      "category": "Extensions",
+      "summary": "Use your own Blender, FFmpeg, document, CAD, GIS or analysis toolchain through native process jobs.",
+      "status": "external",
+      "status_label": "Connect your service",
+      "requires": [],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "https://www.blender.org/",
+      "docs": "https://www.blender.org/",
+      "setup": [
+        "Install the upstream tools needed for this workload on the selected target.",
+        "Record nonsecret version and invocation pointers in your owner tools catalog.",
+        "Run a small representative task and add its measured resources to the machine budget."
+      ],
+      "limitations": [
+        "BORG records this setup choice. It does not install, authenticate or proxy this external service."
+      ],
+      "license": "Per-tool licenses apply; no commercial app entitlement is bundled"
+    }
+  ],
+  "sizing": {
+    "version": "planning-2026-09-16.1",
+    "kind": "engineering_allowance",
+    "memory_units": "GB planning units (decimal); purchase the next suitable hardware tier",
+    "disk_units": "GB of free SSD space, not total drive size",
+    "default_model": "qwen3:4b Q4_K_M + nomic-embed-text, local extraction only",
+    "sources": [
+      {
+        "name": "BORG hardware guide and locked artifacts",
+        "url": "docs/HARDWARE.md"
+      },
+      {
+        "name": "Ollama concurrency and context memory",
+        "url": "https://docs.ollama.com/faq#how-does-ollama-handle-concurrent-requests"
+      },
+      {
+        "name": "Qdrant capacity planning",
+        "url": "https://qdrant.tech/documentation/operations/capacity-planning/"
+      }
+    ],
+    "allowances": {
+      "os_ram_gb": 4,
+      "full_services_ram_gb": 8,
+      "tools_services_ram_gb": 2,
+      "per_agent_ram_gb": 1,
+      "per_browser_ram_gb": 2,
+      "per_build_ram_gb": 3,
+      "per_million_facts_ram_gb": 6,
+      "full_runtime_disk_gb": 30,
+      "tools_runtime_disk_gb": 20,
+      "per_million_facts_disk_gb": 20,
+      "project_disk_multiplier": 1.5,
+      "headroom_multiplier": 1.3,
+      "training_extra_ram_gb": 32,
+      "training_extra_disk_gb": 100,
+      "per_build_cpu_cores": 2,
+      "per_browser_cpu_cores": 0.5,
+      "per_agent_cpu_cores": 0.25
+    },
+    "notes": [
+      "These values are conservative planning allowances, not measured minimums, throughput promises or dispatch admission.",
+      "Default local extraction uses one parallel Ollama request; cloud coding agents do not load frontier model weights on the host.",
+      "The fact allowance includes vectors, payload, graph/history and headroom. Actual payload/index/retention size varies. It is not a Qdrant benchmark.",
+      "External services are assumed to run elsewhere. Add their separately measured host requirements if you co-locate them.",
+      "The worker profile retains the complete dependency package; it saves running memory/model services, not all runtime disk space.",
+      "Training adds a planning reserve only; profile the exact base model, sequence, layers, batch, dataset and checkpoints."
+    ]
+  }
+}
