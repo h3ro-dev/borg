@@ -14,6 +14,9 @@ function el(tag, attributes = {}, ...children) {
   node.append(...children.flat().filter(child => child !== undefined && child !== null));
   return node;
 }
+function replace(node, ...children) {
+  node.replaceChildren(...children.flat().filter(child => child !== null && child !== undefined));
+}
 function say(message) { status.textContent = message; }
 function publicLink(value) {
   if (!value) return null;
@@ -257,7 +260,7 @@ async function start() {
     errors.replaceChildren(el('strong', {}, 'Review your configuration before downloading.'),
       list(validation.errors.length ? validation.errors : valid ? [] : ['Enter a value within the displayed input limits.']));
     if (!valid) {
-      summary.replaceChildren(el('p', { class: 'builder-kicker' }, 'ESTIMATE PAUSED'), el('h3', {}, 'Check your inputs.'),
+      replace(summary, el('p', { class: 'builder-kicker' }, 'ESTIMATE PAUSED'), el('h3', {}, 'Check your inputs.'),
         el('p', {}, 'Fix the highlighted values to update the plan. Your other machine selections are preserved.'));
       renderDelivery(null);
       return;
@@ -267,7 +270,7 @@ async function start() {
     const estimate = node.estimate;
     const metrics = [['RAM', estimate.ram_gb, 'GB'], ['Free disk', estimate.free_disk_gb, 'GB'], ['CPU planning', estimate.cpu_cores, 'cores']];
     const warnings = [...new Set([...estimate.warnings, ...node.warnings, ...plan.warnings])];
-    summary.replaceChildren(
+    replace(summary, 
       el('p', { class: 'builder-kicker' }, 'THIS MACHINE / PLANNING ESTIMATE'),
       el('h3', {}, active().label),
       el('dl', { class: 'estimate-metrics' }, metrics.map(([label, value, unit]) => el('div', {},
@@ -298,7 +301,7 @@ async function start() {
     }
     const commandBox = el('textarea', { id: 'blueprint-commands', readonly: true, rows: Math.min(commands.length + 1, 8), spellcheck: 'false', 'aria-label': 'Blueprint inspection and per-machine installation commands' });
     commandBox.value = commands.join('\n');
-    delivery.replaceChildren(
+    replace(delivery, 
       el('div', { class: 'delivery-heading' }, el('div', {}, el('p', { class: 'builder-kicker' }, 'TAKE THE NEXT STEP'),
         el('h3', {}, 'Your plan. Ready to review.'), el('p', { class: 'builder-muted' }, `${blueprint.machines.length} machine${blueprint.machines.length === 1 ? '' : 's'} · Each sized independently · Catalog ${catalog.version}`)),
         el('button', { type: 'button', id: 'download-blueprint', class: 'button primary', onclick: download }, 'Download blueprint ↓')),

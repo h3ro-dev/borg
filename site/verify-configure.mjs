@@ -25,6 +25,7 @@ export async function verifyConfigurator({ page, origin, evidence, results }) {
     return blueprint;
   };
   const baseline = await download('blueprint-default');
+  assert(!await page.locator('.blueprint-delivery').evaluate(node => [...node.childNodes].some(child => child.nodeType === Node.TEXT_NODE && child.textContent.trim() === 'null')));
   assert.equal(baseline.machines.length, 1);
   assert.equal(baseline.machines[0].profile, 'full');
   const baselineRam = planBlueprint(baseline, catalog).machines[0].estimate.ram_gb;
