@@ -22,6 +22,9 @@ jobs:
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - name: Verify machine planning contract
         run: |
+          node --check site/app.js
+          node --check site/guide.js
+          node site/verify-links.mjs
           node --test platform/planner.test.mjs
           python3 borg.py blueprint inspect platform/examples/single-node.json
           python3 borg.py blueprint inspect platform/examples/build-fleet.json
