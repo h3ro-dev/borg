@@ -49,7 +49,11 @@ authority. Command calls honor an installed POSIX `shell` and optional timing;
 output calls accept `length` and `offset` in bytes. Omit the offset to continue,
 or pass a retained offset to replay output. Responses include `next_offset` and
 `retained_from`; each process retains at most 2 MB and each read returns at most
-256,000 bytes. EOF closes finished pipes. Exact text edits support an explicit
+256,000 bytes. Output drains even when clients disconnect or do not poll, and
+finished commands release their pipes automatically. When output exceeds 2 MB,
+implicit reads report truncation and resume at `retained_from`; expired explicit
+offsets return the retained byte range. Use durable jobs for larger output.
+Exact text edits support an explicit
 `expected_replacements` count. Unsupported document or URL options fail before
 editing; an old client schema does not imply that those capabilities are present.
 Directory listings traverse only the requested depth and return at most 1,000
@@ -57,6 +61,25 @@ entries. Searches stop after 10,000 scanned entries, 500 matches or five seconds
 `scan_truncated` distinguishes partial scans from exhausted results. Content scans
 read at most 2 MB per file and report `content_truncated_files`. Narrow the root or
 use the owner's indexed search tools when a scan is incomplete.
+
+The connector and gateway raise their own soft descriptor allowance to 8,192,
+within the operating system's existing hard limit. They do not reduce larger
+allowances. `borg_status.process_resources` reports the actual allowance, open
+descriptors and remaining headroom. Fifty concurrent command clients fit inside
+the default 64-operation admission capacity, but their commands still need
+enough CPU, memory and disk on the selected host. Completed process replay is
+retained in memory; the 2 MB bound is per session, not a global storage limit.
+
+An explicit `computer.handoff` supports a rolling update while the old runtime
+owns sessions. It requires the predecessor's literal loopback `/mcp` URL and exact
+`instance_id`, `owner`, `home` and `server_generation`. Old process, search, job,
+remote-job and browser handles keep their resident owner; new work uses the new
+runtime. The transport ignores proxies and redirects and verifies identity again
+at dispatch. Failed or uncertain old calls are never automatically retried.
+Drain shared operations before switching ingress and retarget any watchdog to
+the new service. Keep the predecessor alive until its work and retained output
+have been reconciled. Raw PID handles can collide after OS PID reuse, so this is
+a bounded migration mechanism, not indefinite process-history storage.
 
 Configuration and service commands are described in [INSTALL.md](../docs/INSTALL.md).
 For an owner's Cloudflare/ChatGPT connection, follow [WEB.md](../docs/WEB.md). Optional

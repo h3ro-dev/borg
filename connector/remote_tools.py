@@ -116,7 +116,7 @@ class RemoteStore:
         return self.jobs.cancel(job_id)
 
 
-def mount_remote(server, config):
+def mount_remote(server, config, handoff=None):
     store = RemoteStore(config)
     descriptions = {
         "remote_list_hosts": "Probe configured BORG remote hosts and return fresh identity-free readiness metadata.",
@@ -135,4 +135,8 @@ def mount_remote(server, config):
     methods = {"remote_list_hosts": "list_hosts", "remote_status": "status", "remote_start": "start",
                "remote_read_output": "read_output", "remote_cancel": "cancel"}
     for name in TOOL_NAMES:
-        server.tool(name=name, annotations=annotations[name], description=descriptions[name])(getattr(store, methods[name]))
+        function = getattr(store, methods[name])
+        if handoff:
+            function = handoff.store_function(store, name, function)
+        server.tool(name=name, annotations=annotations[name], description=descriptions[name])(function)
+    return store

@@ -171,5 +171,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=Path, default=borg_home() / "borg-context/cloudflare/config.json")
     parser.add_argument("--http", type=int, default=8772)
     args = parser.parse_args()
+    from process_resources import configure_descriptor_limit
+    configure_descriptor_limit()
     settings = GatewaySettings.load(args.config)
     uvicorn.Server(server_config(build_gateway(settings), args.http)).run()
