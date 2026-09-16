@@ -9,8 +9,6 @@ from pathlib import Path
 import sys
 import subprocess
 
-from installer import config
-
 
 def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description=__doc__)
@@ -26,6 +24,9 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--system-dependencies", action="store_true")
         if name == "install":
             command.add_argument("--no-start", action="store_true")
+            command.add_argument("--blueprint", type=Path)
+            command.add_argument("--machine")
+            command.add_argument("--validate-only", action="store_true", help=argparse.SUPPRESS)
         if name == "auth":
             command.add_argument("provider", choices=["codex"])
         if name == "hook":
@@ -37,6 +38,10 @@ def parser() -> argparse.ArgumentParser:
         if name == "call":
             command.add_argument("tool")
             command.add_argument("--arguments", default="{}", help="JSON arguments; never pass credentials")
+    blueprint = commands.add_parser("blueprint", help="validate and inspect a portable machine plan")
+    blueprint.add_argument("operation", choices=["inspect"])
+    blueprint.add_argument("file", type=Path)
+    blueprint.add_argument("--machine")
     web = commands.add_parser("web", help="configure this owner's Cloudflare web connector")
     web.add_argument("--home", type=Path, default=Path(os.environ.get("BORG_HOME", Path.home() / ".borg")))
     for name in ["public-url", "issuer", "audience", "owner-email"]:
@@ -63,15 +68,37 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     os.umask(0o077)
     try:
+        from installer import blueprint
+        if args.command == "blueprint":
+            registry = blueprint.catalog()
+            print(json.dumps(blueprint.inspect(blueprint.load(args.file, registry), registry, args.machine), indent=2))
+            return 0
+        from installer import config
+        selection = None
         if args.command == "install":
+            if args.machine and not args.blueprint:
+                raise ValueError("--machine requires --blueprint")
+            if args.blueprint:
+                value = blueprint.load(args.blueprint)
+                row = blueprint.machine(value, args.machine)
+                blueprint.check_runtime(row)
+                selection = {"input": value, "machine_id": row["id"]}
+            existing = blueprint.check_existing(args.home, selection)
+            if existing and args.owner and existing["owner"] != args.owner:
+                raise ValueError("Existing BORG belongs to another owner; use a separate home")
             from installer.installation import source_files
             source_files()  # Refuse an incomplete package before creating owner state.
+            if existing:
+                from installer.installation import preflight
+                preflight(existing)
+            if args.validate_only:
+                return 0
         if args.command in {"init", "install"}:
             owner = args.owner
             if owner is None:
                 owner = (config.load(args.home)["owner"] if (args.home / "config.json").exists()
                          else getpass.getuser().lower().replace(".", "-"))
-            doc = config.initialize(args.home, owner, port_base=args.port_base, projects=args.projects)
+            doc = config.initialize(args.home, owner, port_base=args.port_base, projects=args.projects, blueprint_selection=selection)
         else:
             doc = config.load(args.home)
         if args.command == "init":

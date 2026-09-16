@@ -1,0 +1,15 @@
+{
+  "schema": "borg-blueprint/v1",
+  "catalog_version": "2026-09-16.1",
+  "goal": "coding",
+  "machines": [{
+    "id": "node-1",
+    "label": "My first node",
+    "platform": "macos-arm64",
+    "profile": "full",
+    "components": ["codex", "inbox", "beads", "fleet"],
+    "integrations": ["github"],
+    "workload": {"agents": 2, "browsers": 1, "builds": 1, "memory_millions": 0.1,
+                 "project_gb": 50, "context_tokens": 16384, "training": false}
+  }]
+}

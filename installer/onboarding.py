@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import stat
 
-from installer import config
+from installer import blueprint, config
 
 SCHEMA = "borg-onboarding/v1"
 MAX_METADATA_BYTES = 65536
@@ -121,6 +121,8 @@ def plan(doc: dict) -> dict:
     install_command = _command(["./install.sh", "--home", str(root), "--owner", doc["owner"]],
         "Complete installation from the same source release checkout",
         requires=["Run in the release checkout containing install.sh; preserve any existing home"])
+    if doc.get("blueprint"):
+        install_command["argv"] += ["--blueprint", str(root / "blueprint.json"), "--machine", doc["blueprint"]["machine_id"]]
     steps = [_step("installation", "Install an independent BORG", "present" if installed else "missing",
         {"launcher_present": launcher, "application_present": source},
         [] if installed else ["Complete the pinned installer in a private owner-controlled home"],
@@ -245,6 +247,36 @@ def plan(doc: dict) -> dict:
         ["Grant macOS Accessibility, Screen Recording or Automation only when the chosen operation requests it"],
         [command("tools", "ui_", purpose="Inspect supported OS operations")],
         ["Headless browser success does not prove OS UI permissions; native permissions require an owner session."], required=False))
+    selection = blueprint.selected_machine(doc)
+    if selection is not None:
+        chosen = set(selection["components"])
+        mapping = {"codex-login": "codex", "codex-client": "codex", "codex-conductor": "codex",
+                   "claude": "claude", "grok": "grok", "adapters": "adapters",
+                   "own-machines": "fleet", "os-permissions": "desktop"}
+        steps = [step for step in steps if step["id"] not in mapping or mapping[step["id"]] in chosen]
+        summary = blueprint.describe(selection, blueprint.catalog())
+        for step in steps:
+            if step["id"] == "local-services":
+                step["title"] = "Verify selected local services"
+                step["observed"] = {"selected_services": summary["services"]}
+                step["missing_requirements"] = ["Run native readiness checks for every selected local service"]
+                step["evidence_limits"] += summary["warnings"]
+            if step["id"] == "codex-client" and not blueprint.full(doc):
+                matched = (receipt.get("state") == "configured" and receipt.get("profile") == profile
+                           and receipt.get("hooks") == 0 and receipt.get("mcp_server") == "borg"
+                           and receipt.get("account_credentials_imported") is False)
+                step.update(title="Connect Codex to BORG tools", state="configured" if matched else "incomplete",
+                            observed={"receipt": receipt_read, "matching_client_receipt": matched},
+                            missing_requirements=["Verify live BORG MCP configuration; tools nodes have no memory capture hooks"],
+                            ready=None if matched else False)
+                step["commands"] = [command("doctor", purpose="Verify selected services and Codex MCP configuration"), install_command]
+            if step["id"] in {"claude", "grok"}:
+                step["required"] = True
+        for item in summary["setup"]:
+            steps.append(_step("selected-" + item["id"], "Set up selected " + item["id"],
+                "manual_setup_required", {"catalog_status": item["status"], "readiness": "not_verified"},
+                item["steps"], [], item["limitations"] + ["Documentation: " + item["docs"],
+                "Selection is not proof of installed provider binaries, authentication, deployment or runtime readiness."]))
     return {"schema": SCHEMA, "state": "action_required" if any(step["required"] and step["ready"] is False for step in steps)
             else "verification_required", "ready": None, "steps": steps,
             "evidence_limits": ["Read-only metadata snapshot; no commands, network requests, login or profile writes performed.",

@@ -5,9 +5,11 @@ export PYTHONDONTWRITEBYTECODE=1
 borg_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 borg_home=${BORG_HOME:-$HOME/.borg}
 borg_next_home=false
+borg_has_blueprint=false
 for borg_arg in "$@"; do
+  case "$borg_arg" in --blueprint|--blueprint=*|--machine|--machine=*) borg_has_blueprint=true ;; esac
   case "$borg_arg" in --help|-h)
-    echo 'Usage: ./install.sh [--home ABSOLUTE_PATH] [--owner OWNER] [--port-base PORT] [--no-start]'
+    echo 'Usage: ./install.sh [--home ABSOLUTE_PATH] [--owner OWNER] [--port-base PORT] [--blueprint FILE --machine ID] [--no-start]'
     echo 'Installs an independent BORG. Provider sign-in and optional external access use your own accounts.'
     exit 0 ;;
   esac
@@ -51,6 +53,14 @@ while IFS= read -r borg_relative; do
   fi
 done < "$borg_script_dir/installer/managed-directories.txt"
 if [ -L "$borg_home/config.json" ]; then echo "BORG config cannot be a symlink" >&2; exit 2; fi
+# Blueprint imports must fail before bootstrap creates a home or downloads files.
+# A host Python is used only for stdlib validation, never as the installed runtime.
+if "$borg_has_blueprint"; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "Blueprint validation requires Python 3 on PATH before bootstrap" >&2; exit 2
+  fi
+  PYTHONPATH= PYTHONHOME= python3 -B "$borg_script_dir/borg.py" install --validate-only --home "$borg_home" "$@"
+fi
 # An established installation reaches read-only source preflight before downloads.
 if [ -f "$borg_home/config.json" ] && [ -x "$borg_home/mem0/venv/bin/python" ]; then
   borg_existing_python="$borg_home/mem0/venv/bin/python"
