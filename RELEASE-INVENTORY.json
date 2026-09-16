@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 282,
+  "file_count": 283,
   "files": [
     {
       "bytes": 29,
@@ -193,9 +193,9 @@
       "sha256": "1600e1b9bb2eda4fad5790d5ef17bb17d2e868439b58fceebcad09e1af3c071d"
     },
     {
-      "bytes": 3327,
+      "bytes": 3967,
       "path": "connector/README.md",
-      "sha256": "9762c27b31a8e2de233c9e57b19b3418549aa712ef091881772db83bf306c82a"
+      "sha256": "f54d646667642786b7d8dc2135d3fcbb9d10786ec54cde17207893bd389dff35"
     },
     {
       "bytes": 791,
@@ -228,9 +228,9 @@
       "sha256": "626a4a31fec9be8d81640a4745e6ea8a0b97b8c30e663affb4817b47995a2d4a"
     },
     {
-      "bytes": 28840,
+      "bytes": 32421,
       "path": "connector/computer_tools.py",
-      "sha256": "c707510d653c3462b14c600fd41f31258297165fcc11674c2a5ef71786e06a51"
+      "sha256": "cc66b35bb6842da5f6f847260f9cb90529a639ed1c5ba9c50730964b33e90611"
     },
     {
       "bytes": 9415,
@@ -306,6 +306,11 @@
       "bytes": 2126,
       "path": "connector/test_catalog_status.py",
       "sha256": "bc150435ba2b34dc65d7cc49e9f71abe2ac18d52b8dbdc5473c19601a30ebe4c"
+    },
+    {
+      "bytes": 6299,
+      "path": "connector/test_chatgpt_compat.py",
+      "sha256": "5afec7b6ac7f150cb08e4b09466dbfd00ef8671636ad87da6384cb1c9d224425"
     },
     {
       "bytes": 14333,
@@ -1413,7 +1418,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "404577d36b257dc00afa80270abf114420b6686fdc92f01b4ab647dc30afcc9c",
+  "inventory_sha256": "6af50325a9805f3eb20887bccfe9b9f59701834bd0314a3ca6deec0fecef1bd1",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 82268608
+  "total_bytes": 82279128
 }

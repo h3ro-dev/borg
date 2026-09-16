@@ -38,6 +38,14 @@ status and memory calls remain outside this queue. Process input is limited to
 256,000 bytes with a one-second write deadline. A timed-out input may have sent a
 prefix: inspect the process and operation receipt before retrying. Process output
 stops at EOF and leaves bytes beyond its response limit for the next read.
+The connector accepts legacy ChatGPT `origin` metadata without changing caller
+authority. Command calls honor an installed POSIX `shell` and optional timing;
+output calls accept `length` and `offset` in bytes. Omit the offset to continue,
+or pass a retained offset to replay output. Responses include `next_offset` and
+`retained_from`; each process retains at most 2 MB and each read returns at most
+256,000 bytes. EOF closes finished pipes. Exact text edits support an explicit
+`expected_replacements` count. Unsupported document or URL options fail before
+editing; an old client schema does not imply that those capabilities are present.
 Directory listings traverse only the requested depth and return at most 1,000
 entries. Searches stop after 10,000 scanned entries, 500 matches or five seconds;
 `scan_truncated` distinguishes partial scans from exhausted results. Content scans
