@@ -12,6 +12,12 @@ Run `borg tools` for the actual current schemas, and `borg call borg_status` to 
 native component status. Web clients connect to the owner's `/mcp` endpoint; local
 clients use a generated stdio proxy without a bearer value in their client config.
 
+For an existing platform, set `BORG_TOOLS_CATALOG` to its owner-maintained JSON
+catalog. An optional `local_sources` object in that catalog can supply the actual
+`runtime_instructions` path, `capability_map` path and `skills` path array. Without
+that object, discovery uses the independent installation's dedicated profile.
+These are discovery pointers, not instructions to execute or readiness evidence.
+
 Writes have durable operation receipts. A lost response is not evidence that a write
 failed; inspect its receipt before retrying. Blocking credential and receipt I/O runs
 off the MCP event loop. Receipt finalizers serialize terminal state publication, and
