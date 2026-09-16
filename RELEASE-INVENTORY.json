@@ -708,9 +708,9 @@
       "sha256": "e59dbdbab95ab3749451d539f8bca3462af6bb79ff6924fec031bc15acefbb77"
     },
     {
-      "bytes": 5791,
+      "bytes": 6629,
       "path": "docs/BLUEPRINT.md",
-      "sha256": "7cd5d4265dd16e88d017ee8763c46ca0afb8066ef0f72cd12204a08b3f2ae3b1"
+      "sha256": "264355fa8af08b6c6f529a35e497da9da746540d11457d2fdccf95fffe27aa98"
     },
     {
       "bytes": 14235,
@@ -1545,7 +1545,7 @@
     {
       "bytes": 30318,
       "path": "site/index.html",
-      "sha256": "1b4fab1e4790d09d692b526aaa7deea8b4fd3ede6c388bdbd1984ac0b56f3127"
+      "sha256": "6ad323ed2ba94ce3fc1872aa040d5be2507781717dec019d90d6a77a6b72a804"
     },
     {
       "bytes": 8942,
@@ -1688,7 +1688,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "942519044276a3caf638ae3cb9c879c07d139bd1376305968efc98401193511b",
+  "inventory_sha256": "6c695556e2d245c44c4a266ef1a9e416a5aec1afed79e3fa51908b309b241a31",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 85773794
+  "total_bytes": 85774632
 }
