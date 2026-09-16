@@ -1,11 +1,11 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 348,
+  "file_count": 357,
   "files": [
     {
-      "bytes": 1738,
+      "bytes": 1914,
       "path": ".github/workflows/site.yml",
-      "sha256": "a96e2efdd0a377f23e2af261e0e80d24f68a86e72597ba8980ca0c82914567d5"
+      "sha256": "6bfdccbe0a3994dba7c402c2f7a2e0713de367e92476c68f680bc87439e7d1cf"
     },
     {
       "bytes": 29,
@@ -28,9 +28,9 @@
       "sha256": "f27ab677c370f499e6f4af41993f9fa789ed4d137daa84ecf276b1c8550f7c49"
     },
     {
-      "bytes": 7320,
+      "bytes": 7818,
       "path": "THIRD_PARTY_NOTICES.md",
-      "sha256": "43581c610d374745cfa539f092a917436f49f2eecdd497958d05683d4b027bcd"
+      "sha256": "029d5d0dfa87496e03f831f6ca28df9bb4fe626c566255c04f4901b3419c0da9"
     },
     {
       "bytes": 16390,
@@ -88,9 +88,14 @@
       "sha256": "2fe2159b1ad20333911a0d6b52de1f7fe8d0960e5a413b188075aeebf8186f7f"
     },
     {
-      "bytes": 4856,
+      "bytes": 4575,
+      "path": "art/DRONE.md",
+      "sha256": "74a33bfa8abb3b69398a11e60489b72e86b6d148ec3c6ca7c340a4557ddb910f"
+    },
+    {
+      "bytes": 5905,
       "path": "art/FLEET.md",
-      "sha256": "700bb572c6d13c353c71339b0cf32b4f78a70c00991d36995656dbd1e41ac665"
+      "sha256": "9fbe85c331b8fcfefda7e4c1512a93adeb2c04cef68dbaf02b8f15f829e655bb"
     },
     {
       "bytes": 2344,
@@ -98,9 +103,14 @@
       "sha256": "cbb9b39a08c8c6641efcfb21f6f02738f4e99dc8be9b01cda285438e8efebe92"
     },
     {
-      "bytes": 12901,
+      "bytes": 21521,
+      "path": "art/borg_drone.py",
+      "sha256": "3b7276784b4b1f061c1d06aeb666817019a05d7cdc761b30b8158ca9fa7b665e"
+    },
+    {
+      "bytes": 13741,
       "path": "art/borg_fleet.py",
-      "sha256": "3b37d0ff8ab2bd683c2dbf62b05b498ee7699000f3fd010352495005e26c6632"
+      "sha256": "8e1b70fd09e01371d50a4016d1cd016c85072fd90348319c3d7369cad4b53195"
     },
     {
       "bytes": 9462,
@@ -1003,9 +1013,9 @@
       "sha256": "02860640403068e6184562161f8e452cbce31746371697b461be16a371edd281"
     },
     {
-      "bytes": 28112,
+      "bytes": 28468,
       "path": "installer/release_guard.py",
-      "sha256": "a4e796bf2ab52f30a3f39327837ba8d1dfdf8599e5fb87b72495de6a53f8b33c"
+      "sha256": "ee32045bf09da38d41f85eb175e9073b04da6f1a388f983c8f3ae81b8bd16684"
     },
     {
       "bytes": 352,
@@ -1488,6 +1498,21 @@
       "sha256": "13831d02389d917d22fcfa6c79f98f8acbf61d230add0e73a4d4dc5f3bfb9e56"
     },
     {
+      "bytes": 578482,
+      "path": "site/assets/borg-drone-codex.webp",
+      "sha256": "c5d37a7935b099e43ffc48c6ed389f0f2ef2b9474946027e1050269844b0d654"
+    },
+    {
+      "bytes": 571410,
+      "path": "site/assets/borg-drone.webp",
+      "sha256": "132d9694ade32027439c2e9e9e9b2fbdb3475f0b8d750cf00656a8653beab278"
+    },
+    {
+      "bytes": 244494,
+      "path": "site/assets/borg-fleet-foreground.webp",
+      "sha256": "c39ec8039abe79f65dcd8e9fe28f9d4ea31608562e2218b7ca99819d77760e40"
+    },
+    {
       "bytes": 234470,
       "path": "site/assets/borg-fleet.webp",
       "sha256": "f7d0fd992b3fa0eb8f5d7e30cc89d2644f38ae5f7e7a68fb1517686641351cca"
@@ -1563,9 +1588,24 @@
       "sha256": "67ea897ec7d1cff5be050c591fe643aa027e698064fd4aa682e64e64a5b442fe"
     },
     {
-      "bytes": 3344,
+      "bytes": 12689,
+      "path": "site/fleet-explorer.css",
+      "sha256": "7ad16a2f8049228f06519a1260164580a61efc1298c331b46b159707ba15a6ad"
+    },
+    {
+      "bytes": 8584,
+      "path": "site/fleet-explorer.mjs",
+      "sha256": "2451105a9aa683e997a62d92a0d375bd95ef136bc3bf67b5e215b017ab67183e"
+    },
+    {
+      "bytes": 19322,
+      "path": "site/fleet-profiles.mjs",
+      "sha256": "c18f2ad7d8a489eeefb52bdba8ba880e482096b8de60ad6b141074d86289bcf7"
+    },
+    {
+      "bytes": 3631,
       "path": "site/fleet.css",
-      "sha256": "74499fd5a361d787e2895194e060392821da98dfbb5ca989308a3e22028f76be"
+      "sha256": "18afed784f35f041f86c1359c131cb2a72c29b0a431bf4106b41dd7bb168a8c6"
     },
     {
       "bytes": 6592,
@@ -1583,9 +1623,9 @@
       "sha256": "0ef3fd6b85ade71ccb594334f5f3e4a41000f2d9167c380b95b9248d73297d2c"
     },
     {
-      "bytes": 34582,
+      "bytes": 40555,
       "path": "site/index.html",
-      "sha256": "cd2f8e3e2e0aec8dc5456441045e39ac7ab39e69b2bea829e6399e4423438866"
+      "sha256": "89371ee52f8ce4cbeb2fd661de401083db31d152d1b013c8f6bd362d5cd3aecd"
     },
     {
       "bytes": 2877,
@@ -1593,14 +1633,14 @@
       "sha256": "bd2cceb71e4443839ddd0e05e112ad3a0a52958e516f1ab7d6f8a43e0ae39c52"
     },
     {
-      "bytes": 8942,
+      "bytes": 9615,
       "path": "site/scene.js",
-      "sha256": "8447934c55bcbb77fff915f067e455cf55f4193ca6f6030b09fcfcd87210c05f"
+      "sha256": "1a8e3c67a216eaf239e41223700b82e6cf66e4c2a757d76d737379105ac4cecb"
     },
     {
-      "bytes": 31704,
+      "bytes": 32107,
       "path": "site/styles.css",
-      "sha256": "dcdcc1dfce3d000c2e278ff38f34e49cdc9f8a0b4a81d6586742920e2a1620a3"
+      "sha256": "133511e31c2aae749ce9376b5e7c4757fa11ec34d3fb988f5ec1a4eaa615780c"
     },
     {
       "bytes": 1081,
@@ -1658,6 +1698,11 @@
       "sha256": "2b32a829bcd7c11112d2269fc0ce40f6c809dbdfa1912c77761e118273309607"
     },
     {
+      "bytes": 8442,
+      "path": "site/verify-explorer.mjs",
+      "sha256": "67d6c88ea835c1c7b0af8bc9e4d3efe80b5249e30f79f6e57ff6ecc22263ee49"
+    },
+    {
       "bytes": 2918,
       "path": "site/verify-guide.mjs",
       "sha256": "3b1bef292bc037c13b9291bf034421a791d7e011a244e184da68a9c565bd2d09"
@@ -1668,9 +1713,9 @@
       "sha256": "edc3d3529ea3382663faa3fdbec157352692e0d2e89e5de98ceeca111a79db7c"
     },
     {
-      "bytes": 12568,
+      "bytes": 12794,
       "path": "site/verify.mjs",
-      "sha256": "22ca2be6aa6fdf9b664c9c97dcb6cea4a7891b5b59d538a4f90b59f12f212838"
+      "sha256": "06dbd515ebdc2e2bc61b2b9d729af9e071ddb75109f7aa81ada3c4b1baa83005"
     },
     {
       "bytes": 6275,
@@ -1743,7 +1788,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "9c5f457eb94e4740e37716d0a5c3263047c5bd754406d254e4c0ddabb9defcfb",
+  "inventory_sha256": "a39d1718603bf4aa251d80a8fe77258401cbb0b62e8eb4eea40d016b59b0724c",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 86127667
+  "total_bytes": 87607667
 }
