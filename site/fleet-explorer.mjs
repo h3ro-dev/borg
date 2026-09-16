@@ -187,6 +187,20 @@ dialog.addEventListener('close', () => {
   document.body.style.overflow = priorOverflow;
   if (opener?.isConnected) opener.focus({ preventScroll: true });
 });
+dialog.addEventListener('keydown', (event) => {
+  if (event.key !== 'Tab') return;
+  const controls = [...dialog.querySelectorAll('button:not([disabled]), a[href]')]
+    .filter((node) => node.getClientRects().length > 0);
+  const first = controls[0];
+  const last = controls.at(-1);
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+    event.preventDefault();
+    last?.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first?.focus();
+  }
+});
 new MutationObserver(syncMotion).observe(document.documentElement, { attributes: true, attributeFilter: ['data-motion'] });
 document.addEventListener('visibilitychange', syncMotion);
 window.addEventListener('pagehide', () => clearInterval(timer));
