@@ -71,6 +71,7 @@ APPROVED_NETWORK_HOSTS = {
     "github.com",
     "githubusercontent.com",
     "huggingface.co",
+    "h3ro-dev.github.io",
     "help.openai.com",
     "googleapis.com",
     "localhost",
@@ -85,8 +86,17 @@ APPROVED_NETWORK_HOSTS = {
     "python.org",
     "qdrant.tech",
     "raw.githubusercontent.com",
+    "scripts.sil.org",
+    "www.w3.org",
     "registry.npmjs.org",
     "registry.ollama.ai",
+}
+
+# Reviewed SIL OFL 1.1 website fonts from google/fonts/ofl/chakrapetch.
+# Exact pins permit only these public assets, never arbitrary binary payloads.
+PUBLIC_FONT_ASSETS = {
+    "site/assets/chakra-petch-regular.ttf": (78488, "98fcd638baa5c81ff0316b7538ce330ee3b23b1302726de3526d5933a8ecf986"),
+    "site/assets/chakra-petch-bold.ttf": (78384, "65fbf76d95651697275e19db4d717c0e95a789ddd3476478b05292104db278a0"),
 }
 APPROVED_NETWORK_SUFFIXES = (
     ".example",
@@ -450,6 +460,10 @@ def scan(root: Path, *, skip: set[str] | None = None, allowlist_path: Path | Non
             continue
         digest = _sha256(data)
         inventory.append({"path": relative, "bytes": len(data), "sha256": digest})
+        if relative in PUBLIC_FONT_ASSETS:
+            if (len(data), digest) != PUBLIC_FONT_ASSETS[relative]:
+                findings.append(_path_finding("public-asset-integrity-mismatch", relative, "website font does not match its reviewed public source"))
+            continue
         if relative in expected_weights:
             expected_size, expected_digest = expected_weights[relative]
             if len(data) != expected_size or digest != expected_digest:

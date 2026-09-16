@@ -115,6 +115,8 @@ class Settings:
     mem0_principal: str = PRINCIPAL
     default_scope: str = "personal:james"
     state_root: Path = MEMORY / "borg-context"
+    identity: dict[str, Any] = field(default_factory=dict)
+    fleet: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> "Settings":
@@ -170,8 +172,18 @@ class Settings:
         account_catalog = doc.get("account_catalog", {})
         if account_catalog and account_catalog.get("backend", "local_receipt") != "local_receipt":
             raise ValueError("BORG account catalog status must use a local receipt")
+        from fleet_tools import identity_config, absolute_path
+        identity = doc.get("identity", {})
+        if identity:
+            identity = identity_config(identity)
+        fleet = doc.get("fleet", {})
+        if fleet:
+            if not isinstance(fleet, dict) or set(fleet) != {"registry_file"}:
+                raise ValueError("BORG fleet requires its explicit private registry file")
+            absolute_path(fleet["registry_file"])
         return cls(inbound, upstream, roots, computer, desktop, browser, remote, ui, credentials,
-                   account_catalog, mem0_url, doc["mem0_principal"], default_scope, state_root)
+                   account_catalog, mem0_url, doc["mem0_principal"], default_scope, state_root,
+                   identity, fleet)
 
 
 class BorgBearerVerifier(TokenVerifier):
@@ -447,8 +459,19 @@ def build_server(settings: Settings) -> FastMCP:
     from system_tools import tool_search
     protect_framework_logs()
     ledger = OperationLedger(getattr(settings, "state_root", MEMORY / "borg-context") / "operations")
+    from fleet_tools import Fleet, mount_fleet
+    fleet = Fleet(Path(settings.fleet["registry_file"])) if settings.fleet else None
+
+    @asynccontextmanager
+    async def lifespan(_server):
+        try:
+            yield {}
+        finally:
+            if fleet:
+                await fleet.close()
+
     server = FastMCP("borg-context", auth=BorgBearerVerifier(settings),
-                     instructions=INSTRUCTIONS, mask_error_details=True)
+                     instructions=INSTRUCTIONS, mask_error_details=True, lifespan=lifespan)
     boundary = BoundaryMiddleware(authorize, settings, ledger=ledger)
     server.add_middleware(boundary)
     context = BorgContext(settings)
@@ -461,6 +484,20 @@ def build_server(settings: Settings) -> FastMCP:
         description="Find existing installed tools, services, native invocation paths and skill locations in the fleet catalog. This is discovery, not a readiness check; verify the selected native interface before use.")(tool_search)
     server.tool(name="borg_capabilities", annotations=READ_ONLY,
         description="Describe the current secret-free BORG capability manifest, tool schema version, domains and readiness boundaries.")(context.borg_capabilities)
+
+    def borg_identity() -> dict[str, Any]:
+        """Read this configured owner's installation identity and resident process generation.
+
+        This proves the selected native endpoint, not workload admission or OS permissions.
+        """
+        authorize()
+        return {"schema": "borg-identity/v1", "state": "configured" if settings.identity else "unconfigured",
+                **settings.identity, "server_generation": ledger.generation,
+                "server_started_at": ledger.started_at, "observed_at": _now()}
+
+    server.tool(annotations=READ_ONLY)(borg_identity)
+    if fleet:
+        mount_fleet(server, fleet)
 
     def operation_status(receipt_id: str) -> dict[str, Any]:
         authorize()

@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#10120f" />
+    <meta
+      name="description"
+      content="Your machines. Your agents. Your memory. BORG Collective is an independent agent-first operating platform you install and own."
+    />
+    <meta
+      property="og:title"
+      content="BORG Collective — Your system. Your collective."
+    />
+    <meta
+      property="og:description"
+      content="A shared local brain, native tools, and agent orchestration. Build a collective on your own terms."
+    />
+    <meta property="og:type" content="website" />
+    <title>BORG Collective — Your system. Your collective.</title>
+    <link rel="icon" href="./assets/mark.svg" type="image/svg+xml" />
+    <link
+      rel="preload"
+      href="./assets/chakra-petch-bold.ttf"
+      as="font"
+      type="font/ttf"
+      crossorigin
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="header wrap">
+      <a class="brand" href="./" aria-label="BORG Collective home"
+        ><img src="./assets/mark.svg" width="36" height="40" alt="" /><span
+          >BORG<span class="brand-sub">COLLECTIVE</span></span
+        ></a
+      >
+      <nav aria-label="Main navigation">
+        <a href="#system">The system</a><a href="#setup">Get started</a
+        ><a class="nav-source" href="https://github.com/h3ro-dev/borg"
+          >Source <span aria-hidden="true">↗</span></a
+        >
+      </nav>
+    </header>
+    <main id="main">
+      <section class="hero wrap" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">
+            <span class="square" aria-hidden="true"></span> Independent.
+            Agent-first. Yours.
+          </p>
+          <h1 id="hero-title">
+            YOUR MACHINES.<br />YOUR AGENTS.<br /><span>ONE COLLECTIVE.</span>
+          </h1>
+          <p class="hero-description">
+            Give your agents a shared brain and the tools to act. Memory,
+            coordination, and native control — running on a system you own.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#setup"
+              >Build your collective <span aria-hidden="true">↗</span></a
+            ><a class="text-link" href="https://github.com/h3ro-dev/borg"
+              >Explore the source <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <p class="hero-note">
+            Local installation verified on Apple Silicon macOS.
+          </p>
+        </div>
+        <figure class="hero-art">
+          <img
+            src="./assets/collective-cube.svg"
+            width="680"
+            height="660"
+            alt="An original isometric cube built from interlocking dark circuit panels and acid-green connections."
+          />
+          <figcaption>
+            <span>FIG. 01 / THE COLLECTIVE</span
+            ><span>INDEPENDENT BY DESIGN</span>
+          </figcaption>
+        </figure>
+        <div class="hero-bottom">
+          <span>ONE OWNER. A CONNECTED SYSTEM.</span
+          ><a href="#system"
+            >Discover the architecture <span aria-hidden="true">↓</span></a
+          >
+        </div>
+      </section>
+
+      <section
+        class="system wrap section"
+        id="system"
+        aria-labelledby="system-title"
+      >
+        <div class="section-heading">
+          <p class="eyebrow">01 / THE SYSTEM</p>
+          <h2 id="system-title">
+            More than a session.<br /><span class="muted"
+              >A system that remembers.</span
+            >
+          </h2>
+          <p>
+            Bring your agents, context, and tools together. Each installation
+            starts with its own identity, private data stores, and provider
+            profile.
+          </p>
+        </div>
+        <div class="capabilities">
+          <article>
+            <span class="module-id">[ 01 / RECALL ]</span>
+            <div class="module-icon memory-icon" aria-hidden="true">
+              <i></i><i></i><i></i>
+            </div>
+            <h3>A shared local brain.</h3>
+            <p>
+              Semantic memory and a temporal knowledge graph carry context
+              across sessions. Your source records stay the authority; memory
+              helps agents find them.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/h3ro-dev/borg/tree/master/memory"
+              >Inside the memory layer <span aria-hidden="true">↗</span></a
+            >
+          </article>
+          <article>
+            <span class="module-id">[ 02 / COORDINATE ]</span>
+            <div class="module-icon coordination-icon" aria-hidden="true">
+              <i></i><i></i><i></i>
+            </div>
+            <h3>Agents with a plan.</h3>
+            <p>
+              Conductors run agent work. Inbox carries scoped messages and
+              assignments. Beads records the work, its dependencies, and the
+              evidence of completion.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/h3ro-dev/borg/tree/master/conductor"
+              >Explore orchestration <span aria-hidden="true">↗</span></a
+            >
+          </article>
+          <article>
+            <span class="module-id">[ 03 / ACT ]</span>
+            <div class="module-icon control-icon" aria-hidden="true">
+              <i></i><i></i><i></i>
+            </div>
+            <h3>Tools on your terms.</h3>
+            <p>
+              Work with files, processes, durable jobs, and a dedicated browser.
+              Native UI tools use normal OS permissions. Explicitly select your
+              configured remote hosts and discover the tools they expose.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/h3ro-dev/borg/blob/master/connector/README.md"
+              >See the native tools <span aria-hidden="true">↗</span></a
+            >
+          </article>
+        </div>
+      </section>
+
+      <section
+        class="architecture section"
+        aria-labelledby="architecture-title"
+      >
+        <div class="wrap architecture-grid">
+          <div class="architecture-copy">
+            <p class="eyebrow">02 / YOUR COLLECTIVE</p>
+            <h2 id="architecture-title">
+              Your infrastructure.<br /><span class="accent"
+                >A common purpose.</span
+              >
+            </h2>
+            <p>
+              Start with one machine. Add your own hosts explicitly, verify
+              their identities, and discover their actual tools. Independent
+              work can run concurrently within your capacity and permissions.
+              Credentials stay on their target machines; operation receipts
+              record outcomes.
+            </p>
+            <p class="fine-print">
+              Illustrative architecture. Generic machines and connections below
+              represent an owner-configured system, not a live fleet. Your
+              installation never joins another owner’s fleet automatically.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/h3ro-dev/borg/blob/master/docs/SETUP.md"
+              >Follow the owner setup guide
+              <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <div
+            class="topology"
+            role="group"
+            aria-label="Illustrative architecture: agents connect to a local brain and owner-configured tools"
+          >
+            <div class="diagram-label">
+              <span class="square" aria-hidden="true"></span> ILLUSTRATIVE /
+              OWNER-CONFIGURED
+            </div>
+            <div class="providers">
+              <div><strong>Codex</strong><span>Automatic hooks</span></div>
+              <div><strong>Claude</strong><span>Configurable</span></div>
+              <div><strong>Grok</strong><span>Configurable</span></div>
+            </div>
+            <div class="diagram-bus" aria-hidden="true"></div>
+            <div class="brain">
+              <img src="./assets/mark.svg" width="39" height="44" alt="" />
+              <div>
+                <strong>YOUR BORG</strong
+                ><span>Local memory + temporal graph</span>
+              </div>
+              <span class="brain-cross" aria-hidden="true">+</span>
+            </div>
+            <div class="diagram-bus lower" aria-hidden="true"></div>
+            <div class="machines">
+              <div>
+                <span class="machine-glyph" aria-hidden="true">▣</span
+                ><strong>Workstation</strong><span>Local tools</span>
+              </div>
+              <div>
+                <span class="machine-glyph" aria-hidden="true">▣</span
+                ><strong>Build host</strong><span>Configured SSH</span>
+              </div>
+              <div>
+                <span class="machine-glyph" aria-hidden="true">▣</span
+                ><strong>Lab node</strong><span>Configured SSH</span>
+              </div>
+            </div>
+            <p class="diagram-foot">MEMORY · CONDUCTOR · INBOX · BEADS</p>
+          </div>
+        </div>
+      </section>
+
+      <section
+        class="setup section wrap"
+        id="setup"
+        aria-labelledby="setup-title"
+      >
+        <div class="section-heading">
+          <p class="eyebrow">03 / INITIALIZE</p>
+          <h2 id="setup-title">Make it yours.</h2>
+          <p>
+            Install your own system first. Connect your own accounts. Add web
+            access when you need it.
+          </p>
+        </div>
+        <div
+          class="setup-tabs"
+          role="tablist"
+          aria-label="Choose your setup path"
+          hidden
+        >
+          <button
+            id="tab-local"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="panel-local"
+            tabindex="0"
+          >
+            01 <span>Install locally</span>
+          </button>
+          <button
+            id="tab-web"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-web"
+            tabindex="-1"
+          >
+            02 <span>Connect ChatGPT</span>
+          </button>
+          <button
+            id="tab-existing"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="panel-existing"
+            tabindex="-1"
+          >
+            03 <span>Check your system</span>
+          </button>
+        </div>
+        <section
+          id="panel-local"
+          class="setup-panel"
+          aria-labelledby="local-title"
+        >
+          <div class="setup-explanation">
+            <span class="tag">START HERE</span>
+            <h3 id="local-title">One install.<br />Your own BORG.</h3>
+            <p>
+              Use an Apple Silicon Mac with at least 20 GB of free disk, an
+              ordinary user session, and your own provider account.
+            </p>
+            <ol class="steps">
+              <li>
+                <span>01</span>
+                <div>
+                  <strong>Choose your identity.</strong>
+                  <p>
+                    Replace <code>yourname</code> with a stable lowercase owner
+                    ID.
+                  </p>
+                </div>
+              </li>
+              <li>
+                <span>02</span>
+                <div>
+                  <strong>Install the local system.</strong>
+                  <p>
+                    Setup downloads pinned runtimes and models into your private
+                    BORG home.
+                  </p>
+                </div>
+              </li>
+              <li>
+                <span>03</span>
+                <div>
+                  <strong>Sign in and verify.</strong>
+                  <p>
+                    Read your owner-specific onboarding plan, complete the
+                    normal Codex login, then run the readiness checks.
+                  </p>
+                </div>
+              </li>
+            </ol>
+          </div>
+          <div class="setup-detail">
+            <div class="terminal">
+              <div class="terminal-header">
+                <span>TERMINAL / NEW INSTALLATION</span
+                ><button
+                  class="copy-button"
+                  type="button"
+                  data-copy="install-command"
+                  hidden
+                  aria-label="Copy installation commands"
+                >
+                  Copy <span aria-hidden="true">⧉</span>
+                </button>
+              </div>
+              <pre
+                role="region"
+                tabindex="0"
+                aria-label="Installation commands"
+              ><code id="install-command">git clone https://github.com/h3ro-dev/borg.git
+cd borg
+./install.sh --owner yourname
+"$HOME/.borg/bin/borg" onboard
+"$HOME/.borg/bin/borg" auth codex
+"$HOME/.borg/bin/borg" doctor</code></pre>
+              <div class="terminal-footer">
+                <span aria-hidden="true">↳</span> Default home:
+                <code>~/.borg</code>
+              </div>
+            </div>
+            <p class="setup-note">
+              These commands install and start local services. Codex recall and
+              capture hooks are configured automatically in the dedicated Codex
+              profile. The read-only <code>onboard</code> command prints your
+              next steps; provider sign-in and live verification remain
+              separate.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/h3ro-dev/borg/blob/master/docs/INSTALL.md"
+              >Full install &amp; recovery guide
+              <span aria-hidden="true">↗</span></a
+            >
+          </div>
+        </section>
+        <section id="panel-web" class="setup-panel" aria-labelledby="web-title">
+          <div class="setup-explanation">
+            <span class="tag">OPTIONAL / AFTER LOCAL SETUP</span>
+            <h3 id="web-title">Your brain.<br />Available from chat.</h3>
+            <p>
+              Connect an existing, running BORG to ChatGPT through your own
+              Cloudflare Access application and tunnel.
+            </p>
+            <ol class="steps">
+              <li>
+                <span>01</span>
+                <div>
+                  <strong>Verify your local installation.</strong>
+                  <p>Keep the host awake and BORG services running.</p>
+                </div>
+              </li>
+              <li>
+                <span>02</span>
+                <div>
+                  <strong>Configure your web connection.</strong>
+                  <p>
+                    Create your own tunnel, hostname, and Access policy with
+                    Managed OAuth.
+                  </p>
+                </div>
+              </li>
+              <li>
+                <span>03</span>
+                <div>
+                  <strong>Connect and test.</strong>
+                  <p>
+                    Add your MCP URL in your client’s available controls,
+                    complete sign-in, and test a reversible action.
+                  </p>
+                </div>
+              </li>
+            </ol>
+          </div>
+          <div class="setup-detail">
+            <div class="web-card">
+              <span class="module-id"
+                >LOCAL SYSTEM → YOUR GATEWAY → CHATGPT</span
+              >
+              <h4>A connection is not an installation.</h4>
+              <p>
+                An MCP URL connects to a system you already run. It does not
+                install a computer fleet or give access to anyone else’s BORG.
+              </p>
+              <p>
+                Client plan and workspace controls determine which actions are
+                available. Local health and a successful web sign-in are
+                separate checks.
+              </p>
+              <a
+                class="button primary"
+                href="https://github.com/h3ro-dev/borg/blob/master/docs/WEB.md"
+                >Follow the web setup guide
+                <span aria-hidden="true">↗</span></a
+              >
+            </div>
+            <p class="setup-note">
+              Configuration belongs on your machine. This website never asks for
+              account credentials, tokens, or tunnel secrets.
+            </p>
+          </div>
+        </section>
+        <section
+          id="panel-existing"
+          class="setup-panel"
+          aria-labelledby="existing-title"
+        >
+          <div class="setup-explanation">
+            <span class="tag">EXISTING INSTALLATION</span>
+            <h3 id="existing-title">Trust the checks.</h3>
+            <p>
+              Inspect readiness, discover the current tool schemas, and read
+              your system’s status before asking agents to act.
+            </p>
+            <p>
+              Health checks distinguish responding services, authenticated
+              memory, trusted hooks, and a pinned provider login. A running
+              process alone does not prove a completed operation.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/h3ro-dev/borg/blob/master/docs/INSTALL.md#inspect-and-operate"
+              >Operation &amp; recovery <span aria-hidden="true">↗</span></a
+            >
+          </div>
+          <div class="setup-detail">
+            <div class="terminal">
+              <div class="terminal-header">
+                <span>TERMINAL / INSPECT</span
+                ><button
+                  class="copy-button"
+                  type="button"
+                  data-copy="inspect-command"
+                  hidden
+                  aria-label="Copy inspection commands"
+                >
+                  Copy <span aria-hidden="true">⧉</span>
+                </button>
+              </div>
+              <pre
+                role="region"
+                tabindex="0"
+                aria-label="Inspection commands"
+              ><code id="inspect-command">"$HOME/.borg/bin/borg" onboard
+"$HOME/.borg/bin/borg" doctor
+"$HOME/.borg/bin/borg" tools browser_
+"$HOME/.borg/bin/borg" call borg_status
+"$HOME/.borg/bin/bd" list --json</code></pre>
+              <div class="terminal-footer">
+                <span aria-hidden="true">↳</span> Uses your installation’s local
+                authentication
+              </div>
+            </div>
+            <p class="setup-note">
+              Examples use the default home. If you chose a different location,
+              use that home’s <code>bin/</code> directory. Inspect operation
+              receipts before repeating a write after a lost connection.
+            </p>
+          </div>
+        </section>
+        <div class="platforms">
+          <span class="platform-label">PLATFORM STATUS</span
+          ><span
+            ><i class="status-dot" aria-hidden="true"></i>Apple Silicon macOS
+            <strong>Verified</strong></span
+          ><span
+            >Linux &amp; Intel Mac
+            <strong>Native acceptance pending</strong></span
+          ><span>Windows <strong>Unsupported</strong></span>
+        </div>
+        <p
+          class="copy-status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        ></p>
+      </section>
+
+      <section
+        class="principles section wrap"
+        aria-labelledby="principles-title"
+      >
+        <div>
+          <p class="eyebrow">04 / OPERATING PRINCIPLES</p>
+          <h2 id="principles-title">Ownership comes<br />with clarity.</h2>
+          <a
+            class="text-link"
+            href="https://github.com/h3ro-dev/borg#the-rules-the-system-lives-by"
+            >Read the project principles <span aria-hidden="true">↗</span></a
+          >
+        </div>
+        <div class="principle-list">
+          <article>
+            <span>01</span>
+            <div>
+              <h3>Your data starts with you.</h3>
+              <p>
+                New identities. Empty stores. Private provider profiles. No
+                inherited account sessions or connection to the author’s
+                infrastructure.
+              </p>
+            </div>
+          </article>
+          <article>
+            <span>02</span>
+            <div>
+              <h3>Evidence before activation.</h3>
+              <p>
+                Three LoRA adapters are included, but inactive. Validate exact
+                base-model compatibility and your real extraction workflow
+                before promotion. Default extraction uses pinned Qwen.
+              </p>
+              <a
+                class="text-link"
+                href="https://github.com/h3ro-dev/borg/blob/master/adapters/README.md"
+                >Read the model cards <span aria-hidden="true">↗</span></a
+              >
+            </div>
+          </article>
+          <article>
+            <span>03</span>
+            <div>
+              <h3>Open to inspection.</h3>
+              <p>
+                BORG-authored code and included adapters are MIT licensed.
+                Runtime dependencies and base models retain their own licenses,
+                documented in the source.
+              </p>
+              <a
+                class="text-link"
+                href="https://github.com/h3ro-dev/borg/blob/master/THIRD_PARTY_NOTICES.md"
+                >Licenses &amp; third-party notices
+                <span aria-hidden="true">↗</span></a
+              >
+            </div>
+          </article>
+        </div>
+      </section>
+      <section class="closing wrap" aria-label="Start building">
+        <span class="eyebrow"
+          >THE NEXT SESSION DOESN’T HAVE TO START FROM ZERO.</span
+        >
+        <div>
+          <h2>BUILD YOUR<br /><span>COLLECTIVE.</span></h2>
+          <a class="button primary" href="#setup"
+            >Initialize your system <span aria-hidden="true">↗</span></a
+          >
+        </div>
+      </section>
+    </main>
+    <footer class="footer wrap">
+      <a class="brand" href="./"
+        ><img src="./assets/mark.svg" width="30" height="34" alt="" /><span
+          >BORG<span class="brand-sub">COLLECTIVE</span></span
+        ></a
+      >
+      <p>
+        An independent open-source project.<br />Not affiliated with Star Trek
+        or its rights holders.
+      </p>
+      <nav aria-label="Footer navigation">
+        <a href="https://github.com/h3ro-dev/borg">GitHub ↗</a
+        ><a href="https://github.com/h3ro-dev/borg/blob/master/docs/INSTALL.md"
+          >Documentation ↗</a
+        ><a href="https://github.com/h3ro-dev/borg/blob/master/LICENSE"
+          >License ↗</a
+        >
+      </nav>
+    </footer>
+  </body>
+</html>

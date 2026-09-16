@@ -67,6 +67,18 @@ class ReleaseGuardTests(unittest.TestCase):
         self.assertNotIn("prior-owner", output)
         self.assertNotIn(secret, output)
 
+    def test_only_reviewed_font_bytes_are_accepted(self) -> None:
+        public_root = Path(__file__).resolve().parents[1]
+        for relative in release_guard.PUBLIC_FONT_ASSETS:
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes((public_root / relative).read_bytes())
+        self.assertEqual(release_guard.scan(self.root)[1], [])
+        path.write_bytes(path.read_bytes() + b"changed")
+        self.assertIn("public-asset-integrity-mismatch", {r.rule for r in release_guard.scan(self.root)[1]})
+        (path.parent / "unreviewed.ttf").write_bytes(b"\x00\xff")
+        self.assertIn("unexpected-binary", {r.rule for r in release_guard.scan(self.root)[1]})
+
     def test_public_examples_and_intentional_test_placeholders_are_allowed(self) -> None:
         tests = self.root / "tests"
         tests.mkdir()

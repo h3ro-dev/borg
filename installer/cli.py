@@ -15,7 +15,7 @@ from installer import config
 def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description=__doc__)
     commands = cli.add_subparsers(dest="command", required=True)
-    for name in ["init", "dependencies", "install", "start", "stop", "status", "doctor", "auth", "hook", "mcp-stdio", "tools", "call"]:
+    for name in ["init", "dependencies", "install", "start", "stop", "status", "doctor", "auth", "hook", "mcp-stdio", "tools", "call", "onboard"]:
         command = commands.add_parser(name)
         command.add_argument("--home", type=Path, default=Path(os.environ.get("BORG_HOME", Path.home() / ".borg")))
         if name in {"init", "install"}:
@@ -46,6 +46,16 @@ def parser() -> argparse.ArgumentParser:
     adapters.add_argument("operation", choices=["list", "prepare"])
     adapters.add_argument("name", nargs="?", default="all")
     adapters.add_argument("--home", type=Path, default=Path(os.environ.get("BORG_HOME", Path.home() / ".borg")))
+    fleet = commands.add_parser("fleet", help="enroll and inspect this owner's machines")
+    fleet.add_argument("--home", type=Path, default=Path(os.environ.get("BORG_HOME", Path.home() / ".borg")))
+    fleet.add_argument("operation", choices=["list", "add", "disable"])
+    fleet.add_argument("host", nargs="?")
+    fleet.add_argument("--ssh-alias")
+    fleet.add_argument("--remote-home", type=Path)
+    fleet.add_argument("--owner")
+    fleet.add_argument("--instance-id")
+    fleet.add_argument("--label")
+    fleet.add_argument("--role", action="append", default=[])
     return cli
 
 
@@ -73,6 +83,12 @@ def main(argv: list[str] | None = None) -> int:
             from installer.dependencies import prepare
             prepare(doc, system_dependencies=args.system_dependencies)
             print("Dependencies installed; application source and native acceptance are separate steps.")
+        elif args.command == "onboard":
+            from installer.onboarding import plan
+            print(json.dumps(plan(doc), indent=2))
+        elif args.command == "fleet":
+            from installer.fleet import manage
+            print(json.dumps(manage(doc, args), indent=2))
         elif args.command in {"start", "stop"}:
             from installer import services
             result = getattr(services, args.command)(doc, args.components or None)

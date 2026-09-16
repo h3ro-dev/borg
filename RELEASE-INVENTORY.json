@@ -1,7 +1,12 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 283,
+  "file_count": 301,
   "files": [
+    {
+      "bytes": 1168,
+      "path": ".github/workflows/site.yml",
+      "sha256": "533503c25b07e0762807e589e9d2552166476af4117cfc195b2ff9f8733a4242"
+    },
     {
       "bytes": 29,
       "path": ".gitignore",
@@ -13,14 +18,14 @@
       "sha256": "1ee496077ddbd98476168881ef5fdb880c8f8f5cda97e8aacaa997a6c0a3f780"
     },
     {
-      "bytes": 7472,
+      "bytes": 8602,
       "path": "README.md",
-      "sha256": "5949c80aa54529fb7038eb50a5101231cf62bf5508164c930405fdc1a57dfcf1"
+      "sha256": "4b0c28aa25c5e402cae4c4cd6fca87c7e0e380e1e4595fb60c7967be4d2bd3f3"
     },
     {
-      "bytes": 5614,
+      "bytes": 6002,
       "path": "THIRD_PARTY_NOTICES.md",
-      "sha256": "8955537ecc0108ab9b845008eabc0b5f12b72d8b9f5c82a3cc3bfa9919ee2980"
+      "sha256": "d2caa792542016f5cab26b5e544a23881e7bd8ce3a0c4b2e8dc17859b3ce4697"
     },
     {
       "bytes": 16390,
@@ -208,14 +213,14 @@
       "sha256": "5dbd10ab2ca3ac830d79b2fc16455174496cc0d04e20e4911eeddff8073aa087"
     },
     {
-      "bytes": 28288,
+      "bytes": 29844,
       "path": "connector/borg_context_server.py",
-      "sha256": "1088a0c865bb57c9c8ad732093c6a6032bb5010da0836e080ccdb4f3ad5e9c4e"
+      "sha256": "ca46a0f6348ae4f067c700e2896ff300074a313eaa32f35fb3f5e6966f35f522"
     },
     {
-      "bytes": 7432,
+      "bytes": 7861,
       "path": "connector/capabilities.py",
-      "sha256": "4ed10b0fd84526f28149e1fd90dc9f83a1205e362b58dc27ff748221efa1ddc8"
+      "sha256": "719f46566f43a258a9fe647d1b526a45caa981f287e2234286486025d42184ac"
     },
     {
       "bytes": 3349,
@@ -228,9 +233,9 @@
       "sha256": "626a4a31fec9be8d81640a4745e6ea8a0b97b8c30e663affb4817b47995a2d4a"
     },
     {
-      "bytes": 32421,
+      "bytes": 33535,
       "path": "connector/computer_tools.py",
-      "sha256": "cc66b35bb6842da5f6f847260f9cb90529a639ed1c5ba9c50730964b33e90611"
+      "sha256": "526db0cd99e874fff04219152dde0ce5653ab8b2490815d9fbfa1dbf1c9c492c"
     },
     {
       "bytes": 9415,
@@ -251,6 +256,11 @@
       "bytes": 4555,
       "path": "connector/desktop_tools.py",
       "sha256": "b47e976b390b5867fce5b88f5e23367d934cc6271c1b64f36087a19311ea79f4"
+    },
+    {
+      "bytes": 13799,
+      "path": "connector/fleet_tools.py",
+      "sha256": "930e947ad63c7439f5fdd0cf8d90bd6d73445e35303e6fb0b06800a133f70d28"
     },
     {
       "bytes": 16049,
@@ -328,9 +338,9 @@
       "sha256": "0894b284dd34af6495190116a4b7670bede640225b81155278061eabccedaf7b"
     },
     {
-      "bytes": 14959,
+      "bytes": 14976,
       "path": "connector/test_connector.py",
-      "sha256": "0140938b5cd1a2ec5ff8badaffed136a9481cace5edb2e3b61264a0c28781354"
+      "sha256": "5e136ecf9e3a8fe2a0f164ce3a8e0fc8f7050bcd46d1f43eb547bd9bb5da3f83"
     },
     {
       "bytes": 5688,
@@ -351,6 +361,11 @@
       "bytes": 4914,
       "path": "connector/test_desktop_session.py",
       "sha256": "a89b32d5d43adde9e915204f572bfb11b5fdf2b6728fa84eadf08c95b9d238a5"
+    },
+    {
+      "bytes": 7453,
+      "path": "connector/test_fleet.py",
+      "sha256": "d94489ad5500fdaee9f1051bca32bceb46a239e955789e94dc9f7128a28c5713"
     },
     {
       "bytes": 8499,
@@ -703,6 +718,11 @@
       "sha256": "4647078516660d9da47f1838ed35b7f94755d28c552ede5c8e2858b0f8d87aa5"
     },
     {
+      "bytes": 15395,
+      "path": "docs/SETUP.md",
+      "sha256": "44c1a6066eb0db50f0968538b871c0d6369e9003f4229577a126fe490c958741"
+    },
+    {
       "bytes": 3897,
       "path": "docs/WEB.md",
       "sha256": "727a626ea92499793e35fa3f21927528db05d7fa2b689784b0408e597e45d853"
@@ -848,19 +868,19 @@
       "sha256": "4a9edbc2d7704f8d88eb4d797c7d50f411533152cfb44da6b6eae45acc43fe9e"
     },
     {
-      "bytes": 5990,
+      "bytes": 6859,
       "path": "installer/cli.py",
-      "sha256": "789de08a3bd86595a43105ba7eef9463c4498357e022b977644d86ef08fcfa10"
+      "sha256": "7e8c8698a04b2e0b6e016add12633aa79f15e4219332a08f33a9c350a1f82c77"
     },
     {
-      "bytes": 9323,
+      "bytes": 9412,
       "path": "installer/clients.py",
-      "sha256": "99aa290bba63401c9ee3a514bf6cda95516f00a4a8de94aa84aa90c322d21e86"
+      "sha256": "723ab1cfd2be3cfbfcf499a8059da78063eea7a13cef47f0fdfcc3bc3cf051ca"
     },
     {
-      "bytes": 12157,
+      "bytes": 13519,
       "path": "installer/config.py",
-      "sha256": "02d30d1f425288beda122883a75753d0b7df4ccd5cd5c1e73f4b49861dc3b0ea"
+      "sha256": "6ebff0f8ab9dd4cdacaadcd647082bc29da5b866c14755fec6acc7f26f76b446"
     },
     {
       "bytes": 6057,
@@ -876,6 +896,11 @@
       "bytes": 952,
       "path": "installer/falkor_service.py",
       "sha256": "3eef045ec3268f82de4f965e6c3dacf9b9927ffdd19e9e4a9ca8a3c8297d87c9"
+    },
+    {
+      "bytes": 5214,
+      "path": "installer/fleet.py",
+      "sha256": "b8573095ab48abf8bede9582452e598afd7118078f6a571d5ee86832f58a7826"
     },
     {
       "bytes": 13947,
@@ -918,9 +943,14 @@
       "sha256": "0d34acd4457a0de2457a2e0b1ce9d29f31e1a4d9dc2db69e358ccae79f9da79c"
     },
     {
-      "bytes": 26423,
+      "bytes": 18163,
+      "path": "installer/onboarding.py",
+      "sha256": "893b78141c1971b53a1795c3c9e7b49361a131aafc37f948834baaf41ccbc19b"
+    },
+    {
+      "bytes": 27188,
       "path": "installer/release_guard.py",
-      "sha256": "923be8b01a64b7bb7c4f383e3edffdc235a73d7537a68db40231173da37a3e66"
+      "sha256": "aab108a3924399f965bd29ef20aff76291213628385639a7eb5891b42e397d9c"
     },
     {
       "bytes": 352,
@@ -963,14 +993,24 @@
       "sha256": "3e3c6f2e760d213b9e4405b159b69c60d2ac5bf3a7d51ab8d80fbcb392b0d591"
     },
     {
+      "bytes": 14901,
+      "path": "installer/test_fleet_installation.py",
+      "sha256": "afd694d9d4f8240575f6e5bc633b044a05be0d0782f63c62746def167b926c96"
+    },
+    {
       "bytes": 7977,
       "path": "installer/test_installation_integrity.py",
       "sha256": "a0c07f456bf9504adc00be53eb923dfd44de9da4b88a8ef44af652d965533b94"
     },
     {
-      "bytes": 8767,
+      "bytes": 12240,
+      "path": "installer/test_onboarding.py",
+      "sha256": "be3b8f79c7df0dbb30075cc27f266e22447eddfc43f6664d14b428571afc9a1b"
+    },
+    {
+      "bytes": 9507,
       "path": "installer/test_release_guard.py",
-      "sha256": "bf484660844c7b562f2def031b290b8a807fdb5e745a57bbe16be17d234687c8"
+      "sha256": "2b3e9d24a7ac92923eb6ee5b0abe5e353ca2209f69b68eb843a12ba442d22edf"
     },
     {
       "bytes": 3605,
@@ -1348,6 +1388,56 @@
       "sha256": "e7fbafcf0df3bf3aabbc70593a11145206b532cc69d83231d9ae295e13c63bd3"
     },
     {
+      "bytes": 2686,
+      "path": "site/app.js",
+      "sha256": "608f5329f4b0b3a12d2c92321f07a92c168f71e2900a80fd8c89400bdfa8b706"
+    },
+    {
+      "bytes": 4396,
+      "path": "site/assets/OFL.txt",
+      "sha256": "13831d02389d917d22fcfa6c79f98f8acbf61d230add0e73a4d4dc5f3bfb9e56"
+    },
+    {
+      "bytes": 78384,
+      "path": "site/assets/chakra-petch-bold.ttf",
+      "sha256": "65fbf76d95651697275e19db4d717c0e95a789ddd3476478b05292104db278a0"
+    },
+    {
+      "bytes": 78488,
+      "path": "site/assets/chakra-petch-regular.ttf",
+      "sha256": "98fcd638baa5c81ff0316b7538ce330ee3b23b1302726de3526d5933a8ecf986"
+    },
+    {
+      "bytes": 124777,
+      "path": "site/assets/collective-cube.svg",
+      "sha256": "b145d8edf792bb624cea0d7e002a34352bfb3d1879cb7bf98f8b5f61cde8d758"
+    },
+    {
+      "bytes": 3495,
+      "path": "site/assets/generate-cube.py",
+      "sha256": "1cab603b29a2e3c9ea36f57ce340920dccef9a6ee16ba1f505e7ee960bbce228"
+    },
+    {
+      "bytes": 251,
+      "path": "site/assets/mark.svg",
+      "sha256": "9d76a542ec65363b8a126da7115c117682e6b63352700e4f12af484e0ef99afc"
+    },
+    {
+      "bytes": 23037,
+      "path": "site/index.html",
+      "sha256": "54f55195d1df445813fd6133aabf678e4fd68e22ca753877dc93ecc6ae2012d3"
+    },
+    {
+      "bytes": 21653,
+      "path": "site/styles.css",
+      "sha256": "8f59fdab026a82e37ccfd581e1657e05a4926ef6a78243089767403e12300281"
+    },
+    {
+      "bytes": 10309,
+      "path": "site/verify.mjs",
+      "sha256": "9487db83ecddec44ec6a493c8bc96cab22cbf75e9a8899f0fa6ce8d25a27a025"
+    },
+    {
       "bytes": 6275,
       "path": "training/build_dataset.py",
       "sha256": "4be6c482aca8333bb9fbc919020ad99cb88f3a98324b0035ee570f2683dc0d3a"
@@ -1418,7 +1508,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "6af50325a9805f3eb20887bccfe9b9f59701834bd0314a3ca6deec0fecef1bd1",
+  "inventory_sha256": "9d9f05ed06f48443d64136db3fce58535b689667158268345456a192338fc757",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 82279128
+  "total_bytes": 82723396
 }

@@ -1,4 +1,10 @@
-# The Borg
+# BORG Collective
+
+**Your machines. Your agents. One collective.** An agent-first operating platform
+you install and control.
+
+[Explore the website](https://h3ro-dev.github.io/borg/) ·
+[Set up your collective](docs/SETUP.md)
 
 BORG gives your AI agents a shared local brain and native tools. Each installation has
 its own memory, temporal graph, computer and browser tools, conductor, Agent Inbox,
@@ -43,6 +49,7 @@ through your own Cloudflare Access application and tunnel.
 | `connector/` | Authenticated MCP gateway with native files, processes, jobs, browser, UI, SSH and credential handles; no Desktop Commander dependency |
 | `coordination/` | Native Agent Inbox, identities, grants, leased messages, work assignments and Beads bootstrap |
 | `installer/` | Independent configuration, dependency locks, service lifecycle, native client setup and readiness diagnostics |
+| `site/` | Static BORG Collective website with original artwork and local fonts |
 | `docs/` | Three papers: the fine-tuning cost audit, the memory-system build, and the conductor fleet |
 
 ## The rules the system lives by
@@ -69,6 +76,7 @@ cd borg
 ./install.sh --owner yourname
 "$HOME/.borg/bin/borg" auth codex
 "$HOME/.borg/bin/borg" doctor
+"$HOME/.borg/bin/borg" onboard
 ```
 
 Setup installs local Qdrant, FalkorDB, Ollama, models, the native connector, conductor,
@@ -79,6 +87,20 @@ until validated against their exact base models; default extraction uses pinned 
 See [installation and recovery](docs/INSTALL.md) and [web ChatGPT setup](docs/WEB.md).
 Linux and Intel artifacts are pinned, but their complete native installation is not yet
 verified. Windows is not supported by this installer.
+
+## Connect your own machines
+
+Install BORG on each machine, start its connector, then explicitly enroll its SSH
+alias and installation identity with `borg fleet add`. `fleet_hosts` discovers the
+configured targets, `fleet_tools` reads a selected target's actual tool schemas,
+and `fleet_call` routes one native operation to that target. Each target keeps its
+own credentials, process sessions, browser sessions and operation receipts.
+
+Independent requests run concurrently; work touching the same resource coordinates
+locally. Capacity is configurable per host, and there is no single-client connection
+limit. One physical desktop still has one keyboard, mouse and focus. The
+[setup guide](docs/SETUP.md) covers enrollment, conductor/provider setup, adapters
+and recovery after an uncertain result.
 
 ## The adapters
 

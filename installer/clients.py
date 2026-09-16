@@ -33,10 +33,11 @@ def tool_command(doc: dict, action: str, prefix: str = "", tool: str = "", argum
                 rows = await client.list_tools()
                 print(json.dumps([r.model_dump(mode="json") for r in rows if r.name.startswith(prefix)]))
                 return 0
-            result = await client.call_tool(tool, payload, raise_on_error=False)
+            result = await client.call_tool_mcp(tool, payload)
             print(json.dumps({"content": [item.model_dump(mode="json") for item in result.content],
-                              "structuredContent": result.structured_content, "isError": result.is_error}))
-            return 1 if result.is_error else 0
+                              "structuredContent": result.structuredContent, "isError": result.isError,
+                              "_meta": result.meta}))
+            return 1 if result.isError else 0
     try:
         return asyncio.run(invoke())
     except (ValueError, OSError, RuntimeError):
@@ -75,9 +76,10 @@ def configure_clients(doc: dict) -> dict:
     if not hub_client.resolve().is_relative_to(root / "coordination/data"):
         raise ValueError("The connector Inbox identity must belong to this installation")
     connector_path = root / "borg-context/config.json"
-    connector = config.read_private(connector_path)
-    connector["computer"]["inbox_client_config"] = str(hub_client)
-    config.write_private(connector_path, json.dumps(connector, indent=2) + "\n", replace=True)
+    with config.private_writer(connector_path) as write_connector:
+        connector = config.read_private(connector_path)
+        connector["computer"]["inbox_client_config"] = str(hub_client)
+        write_connector(json.dumps(connector, indent=2) + "\n", replace=True)
 
     # Use the existing native app-server protocol and CAS provisioning helpers.
     native = importlib.machinery.SourceFileLoader(

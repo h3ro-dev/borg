@@ -159,7 +159,7 @@ class BoundaryMiddleware(Middleware):
 
     @staticmethod
     def _lane_name(tool_name: str) -> str | None:
-        for prefix in ("desktop_", "computer_", "job_", "browser_", "remote_", "ui_", "credential_"):
+        for prefix in ("desktop_", "computer_", "job_", "browser_", "remote_", "ui_", "credential_", "fleet_"):
             if tool_name.startswith(prefix):
                 return prefix[:-1]
         return None
@@ -171,7 +171,7 @@ class BoundaryMiddleware(Middleware):
         if tool_name.startswith("desktop_"):
             from desktop_tools import READS as DESKTOP_READS
             return tool_name.removeprefix("desktop_") not in DESKTOP_READS
-        if tool_name in {"job_start", "job_cancel", "artifact_put", "remote_start", "remote_cancel",
+        if tool_name in {"fleet_call", "job_start", "job_cancel", "artifact_put", "remote_start", "remote_cancel",
                          "browser_start_session", "browser_navigate", "browser_click", "browser_type",
                          "browser_close_session", "ui_launch", "ui_quit", "ui_capture", "ui_click", "ui_type"}:
             return True
@@ -225,6 +225,17 @@ class BoundaryMiddleware(Middleware):
 
     async def on_call_tool(self, context, call_next):
         self.authorize()
+        # Verify at the actual target, including after a resident service restart.
+        # This is an identity guard, not an exactly-once or replay guarantee.
+        request_context = getattr(getattr(context, "fastmcp_context", None), "request_context", None)
+        metadata = getattr(request_context, "meta", None) or getattr(context.message, "meta", None)
+        metadata = metadata.model_dump() if hasattr(metadata, "model_dump") else metadata
+        expected = metadata.get("borg_target_identity") if isinstance(metadata, dict) else None
+        if expected is not None:
+            actual = {**getattr(self.settings, "identity", {}),
+                      "server_generation": self.ledger.generation if self.ledger else None}
+            if not isinstance(expected, dict) or expected != actual or not actual.get("instance_id"):
+                raise ToolError("BORG_POLICY_REFUSED: target identity changed; operation was not started")
         name = context.message.name
         arguments = context.message.arguments or {}
         started = time.monotonic()
@@ -250,6 +261,8 @@ class BoundaryMiddleware(Middleware):
                     "authentication_required", "busy", "permission_denied", "policy_refused",
                     "admission_required", "capability_unavailable", "rate_limited"
                 } else "outcome_unknown"
+                if (result.meta or {}).get("borg_fleet", {}).get("state") == "not_started":
+                    final_receipt_state = "failed"
                 receipt_failure = code
                 outcome = f"error:{code}"
             else:
