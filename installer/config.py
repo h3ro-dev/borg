@@ -1,6 +1,9 @@
 """Versioned instance configuration. No data or credentials are imported."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
+from functools import partial
 import hashlib
 import json
 import os
@@ -66,9 +69,33 @@ def managed_python(root: Path, path: Path) -> Path:
     return path
 
 
-def write_private(path: Path, data: str, *, replace: bool = False) -> None:
+@contextmanager
+def private_writer(path: Path):
+    """Serialize private-file updates, including the caller's read/modify step.
+
+    Use the yielded writer inside this context instead of nesting write_private.
+    Locks are persistent sidecars: unlinking them would split waiting writers.
+    """
     absolute_root(path.parent)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = path.with_name("." + path.name + ".lock")
+    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    with os.fdopen(fd, "w") as lock:
+        info = os.fstat(lock.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or info.st_mode & 0o077):
+            raise ValueError("Unsafe BORG private file lock")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield partial(_write_private, path)
+
+
+def write_private(path: Path, data: str, *, replace: bool = False) -> None:
+    with private_writer(path) as write:
+        write(data, replace=replace)
+
+
+def _write_private(path: Path, data: str, *, replace: bool = False) -> None:
+    """Write while the caller holds private_writer's shared lock."""
     if replace:
         original = path.lstat()
         if (path.is_symlink() or original.st_uid != os.getuid() or original.st_nlink != 1
@@ -217,6 +244,8 @@ def write_connector_config(doc: dict) -> None:
     root, ports = Path(doc["home"]), doc["ports"]
     state = root / "borg-context"
     config = {"version": 1, "access_mode": "owner_all", "allowed_scopes": ["*"],
+              "identity": {key: doc[key] for key in ("instance_id", "owner", "home")},
+              "fleet": {"registry_file": str(state / "fleet.json")},
               "mem0_principal": doc["memory"]["principal"],
               "mem0_url": f"http://127.0.0.1:{ports['memory']}/mcp",
               "default_scope": doc["memory"]["default_scope"], "state_root": str(state),
@@ -229,6 +258,7 @@ def write_connector_config(doc: dict) -> None:
     if platform.system() == "Darwin":
         config["ui"] = {"backend": "native_os"}
     for path, value in [(state / "config.json", config), (state / "hosts.json", []),
+                        (state / "fleet.json", {"schema": "borg-fleet/v1", "hosts": []}),
                         (state / "credentials.json", {"version": 1, "services": []})]:
         if path.exists():
             read_private(path)  # Preserve owner edits and validate custody on reruns.

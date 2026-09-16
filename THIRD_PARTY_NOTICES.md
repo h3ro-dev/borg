@@ -111,3 +111,11 @@ default.
 - No third-party source is intentionally vendored by the root installer.
   If a future release adds vendored code or binaries, add their exact notices
   before updating the publication inventory.
+
+## Website fonts
+
+The website includes Chakra Petch Regular and Bold from the
+[Google Fonts Chakra Petch distribution](https://github.com/google/fonts/tree/main/ofl/chakrapetch).
+Copyright 2018 The Chakra Petch Project Authors. Licensed under the SIL Open Font
+License 1.1; the complete license is included at `site/assets/OFL.txt`.
+The website's cube and mark are original SVG artwork.

@@ -33,10 +33,11 @@ def tool_command(doc: dict, action: str, prefix: str = "", tool: str = "", argum
                 rows = await client.list_tools()
                 print(json.dumps([r.model_dump(mode="json") for r in rows if r.name.startswith(prefix)]))
                 return 0
-            result = await client.call_tool(tool, payload, raise_on_error=False)
+            result = await client.call_tool_mcp(tool, payload)
             print(json.dumps({"content": [item.model_dump(mode="json") for item in result.content],
-                              "structuredContent": result.structured_content, "isError": result.is_error}))
-            return 1 if result.is_error else 0
+                              "structuredContent": result.structuredContent, "isError": result.isError,
+                              "_meta": result.meta}))
+            return 1 if result.isError else 0
     try:
         return asyncio.run(invoke())
     except (ValueError, OSError, RuntimeError):
