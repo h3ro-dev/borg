@@ -1,11 +1,11 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 337,
+  "file_count": 348,
   "files": [
     {
-      "bytes": 1495,
+      "bytes": 1738,
       "path": ".github/workflows/site.yml",
-      "sha256": "ba002edd682ade679b52d6dd3f9ec579b49d2846aef1790a29dadadbe0b67004"
+      "sha256": "a96e2efdd0a377f23e2af261e0e80d24f68a86e72597ba8980ca0c82914567d5"
     },
     {
       "bytes": 29,
@@ -18,9 +18,9 @@
       "sha256": "1ee496077ddbd98476168881ef5fdb880c8f8f5cda97e8aacaa997a6c0a3f780"
     },
     {
-      "bytes": 9163,
+      "bytes": 9275,
       "path": "README.md",
-      "sha256": "6940d2178d0d50b4209f4d97ad9e8babcb183963868e46cd4d13f93e92722208"
+      "sha256": "b65606451cffa65bc563b1917e30144532a535561c7315890f647331658497d5"
     },
     {
       "bytes": 2934,
@@ -28,9 +28,9 @@
       "sha256": "f27ab677c370f499e6f4af41993f9fa789ed4d137daa84ecf276b1c8550f7c49"
     },
     {
-      "bytes": 7004,
+      "bytes": 7320,
       "path": "THIRD_PARTY_NOTICES.md",
-      "sha256": "0ee4ee0b71796a6e75818484170c6e41d7bb0e63bc03848e20078020062dd286"
+      "sha256": "43581c610d374745cfa539f092a917436f49f2eecdd497958d05683d4b027bcd"
     },
     {
       "bytes": 16390,
@@ -88,9 +88,19 @@
       "sha256": "2fe2159b1ad20333911a0d6b52de1f7fe8d0960e5a413b188075aeebf8186f7f"
     },
     {
+      "bytes": 4856,
+      "path": "art/FLEET.md",
+      "sha256": "700bb572c6d13c353c71339b0cf32b4f78a70c00991d36995656dbd1e41ac665"
+    },
+    {
       "bytes": 2344,
       "path": "art/README.md",
       "sha256": "cbb9b39a08c8c6641efcfb21f6f02738f4e99dc8be9b01cda285438e8efebe92"
+    },
+    {
+      "bytes": 12901,
+      "path": "art/borg_fleet.py",
+      "sha256": "3b37d0ff8ab2bd683c2dbf62b05b498ee7699000f3fd010352495005e26c6632"
     },
     {
       "bytes": 9462,
@@ -993,9 +1003,9 @@
       "sha256": "02860640403068e6184562161f8e452cbce31746371697b461be16a371edd281"
     },
     {
-      "bytes": 27999,
+      "bytes": 28112,
       "path": "installer/release_guard.py",
-      "sha256": "bac1ec3572d339261d371247ac5c3d865f97d68d63beebf22139f4eac77b5284"
+      "sha256": "a4e796bf2ab52f30a3f39327837ba8d1dfdf8599e5fb87b72495de6a53f8b33c"
     },
     {
       "bytes": 352,
@@ -1463,14 +1473,24 @@
       "sha256": "08d6ad9b4afa2a1c5977f88b2e4499538472ca8c06f0b6910de4d36a9f124edc"
     },
     {
-      "bytes": 2686,
+      "bytes": 31139,
+      "path": "site/agent-guide.md",
+      "sha256": "e2d5eeb2ce1e090d08862be290dfb2d20577272b7262627a8018211e01d6015f"
+    },
+    {
+      "bytes": 2718,
       "path": "site/app.js",
-      "sha256": "608f5329f4b0b3a12d2c92321f07a92c168f71e2900a80fd8c89400bdfa8b706"
+      "sha256": "a2dcd419b71edeed321614e92c394ee71877413703c559b3ca9b1539b87b02c7"
     },
     {
       "bytes": 4396,
       "path": "site/assets/OFL.txt",
       "sha256": "13831d02389d917d22fcfa6c79f98f8acbf61d230add0e73a4d4dc5f3bfb9e56"
+    },
+    {
+      "bytes": 234470,
+      "path": "site/assets/borg-fleet.webp",
+      "sha256": "f7d0fd992b3fa0eb8f5d7e30cc89d2644f38ae5f7e7a68fb1517686641351cca"
     },
     {
       "bytes": 175862,
@@ -1543,9 +1563,34 @@
       "sha256": "67ea897ec7d1cff5be050c591fe643aa027e698064fd4aa682e64e64a5b442fe"
     },
     {
-      "bytes": 30318,
+      "bytes": 3344,
+      "path": "site/fleet.css",
+      "sha256": "74499fd5a361d787e2895194e060392821da98dfbb5ca989308a3e22028f76be"
+    },
+    {
+      "bytes": 6592,
+      "path": "site/guide.css",
+      "sha256": "b1466deeef059105426c7f813de5591707e8585a36aa83f5a108773c679a516c"
+    },
+    {
+      "bytes": 44265,
+      "path": "site/guide.html",
+      "sha256": "ba90e6999af51c2cb2fc7ec86d4088d46a4f1a1420599fe18e31ba26a0e92908"
+    },
+    {
+      "bytes": 1044,
+      "path": "site/guide.js",
+      "sha256": "0ef3fd6b85ade71ccb594334f5f3e4a41000f2d9167c380b95b9248d73297d2c"
+    },
+    {
+      "bytes": 34582,
       "path": "site/index.html",
-      "sha256": "6ad323ed2ba94ce3fc1872aa040d5be2507781717dec019d90d6a77a6b72a804"
+      "sha256": "cd2f8e3e2e0aec8dc5456441045e39ac7ab39e69b2bea829e6399e4423438866"
+    },
+    {
+      "bytes": 2877,
+      "path": "site/llms.txt",
+      "sha256": "bd2cceb71e4443839ddd0e05e112ad3a0a52958e516f1ab7d6f8a43e0ae39c52"
     },
     {
       "bytes": 8942,
@@ -1613,9 +1658,19 @@
       "sha256": "2b32a829bcd7c11112d2269fc0ce40f6c809dbdfa1912c77761e118273309607"
     },
     {
-      "bytes": 11028,
+      "bytes": 2918,
+      "path": "site/verify-guide.mjs",
+      "sha256": "3b1bef292bc037c13b9291bf034421a791d7e011a244e184da68a9c565bd2d09"
+    },
+    {
+      "bytes": 2009,
+      "path": "site/verify-links.mjs",
+      "sha256": "edc3d3529ea3382663faa3fdbec157352692e0d2e89e5de98ceeca111a79db7c"
+    },
+    {
+      "bytes": 12568,
       "path": "site/verify.mjs",
-      "sha256": "ff0ed6731781ec01eae4df694d4a879c64ab330b15feea54ce61b517955390c0"
+      "sha256": "22ca2be6aa6fdf9b664c9c97dcb6cea4a7891b5b59d538a4f90b59f12f212838"
     },
     {
       "bytes": 6275,
@@ -1688,7 +1743,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "6c695556e2d245c44c4a266ef1a9e416a5aec1afed79e3fa51908b309b241a31",
+  "inventory_sha256": "9c5f457eb94e4740e37716d0a5c3263047c5bd754406d254e4c0ddabb9defcfb",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 85774632
+  "total_bytes": 86127667
 }
