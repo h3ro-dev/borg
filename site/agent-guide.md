@@ -168,16 +168,17 @@ BORG_HOME="$BORG_HOME" "$NODE_BIN" \
 Routing real agents additionally requires fresh machine capacity, active work claims, matching accounts and usable provider allowance. A process, lane or listening port alone proves none of these.
 
 <details>
-<summary>Optional: Claude Code and Grok clients</summary>
+<summary>Optional: Claude Code, Grok and Cursor clients</summary>
 
-Install a compatible CLI through the provider's supported distribution. BORG does not install these CLIs or provide `borg auth claude` / `borg auth grok`. The following commands match the native help audited with the source; check your installed version's help before using them.
+Install a compatible CLI through the provider's supported distribution. BORG does not install these CLIs or provide `borg auth claude` / `borg auth grok` / `borg auth cursor`. The following commands match the native help audited with the source; check your installed version's help before using them.
 
 Create private dedicated profiles, preserving any existing profile. Run from your BORG home so unrelated project configuration is not loaded.
 
 ```sh
 cd "$BORG_HOME"
 umask 077
-mkdir -p "$BORG_HOME/providers/claude/profile" "$BORG_HOME/providers/grok/profile"
+mkdir -p "$BORG_HOME/providers/claude/profile" "$BORG_HOME/providers/grok/profile" \
+  "$BORG_HOME/providers/cursor/profile" "$BORG_HOME/providers/cursor/bin"
 ```
 
 Claude Code:
@@ -202,11 +203,22 @@ GROK_HOME="$BORG_HOME/providers/grok/profile" grok mcp doctor
 GROK_HOME="$BORG_HOME/providers/grok/profile" grok
 ```
 
+Cursor agent CLI (install as `cursor-agent`, not as `agent` if another provider already uses that name):
+
+```sh
+cursor-agent login
+cursor-agent models
+```
+
+Record a Grok model ID from that catalog into `providers.cursor.model`. Set `providers.cursor.binary` to the absolute `cursor-agent` path and enable the provider. The launch bus inherits `CURSOR_API_KEY`; it does not store the key.
+
 Test BORG in the chosen client. MCP configuration does not register Codex's four lifecycle hooks in another provider. Diagnostics do not prove a live provider login, available model or allowance. The stdio bridge consumes the home's credential privately.
 
 **Optional provider execution is a separate integration.** Claude's launch bus needs an explicit `providers.claude.binary`, enablement in `conductors/config.json` and `CLAUDE_CONFIG_DIR` in its launch environment. The included headless path has no native thread-status, mid-turn steering or provider allowance routing. A launch packet starts real work and may incur charges; it is not a setup probe.
 
 Grok's conductor needs explicit `grokBin`, `grokHome`, `expectedVersion`, `readinessMarkerPath`, `statePath` and a distinct loopback port. There is no installer service, login orchestration or supported readiness-marker provisioning flow. A matching version/marker is not live account evidence. Do not fabricate a marker; leave this provider disabled until an owner-controlled provisioning and login-evidence workflow is verified.
+
+Cursor's launch bus needs an explicit `providers.cursor.binary`, enablement, and a Grok `model` from the Cursor catalog. The included headless path is `cursor-agent -p --force`. Cloud Agents cannot reach this installation's loopback Inbox or hooks.
 
 </details>
 

@@ -15,8 +15,8 @@ its own memory, temporal graph, computer and browser tools, conductor, Agent Inb
 Beads project, provider profile and credentials. It does not connect to the author's fleet.
 
 The installer provisions the real component implementations and pinned runtimes in a
-private BORG home. Codex gets native recall and capture hooks automatically. Claude and
-Grok integrations are included for owner configuration. ChatGPT on the web can connect
+private BORG home. Codex gets native recall and capture hooks automatically. Claude, Grok and
+Cursor integrations are included for owner configuration. ChatGPT on the web can connect
 through your own Cloudflare Access application and tunnel.
 
 ```

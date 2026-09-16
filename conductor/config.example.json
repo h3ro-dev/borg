@@ -74,6 +74,16 @@
         "native-thread-status",
         "mid-turn-steer"
       ]
+    },
+    "cursor": {
+      "enabled": false,
+      "capabilities": [
+        "reasoning"
+      ],
+      "missingCapabilities": [
+        "native-thread-status",
+        "mid-turn-steer"
+      ]
     }
   }
 }

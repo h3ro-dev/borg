@@ -372,11 +372,12 @@ active work claims, matching accounts and usable provider allowance. A
 process, lane or listening port alone proves none of these.</p>
 <details>
 <summary>
-Optional: Claude Code and Grok clients
+Optional: Claude Code, Grok and Cursor clients
 </summary>
 <p>Install a compatible CLI through the provider’s supported
 distribution. BORG does not install these CLIs or provide
-<code>borg auth claude</code> / <code>borg auth grok</code>. The
+<code>borg auth claude</code> / <code>borg auth grok</code> /
+<code>borg auth cursor</code>. The
 following commands match the native help audited with the source; check
 your installed version’s help before using them.</p>
 <p>Create private dedicated profiles, preserving any existing profile.
@@ -384,7 +385,8 @@ Run from your BORG home so unrelated project configuration is not
 loaded.</p>
 <div class="guide-code" data-label="shell commands 10"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">cd &quot;$BORG_HOME&quot;
 umask 077
-mkdir -p &quot;$BORG_HOME/providers/claude/profile&quot; &quot;$BORG_HOME/providers/grok/profile&quot;</code></pre></div>
+mkdir -p &quot;$BORG_HOME/providers/claude/profile&quot; &quot;$BORG_HOME/providers/grok/profile&quot; \
+  &quot;$BORG_HOME/providers/cursor/profile&quot; &quot;$BORG_HOME/providers/cursor/bin&quot;</code></pre></div>
 <p>Claude Code:</p>
 <div class="guide-code" data-label="shell commands 11"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">CLAUDE_CONFIG_DIR=&quot;$BORG_HOME/providers/claude/profile&quot; claude auth login
 CLAUDE_CONFIG_DIR=&quot;$BORG_HOME/providers/claude/profile&quot; \
@@ -399,6 +401,15 @@ GROK_HOME=&quot;$BORG_HOME/providers/grok/profile&quot; \
   &quot;$BORG_HOME/bin/borg&quot; mcp-stdio --home &quot;$BORG_HOME&quot;
 GROK_HOME=&quot;$BORG_HOME/providers/grok/profile&quot; grok mcp doctor
 GROK_HOME=&quot;$BORG_HOME/providers/grok/profile&quot; grok</code></pre></div>
+<p>Cursor agent CLI (install as <code>cursor-agent</code>, not as
+<code>agent</code> if another provider already uses that name):</p>
+<div class="guide-code" data-label="shell commands 13"><div class="guide-code-label"><span>TERMINAL / REVIEW PLACEHOLDERS</span></div><pre tabindex="0"><code class="language-sh">cursor-agent login
+cursor-agent models</code></pre></div>
+<p>Record a Grok model ID from that catalog into
+<code>providers.cursor.model</code>. Set
+<code>providers.cursor.binary</code> to the absolute
+<code>cursor-agent</code> path and enable the provider. The launch bus
+inherits <code>CURSOR_API_KEY</code>; it does not store the key.</p>
 <p>Test BORG in the chosen client. MCP configuration does not register
 Codex’s four lifecycle hooks in another provider. Diagnostics do not
 prove a live provider login, available model or allowance. The stdio
@@ -419,6 +430,11 @@ supported readiness-marker provisioning flow. A matching version/marker
 is not live account evidence. Do not fabricate a marker; leave this
 provider disabled until an owner-controlled provisioning and
 login-evidence workflow is verified.</p>
+<p>Cursor’s launch bus needs an explicit
+<code>providers.cursor.binary</code>, enablement, and a Grok
+<code>model</code> from the Cursor catalog. The included headless path
+is <code>cursor-agent -p --force</code>. Cloud Agents cannot reach this
+installation’s loopback Inbox or hooks.</p>
 </details>
 <p>Source: <a
 href="https://github.com/h3ro-dev/borg/blob/master/docs/SETUP.md">provider

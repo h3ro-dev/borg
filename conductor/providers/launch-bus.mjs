@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const RUNTIMES = new Set(['grok', 'claude', 'codex']);
+const RUNTIMES = new Set(['grok', 'claude', 'codex', 'cursor']);
 
 function canonicalAbsolute(value, label) {
   if (typeof value !== 'string' || !path.isAbsolute(value)
@@ -25,6 +25,7 @@ export function resolveLaunchBusConfig(product) {
   const borgHome = canonicalAbsolute(product.borgHome, 'BORG_HOME');
   const grok = product.providers?.grok ?? { enabled: false };
   const claude = product.providers?.claude ?? { enabled: false };
+  const cursor = product.providers?.cursor ?? { enabled: false };
   return {
     borgHome,
     launchRoot: path.join(borgHome, 'private/provider-launches'),
@@ -39,6 +40,11 @@ export function resolveLaunchBusConfig(product) {
       claude: {
         ...claude,
         capabilities: ['headless-turn'],
+        missingCapabilities: ['native-thread-status', 'mid-turn-steer', 'provider-allowance-routing'],
+      },
+      cursor: {
+        ...cursor,
+        capabilities: ['headless-turn', 'local-agent-loop'],
         missingCapabilities: ['native-thread-status', 'mid-turn-steer', 'provider-allowance-routing'],
       },
       codex: {
@@ -77,7 +83,7 @@ export function readLaunchPacket(raw) {
     throw new Error('packet looks like an instruction override; refused');
   }
   const runtime = (raw.runtime || 'grok').toLowerCase();
-  if (!RUNTIMES.has(runtime)) throw new Error('runtime must be grok, claude, or codex');
+  if (!RUNTIMES.has(runtime)) throw new Error('runtime must be grok, claude, cursor, or codex');
   return {
     workId: raw.workId.trim(),
     runtime,
@@ -158,6 +164,30 @@ function dispatchClaude(packet, text, config) {
   return { pid: child.pid, logFile, channel: 'claude-code-headless' };
 }
 
+function dispatchCursor(packet, text, config) {
+  const provider = config.providers.cursor;
+  if (provider.enabled !== true) throw new Error('Cursor provider is disabled');
+  const binary = canonicalAbsolute(provider.binary, 'Cursor agent binary');
+  const promptFile = path.join(config.launchRoot, 'prompts', `${packet.workId}.txt`);
+  const logFile = path.join(config.launchRoot, 'logs', `${packet.workId}.cursor.log`);
+  privateWrite(promptFile, text);
+  const model = packet.model || (typeof provider.model === 'string' ? provider.model : null);
+  const args = ['-p', '--force'];
+  if (model) args.push('--model', model);
+  args.push(text);
+  const child = spawn(binary, args, {
+    cwd: packet.cwd,
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env },
+  });
+  const output = fs.createWriteStream(logFile, { flags: 'a', mode: 0o600 });
+  child.stdout.pipe(output);
+  child.stderr.pipe(output);
+  child.unref();
+  return { pid: child.pid, logFile, channel: 'cursor-agent-local', model };
+}
+
 function dispatchCodex(packet, text, config) {
   const provider = config.providers.codex;
   const nodeBin = canonicalAbsolute(provider.nodeBin, 'Node binary');
@@ -193,6 +223,7 @@ export async function launchWork(raw, options = {}) {
   let handle;
   if (packet.runtime === 'grok') handle = await dispatchGrok(packet, text, config);
   else if (packet.runtime === 'claude') handle = dispatchClaude(packet, text, config);
+  else if (packet.runtime === 'cursor') handle = dispatchCursor(packet, text, config);
   else handle = dispatchCodex(packet, text, config);
   const receipt = {
     schemaVersion: 1,

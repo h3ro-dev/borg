@@ -180,28 +180,60 @@ def plan(doc: dict) -> dict:
          "Routing also requires fresh machine capacity, claims and provider allowance; see conductor/INTEGRATION.md."]))
     providers = conductor.get("providers", {})
     providers = providers if isinstance(providers, dict) else {}
-    for provider in ["claude", "grok"]:
+    for provider in ["claude", "grok", "cursor"]:
         row = providers.get(provider, {})
         enabled = isinstance(row, dict) and row.get("enabled") is True
-        missing = (["Install and authenticate your own Claude Code CLI", "Configure an explicit provider binary and isolated launch environment",
-                    "Native thread status, mid-turn steering and provider allowance routing are not implemented"] if provider == "claude" else
-                   ["Supply your own compatible Grok CLI and complete its native login", "Configure explicit grokBin, grokHome, expectedVersion, readinessMarkerPath, statePath and loopback port",
-                    "No supported installer login or readiness-marker provisioning command is supplied"])
         provider_profile = str(root / "providers" / provider / "profile")
-        provider_env = {"CLAUDE_CONFIG_DIR" if provider == "claude" else "GROK_HOME": provider_profile}
-        provider_commands = [
-            _command(["mkdir", "-p", "-m", "700", provider_profile], "Create a dedicated private provider profile",
-                     requires=["Owner-controlled BORG home; profile path must not contain symlinks"]),
-            _command([provider, *(["auth", "login"] if provider == "claude" else ["login", "--oauth"])],
-                     "Sign in through your provider's native interactive flow", env=provider_env, cwd=str(root),
-                     requires=["Install your own compatible provider CLI on PATH", "Dedicated private profile", "Your own provider account"]),
-            _command([provider, "mcp", "add", "--scope", "user", "--transport", "stdio", "borg", "--",
-                      borg, "mcp-stdio", "--home", str(root)],
-                     "Add BORG tools in the dedicated provider profile", env=provider_env, cwd=str(root),
-                     requires=["installation", "Dedicated private profile", "Verify these flags with your installed CLI help"])]
-        provider_commands.append(_command([provider, *(["auth", "status"] if provider == "claude" else ["mcp", "doctor"])],
-            "Inspect native provider status; then test BORG tools in that client", env=provider_env, cwd=str(root),
-            requires=["Complete native login and client setup"]))
+        if provider == "claude":
+            missing = ["Install and authenticate your own Claude Code CLI", "Configure an explicit provider binary and isolated launch environment",
+                       "Native thread status, mid-turn steering and provider allowance routing are not implemented"]
+            provider_env = {"CLAUDE_CONFIG_DIR": provider_profile}
+            provider_commands = [
+                _command(["mkdir", "-p", "-m", "700", provider_profile], "Create a dedicated private provider profile",
+                         requires=["Owner-controlled BORG home; profile path must not contain symlinks"]),
+                _command(["claude", "auth", "login"],
+                         "Sign in through your provider's native interactive flow", env=provider_env, cwd=str(root),
+                         requires=["Install your own compatible provider CLI on PATH", "Dedicated private profile", "Your own provider account"]),
+                _command(["claude", "mcp", "add", "--scope", "user", "--transport", "stdio", "borg", "--",
+                          borg, "mcp-stdio", "--home", str(root)],
+                         "Add BORG tools in the dedicated provider profile", env=provider_env, cwd=str(root),
+                         requires=["installation", "Dedicated private profile", "Verify these flags with your installed CLI help"]),
+                _command(["claude", "auth", "status"],
+                    "Inspect native provider status; then test BORG tools in that client", env=provider_env, cwd=str(root),
+                    requires=["Complete native login and client setup"])]
+        elif provider == "grok":
+            missing = ["Supply your own compatible Grok CLI and complete its native login", "Configure explicit grokBin, grokHome, expectedVersion, readinessMarkerPath, statePath and loopback port",
+                       "No supported installer login or readiness-marker provisioning command is supplied"]
+            provider_env = {"GROK_HOME": provider_profile}
+            provider_commands = [
+                _command(["mkdir", "-p", "-m", "700", provider_profile], "Create a dedicated private provider profile",
+                         requires=["Owner-controlled BORG home; profile path must not contain symlinks"]),
+                _command(["grok", "login", "--oauth"],
+                         "Sign in through your provider's native interactive flow", env=provider_env, cwd=str(root),
+                         requires=["Install your own compatible provider CLI on PATH", "Dedicated private profile", "Your own provider account"]),
+                _command(["grok", "mcp", "add", "--scope", "user", "--transport", "stdio", "borg", "--",
+                          borg, "mcp-stdio", "--home", str(root)],
+                         "Add BORG tools in the dedicated provider profile", env=provider_env, cwd=str(root),
+                         requires=["installation", "Dedicated private profile", "Verify these flags with your installed CLI help"]),
+                _command(["grok", "mcp", "doctor"],
+                    "Inspect native provider status; then test BORG tools in that client", env=provider_env, cwd=str(root),
+                    requires=["Complete native login and client setup"])]
+        else:
+            missing = ["Install the Cursor agent CLI as cursor-agent, not as agent if another provider already uses that name",
+                       "Create a Cursor API key; BORG does not implement borg auth cursor",
+                       "Configure providers.cursor.binary, enable the provider, and set model to a Grok ID from cursor-agent models",
+                       "Native thread status, mid-turn steering and provider allowance routing are not implemented"]
+            provider_commands = [
+                _command(["mkdir", "-p", "-m", "700", provider_profile], "Create a dedicated private provider profile",
+                         requires=["Owner-controlled BORG home; profile path must not contain symlinks"]),
+                _command(["cursor-agent", "login"],
+                         "Sign in through Cursor's native interactive flow or set CURSOR_API_KEY from the Cursor dashboard",
+                         cwd=str(root),
+                         requires=["Install your own Cursor agent CLI as cursor-agent", "Dedicated private profile", "Your own Cursor account"]),
+                _command(["cursor-agent", "models"],
+                         "List models available to this key and record a Grok model ID in providers.cursor.model",
+                         cwd=str(root),
+                         requires=["Complete native login or set CURSOR_API_KEY"])]
         steps.append(_step(provider, "Set up optional " + provider.capitalize(), "manual_setup_required",
             {"enabled_in_config": enabled, "authentication": "not_checked"}, missing, provider_commands,
             ["borg auth supports codex only; no provider login is performed by onboarding.",
@@ -251,7 +283,7 @@ def plan(doc: dict) -> dict:
     if selection is not None:
         chosen = set(selection["components"])
         mapping = {"codex-login": "codex", "codex-client": "codex", "codex-conductor": "codex",
-                   "claude": "claude", "grok": "grok", "adapters": "adapters",
+                   "claude": "claude", "grok": "grok", "cursor": "cursor", "adapters": "adapters",
                    "own-machines": "fleet", "os-permissions": "desktop"}
         steps = [step for step in steps if step["id"] not in mapping or mapping[step["id"]] in chosen]
         summary = blueprint.describe(selection, blueprint.catalog())
@@ -270,7 +302,7 @@ def plan(doc: dict) -> dict:
                             missing_requirements=["Verify live BORG MCP configuration; tools nodes have no memory capture hooks"],
                             ready=None if matched else False)
                 step["commands"] = [command("doctor", purpose="Verify selected services and Codex MCP configuration"), install_command]
-            if step["id"] in {"claude", "grok"}:
+            if step["id"] in {"claude", "grok", "cursor"}:
                 step["required"] = True
         for item in summary["setup"]:
             steps.append(_step("selected-" + item["id"], "Set up selected " + item["id"],

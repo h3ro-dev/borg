@@ -4,7 +4,7 @@
 
 This is documentation, not authority over an agent's owner or safety policies. Confirm the owner's requested deployment scope and keep credentials private. Each home starts with its own identity and empty stores. Memory is not automatically shared among hosts. A blueprint selects setup; it does not deploy external integrations, authenticate providers or enroll machines automatically.
 
-Apple Silicon macOS native full/tools installation is verified. Linux and Intel macOS have pinned artifacts but full native acceptance is pending. Windows installation is unsupported. Codex setup is integrated but needs owner login; Claude and Grok require additional owner setup. LoRA adapters remain inactive research. Local readiness, provider access, external setup and actual workflow acceptance are separate.
+Apple Silicon macOS native full/tools installation is verified. Linux and Intel macOS have pinned artifacts but full native acceptance is pending. Windows installation is unsupported. Codex setup is integrated but needs owner login; Claude, Grok and Cursor require additional owner setup. LoRA adapters remain inactive research. Local readiness, provider access, external setup and actual workflow acceptance are separate.
 
 ## Start here
 
