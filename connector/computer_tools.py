@@ -13,7 +13,7 @@ import json
 import logging
 import os
 import re
-import select
+import selectors
 import shutil
 import subprocess
 import tempfile
@@ -43,7 +43,7 @@ DESCRIPTIONS = {
     "get_file_info": "Read a local file's metadata.",
     "edit_block": "Replace an exact text block in a local file. Read the current content, make the smallest requested change, then verify it.",
     "start_process": "Run a local command as the macOS user, or start an interactive process. Use existing installed tools. Inspect current state and applicable AGENTS.md, preserve other agents' work, and verify changes. Never print secrets or environments; use vault/hub pipes into local consumers. Login, MFA and consent belong in the normal provider interface. OS permissions still apply. An uncertain write result must be checked before retrying.",
-    "read_process_output": "Read bounded output from a command session started by this connector. Length and offset are bytes; omit offset to continue from the previous read. Explicit offsets replay retained output (up to 2 MB). Never request credential output.",
+    "read_process_output": "Read bounded output from a command session started by this connector. Length and offset are bytes; omit offset to continue from the previous read. Output drains automatically; the newest 2 MB is retained. Delayed reads may lose older bytes; retained_from reports the available boundary. Explicit offsets replay retained output. Never request credential output.",
     "interact_with_process": "Send input to a command session started by this connector. Never send credentials in tool arguments.",
     "force_terminate": "Terminate a command session started by this connector after checking its ownership and current state.",
     "list_sessions": "List command sessions started by this connector.",
@@ -76,6 +76,7 @@ FAILURE_MESSAGES = {
     "rate_limited": "The downstream provider or backend is rate limited.",
     "timeout": "The downstream operation timed out; verify whether it changed state before retrying.",
     "provider_unavailable": "The downstream provider or backend is currently unavailable.",
+    "resource_exhausted": "The native process exhausted available operating-system resources. Verify any possible state change before retrying.",
     "downstream_error": "The downstream operation failed. Verify any possible state change before retrying.",
 }
 
@@ -88,6 +89,8 @@ def classify_failure(value) -> str:
         text = type(value).__name__.casefold()
     if contains_secret(text) or "credential" in text or "secret" in text or "token material" in text:
         return "credential_withheld"
+    if any(term in text for term in ("too many open files", "borg_resource_exhausted")):
+        return "resource_exhausted"
     if "borg_busy" in text or "capability is busy" in text or "queue is full" in text:
         return "busy"
     if any(term in text for term in ("authentication required", "login required", "sign-in", "sign in", "unauthenticated")):
@@ -147,6 +150,12 @@ def describe_wire_tool(tool):
             idempotentHint=name in {"read_file", "read_multiple_files", "list_directory", "get_file_info"},
             openWorldHint=name in {"read_file", "start_process", "interact_with_process"})
         tool.meta = None
+
+
+class ProcessOutputOffsetError(ToolError):
+    """Safe numeric recovery boundary, without command/output payloads."""
+    def __init__(self, base: int, end: int):
+        super().__init__(f"BORG process output offset is outside retained output; retained_from={int(base)}, next_offset={int(end)}")
 
 
 class BoundaryMiddleware(Middleware):
@@ -286,7 +295,7 @@ class BoundaryMiddleware(Middleware):
                     "admission_required", "capability_unavailable", "rate_limited"
                 } else "outcome_unknown"
                 await asyncio.to_thread(self.ledger.finish, receipt["receipt_id"], state, code)
-            if code == "credential_withheld":
+            if code == "credential_withheld" or isinstance(exc, ProcessOutputOffsetError):
                 raise
             suffix = f" receipt={receipt['receipt_id']}" if receipt is not None else ""
             raise ToolError(f"BORG_{code.upper()}: {FAILURE_MESSAGES[code]}{suffix}") from None
@@ -509,6 +518,72 @@ class NativeComputer:
             return {"searches": [{"search_id": key, "remaining": len(value["rows"]) - value["offset"]}
                                  for key, value in self._searches.items()]}
 
+    def _process_session(self, pid):
+        with self._registry_lock:
+            proc = self._processes.get(int(pid))
+            if proc is None:
+                raise ToolError("BORG process session not found")
+            return proc, self._process_output[int(pid)]
+
+    @staticmethod
+    def _close_stdin(proc, state):
+        # A writer holds this lock for at most its bounded write deadline.
+        with state["input_lock"]:
+            if proc.stdin is not None and not proc.stdin.closed:
+                proc.stdin.close()
+
+    def _pump_process(self, proc, state, selector):
+        """Sole owner of stdout/stderr: drain even with no connected reader."""
+        try:
+            while not state["stop"].is_set():
+                if selector.get_map():
+                    for key, _ in selector.select(0.05):
+                        try:
+                            chunk = os.read(key.fd, 65536)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            key.fileobj.close()
+                            continue
+                        with state["condition"]:
+                            state["data"].extend(chunk)
+                            excess = max(0, len(state["data"]) - MAX_FILE_BYTES)
+                            if excess:
+                                del state["data"][:excess]
+                                state["base"] += excess
+                            state["condition"].notify_all()
+                else:
+                    state["stop"].wait(0.05)
+                returncode = proc.poll()
+                if returncode is not None:
+                    self._close_stdin(proc, state)
+                if not selector.get_map():
+                    with state["condition"]:
+                        state["eof"] = True
+                        state["condition"].notify_all()
+                    if returncode is not None:
+                        break
+        except Exception:
+            # Never log output or arbitrary OS exception text. Readers must not
+            # mistake incomplete capture for successful, empty command output.
+            with state["condition"]:
+                state["error"] = True
+                state["condition"].notify_all()
+        finally:
+            selector.close()
+            for stream in (proc.stdout, proc.stderr):
+                stream.close()
+            # EOF alone must not close a still-running interactive command's
+            # stdin. On capture failure, keep monitoring until exit/termination.
+            while proc.poll() is None and not state["stop"].wait(0.05):
+                pass
+            self._close_stdin(proc, state)
+            with state["condition"]:
+                state["eof"] = True
+                state["done"].set()
+                state["condition"].notify_all()
+
     def start_process(self, command: str, cwd: str | None = None, timeout_ms: int = 1000,
                       shell: str | None = None, origin: Literal["llm", "ui"] = "llm",
                       verbose_timing: bool = False) -> dict:
@@ -519,14 +594,57 @@ class NativeComputer:
         if executable is None or Path(executable).name not in {"sh", "bash", "zsh", "dash", "ksh"}:
             raise ToolError("BORG capability unavailable: requested shell must be an installed POSIX shell")
         working = str(_path(cwd)) if cwd else str(Path.home())
-        proc = subprocess.Popen([executable, "-lc", command], cwd=working,
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                bufsize=0)
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            os.set_blocking(stream.fileno(), False)
-        with self._registry_lock:
-            self._processes[proc.pid] = proc
-            self._process_output[proc.pid] = {"data": bytearray(), "base": 0, "cursor": 0}
+        state = {"data": bytearray(), "base": 0, "cursor": 0,
+                 "condition": threading.Condition(), "read_lock": threading.Lock(),
+                 "input_lock": threading.Lock(), "terminate_lock": threading.Lock(),
+                 "stop": threading.Event(), "done": threading.Event(), "eof": False, "error": False}
+        # DefaultSelector uses kqueue/epoll/poll on supported hosts, not select's
+        # FD_SETSIZE-limited descriptor bitmap.
+        selector = selectors.DefaultSelector()
+        proc = None
+        pump = None
+        try:
+            proc = subprocess.Popen([executable, "-lc", command], cwd=working,
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    bufsize=0)
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                os.set_blocking(stream.fileno(), False)
+            for stream in (proc.stdout, proc.stderr):
+                selector.register(stream, selectors.EVENT_READ)
+            pump = threading.Thread(target=self._pump_process, args=(proc, state, selector),
+                                    name=f"borg-output-{proc.pid}", daemon=True)
+            with self._registry_lock:
+                self._processes[proc.pid] = proc
+                self._process_output[proc.pid] = state
+                pump.start()
+        except Exception:
+            # Only this newly spawned child belongs to failed initialization.
+            # It may already have performed side effects; do not imply rollback.
+            state["stop"].set()
+            cleanup_complete = True
+            if proc is not None:
+                with self._registry_lock:
+                    if self._processes.get(proc.pid) is proc:
+                        self._processes.pop(proc.pid, None)
+                        self._process_output.pop(proc.pid, None)
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    cleanup_complete = False
+            if pump is not None and pump.ident is not None:
+                pump.join(timeout=3)
+                cleanup_complete = cleanup_complete and not pump.is_alive()
+            else:
+                selector.close()
+                if proc is not None:
+                    for stream in (proc.stdin, proc.stdout, proc.stderr):
+                        stream.close()
+            if proc is None:
+                raise
+            detail = "owned child stopped" if cleanup_complete else "child cleanup incomplete"
+            raise ToolError(f"BORG process setup failed for pid={proc.pid}; command may have run; {detail}. Verify effects before retrying.") from None
         time.sleep(min(max(int(timeout_ms), 0), 250) / 1000)
         result = {"pid": proc.pid, "PID": proc.pid, "process ID": proc.pid,
                 "message": f"process ID: {proc.pid}", "running": proc.poll() is None,
@@ -539,82 +657,82 @@ class NativeComputer:
                             length: int = MAX_OUTPUT_BYTES, offset: int | None = None,
                             verbose_timing: bool = False) -> dict:
         started = time.monotonic()
-        proc = self._processes.get(int(pid));
-        if proc is None: raise ToolError("BORG process session not found")
-        state = self._process_output[int(pid)]
-        start = state["cursor"] if offset is None else int(offset)
-        if length < 0 or start < 0:
-            raise ToolError("BORG process output length and offset must be nonnegative bytes")
-        if start < state["base"] or start > state["base"] + len(state["data"]):
-            raise ToolError("BORG process output offset is outside retained output; use the returned next_offset")
+        proc, state = self._process_session(pid)
         limit = min(int(length), MAX_OUTPUT_BYTES)
-        needed = max(0, start + limit - state["base"] - len(state["data"]))
         deadline = time.monotonic() + min(max(int(timeout_ms), 0), 5000) / 1000
-        streams = [stream for stream in (proc.stdout, proc.stderr) if not stream.closed]
-        size = 0
-        while streams and size < needed:
-            ready, _, _ = select.select(streams, [], [], max(0, deadline - time.monotonic()))
-            if not ready: break
-            for stream in ready:
-                try:
-                    chunk = os.read(stream.fileno(), needed - size)
-                except BlockingIOError:
-                    continue
-                if chunk:
-                    state["data"].extend(chunk)
-                    size += len(chunk)
-                else:
-                    streams.remove(stream)
-                    stream.close()
-                if size == needed: break
-            if time.monotonic() >= deadline: break
-        excess = max(0, len(state["data"]) - MAX_FILE_BYTES)
-        if excess:
-            del state["data"][:excess]
-            state["base"] += excess
-        data = bytes(state["data"][start - state["base"]:start - state["base"] + limit])
-        next_offset = start + len(data)
-        state["cursor"] = max(state["cursor"], next_offset)
-        returncode = proc.poll()
-        if returncode is not None and proc.stdin is not None and not proc.stdin.closed:
-            proc.stdin.close()
-        result = {"pid": proc.pid, "output": data.decode("utf-8", "replace"),
-                  "running": returncode is None, "returncode": returncode,
-                  "offset": start, "next_offset": next_offset, "retained_from": state["base"],
-                  "bytes": len(data), "truncated": bool(limit and len(data) == limit)}
+        # Serialize the shared default cursor, but release the condition while
+        # waiting so the pump and other processes always keep progressing.
+        with state["read_lock"], state["condition"]:
+            start = state["cursor"] if offset is None else int(offset)
+            if limit < 0 or start < 0:
+                raise ToolError("BORG process output length and offset must be nonnegative bytes")
+            lost = False
+            while True:
+                base = state["base"]
+                end = base + len(state["data"])
+                if offset is None and start < base:
+                    start, lost = base, True
+                if start < base or start > end:
+                    raise ProcessOutputOffsetError(base, end)
+                if state["error"]:
+                    raise ToolError("BORG process output capture failed; command may still be running. Verify its state before retrying.")
+                remaining = deadline - time.monotonic()
+                if end - start >= limit or state["eof"] or remaining <= 0:
+                    break
+                state["condition"].wait(remaining)
+            data = bytes(state["data"][start - base:start - base + limit])
+            next_offset = start + len(data)
+            state["cursor"] = max(state["cursor"], next_offset)
+            returncode = proc.poll()
+            result = {"pid": proc.pid, "output": data.decode("utf-8", "replace"),
+                      "running": returncode is None, "returncode": returncode,
+                      "offset": start, "next_offset": next_offset, "retained_from": base,
+                      "bytes": len(data), "truncated": lost or bool(limit and len(data) == limit)}
         if verbose_timing:
             result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
         return result
 
     def interact_with_process(self, pid: int, input: str = "") -> dict:
-        proc = self._processes.get(int(pid));
-        if proc is None or proc.stdin is None: raise ToolError("BORG process session not found")
+        proc, state = self._process_session(pid)
         data = input.encode()
         if len(data) > MAX_OUTPUT_BYTES:
             raise ToolError("BORG process input exceeds the bounded write size")
         sent = 0
-        deadline = time.monotonic() + 1.0
-        while sent < len(data):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not select.select([], [proc.stdin], [], max(0, remaining))[1]:
-                raise ToolError(f"BORG process input timed out after {sent} bytes; inspect the process before retrying")
-            try:
-                sent += os.write(proc.stdin.fileno(), data[sent:])
-            except BlockingIOError:
-                continue
+        with state["input_lock"]:
+            if proc.stdin.closed or proc.poll() is not None:
+                raise ToolError("BORG process input is closed")
+            with selectors.DefaultSelector() as selector:
+                selector.register(proc.stdin, selectors.EVENT_WRITE)
+                deadline = time.monotonic() + 1.0
+                while sent < len(data):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(max(0, remaining)):
+                        raise ToolError(f"BORG process input timed out after {sent} bytes; inspect the process before retrying")
+                    try:
+                        sent += os.write(proc.stdin.fileno(), data[sent:])
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        raise ToolError(f"BORG process input closed after {sent} bytes; inspect the process before retrying") from None
         return {"pid": proc.pid, "sent": sent}
 
     def force_terminate(self, pid: int) -> dict:
-        proc = self._processes.get(int(pid));
-        if proc is None: return {"pid": int(pid), "terminated": False}
-        if proc.poll() is None: proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill(); proc.wait(timeout=2)
-        for stream in (proc.stdin, proc.stdout, proc.stderr):
-            if stream is not None:
-                stream.close()
+        with self._registry_lock:
+            if int(pid) not in self._processes:
+                return {"pid": int(pid), "terminated": False}
+        proc, state = self._process_session(pid)
+        with state["terminate_lock"]:
+            if proc.poll() is None: proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill(); proc.wait(timeout=2)
+            # Give the pump a chance to capture final output. A descendant may
+            # retain the pipe; do not wait forever or kill unrelated processes.
+            if not state["done"].wait(0.2):
+                state["stop"].set()
+                if not state["done"].wait(2):
+                    raise ToolError(f"BORG process pid={proc.pid} stopped but stream cleanup is incomplete")
         return {"pid": proc.pid, "terminated": True}
 
     def list_sessions(self) -> dict:
@@ -629,3 +747,4 @@ def mount_computer(server, config):
     for name in DESCRIPTIONS:
         function = getattr(native, name)
         server.tool(name=f"computer_{name}")(function)
+    return native

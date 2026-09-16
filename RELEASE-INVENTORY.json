@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 357,
+  "file_count": 363,
   "files": [
     {
       "bytes": 1914,
@@ -233,9 +233,9 @@
       "sha256": "1600e1b9bb2eda4fad5790d5ef17bb17d2e868439b58fceebcad09e1af3c071d"
     },
     {
-      "bytes": 4373,
+      "bytes": 5983,
       "path": "connector/README.md",
-      "sha256": "8a62755ffbe67c828e512d38fcaf0e1cc89b006c998248b82e9de28e0902dc8c"
+      "sha256": "16cc2db889c1afa8a5c9a9b3946bd9c814f44bb6c90612479e65b7017b8c2581"
     },
     {
       "bytes": 791,
@@ -248,9 +248,9 @@
       "sha256": "5dbd10ab2ca3ac830d79b2fc16455174496cc0d04e20e4911eeddff8073aa087"
     },
     {
-      "bytes": 29844,
+      "bytes": 30579,
       "path": "connector/borg_context_server.py",
-      "sha256": "ca46a0f6348ae4f067c700e2896ff300074a313eaa32f35fb3f5e6966f35f522"
+      "sha256": "1da7e9bab3f2dfcb73de8ce2f990c426142b5491c47078bbaf2335ab007655c2"
     },
     {
       "bytes": 7861,
@@ -263,14 +263,14 @@
       "sha256": "a466f26be534368c082f8baa00be2cefa87f85617787d1a11342abb47a668634"
     },
     {
-      "bytes": 8090,
+      "bytes": 8184,
       "path": "connector/cloudflare_gateway.py",
-      "sha256": "626a4a31fec9be8d81640a4745e6ea8a0b97b8c30e663affb4817b47995a2d4a"
+      "sha256": "c2d180488c05184b44efeda60255142a605ebe9e1287de8f83d0ad46c4fb0b7a"
     },
     {
-      "bytes": 33535,
+      "bytes": 39887,
       "path": "connector/computer_tools.py",
-      "sha256": "526db0cd99e874fff04219152dde0ce5653ab8b2490815d9fbfa1dbf1c9c492c"
+      "sha256": "1a9d13e51839f275f8ffb45b012b878ba114474da9386542146eb8175927bc4c"
     },
     {
       "bytes": 9415,
@@ -298,14 +298,14 @@
       "sha256": "930e947ad63c7439f5fdd0cf8d90bd6d73445e35303e6fb0b06800a133f70d28"
     },
     {
-      "bytes": 16049,
+      "bytes": 16169,
       "path": "connector/job_tools.py",
-      "sha256": "39b91c88b7dcaa3acca48999ff0389e6c86d7328d82896b7b374c6ccdb994465"
+      "sha256": "862d0c1398d88cf0219c33c1650a006d8309c16daff984d0de2bc3320ab4e137"
     },
     {
-      "bytes": 18851,
+      "bytes": 18999,
       "path": "connector/native_browser.py",
-      "sha256": "4e9b79fdfa90848ef0d15b436798f4fad0d6c58e3e04fc57470f0e897b9c1de6"
+      "sha256": "40d0329bd8ab39cd35f6de3d0dcd5c8d23aa5c11952dba32619b4e4cb9318fb8"
     },
     {
       "bytes": 6914,
@@ -318,9 +318,19 @@
       "sha256": "49aed0c2e7aab70017a2b8a5d2ebfbd88b89ff6df286a55e77519f89be0cb495"
     },
     {
-      "bytes": 7070,
+      "bytes": 7463,
+      "path": "connector/process_handoff.py",
+      "sha256": "f5f6fa044ac3c09f9a035aca48820c06e3ce6450437f66d60bd57796f83a5e79"
+    },
+    {
+      "bytes": 1650,
+      "path": "connector/process_resources.py",
+      "sha256": "fc5589a3692aa250ef6d6690746579f009f98b62ac040b546829b2b85f67e58d"
+    },
+    {
+      "bytes": 7218,
       "path": "connector/remote_tools.py",
-      "sha256": "ef73aa4349c89039c514972004d2b543c132a728ae55a5a9998bb386a69f549f"
+      "sha256": "64810037f4e628297f15779206f341bb63433c298ba79ca7631a6ee19bfbd4ee"
     },
     {
       "bytes": 6942,
@@ -406,6 +416,21 @@
       "bytes": 8499,
       "path": "connector/test_independent_settings.py",
       "sha256": "9dfe7b26bec7360fe0305dc9708e7ada6ce3109964a040f05e3a914d9be73948"
+    },
+    {
+      "bytes": 8806,
+      "path": "connector/test_process_handoff.py",
+      "sha256": "53e64f90967b2b3aae2705f34fb9eb5f49d4738a7d1c170772da6e55947942c1"
+    },
+    {
+      "bytes": 14668,
+      "path": "connector/test_process_lifecycle.py",
+      "sha256": "bab121c34bf5bedda5b301e69cb67f8eeb3613d6a5045f371a7d04a6563212fd"
+    },
+    {
+      "bytes": 2119,
+      "path": "connector/test_process_resources.py",
+      "sha256": "ef9908cf64b3729c7ea3653f50ac19ba555567c9997a5ac1bdb01803a6739283"
     },
     {
       "bytes": 8418,
@@ -1033,9 +1058,9 @@
       "sha256": "fc04cd7fd80c989480c498a11da93f199db8864e9706d6437014789552ab5f9b"
     },
     {
-      "bytes": 10528,
+      "bytes": 10652,
       "path": "installer/services.py",
-      "sha256": "1132d189750aec6d95d06f778101dcd5baf9bfef5f3ff01407e0ca771b007688"
+      "sha256": "57221bb53ec2a368bb17491d3a209613539d618914dc27f00e3e4789f0b495c9"
     },
     {
       "bytes": 1354,
@@ -1081,6 +1106,11 @@
       "bytes": 9510,
       "path": "installer/test_release_guard.py",
       "sha256": "846c401865704f0cd8a3b62971a957ed12067059db33ea05b09103783d074dc2"
+    },
+    {
+      "bytes": 1547,
+      "path": "installer/test_service_limits.py",
+      "sha256": "387ae7d5523e977c9af1e3ae56936c194887661b0df4ad9e377dcf5337bcfeef"
     },
     {
       "bytes": 3605,
@@ -1788,7 +1818,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "a39d1718603bf4aa251d80a8fe77258401cbb0b62e8eb4eea40d016b59b0724c",
+  "inventory_sha256": "c7c9d2f6152074f32aa6ab42f474eae1dac852c0c86f652dec91bc281dda232b",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 87607667
+  "total_bytes": 87653251
 }

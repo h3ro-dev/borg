@@ -323,7 +323,7 @@ class JobStore:
         return {"artifacts": rows}
 
 
-def mount_jobs(server, config):
+def mount_jobs(server, config, handoff=None):
     from runtime_paths import borg_home
     root = Path(config.get("jobs_root") or (borg_home() / "borg-context"))
     store = JobStore(root)
@@ -354,4 +354,7 @@ def mount_jobs(server, config):
     }
     for name in TOOL_NAMES:
         function = getattr(store, method_names[name])
+        if handoff:
+            function = handoff.store_function(store, name, function)
         server.tool(name=name, annotations=annotations[name], description=descriptions[name])(function)
+    return store

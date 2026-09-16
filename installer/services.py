@@ -115,7 +115,9 @@ def install_definition(doc: dict, name: str, spec: dict) -> Path:
             "WorkingDirectory": spec["cwd"], "EnvironmentVariables": spec["env"],
             "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 15, "ExitTimeOut": 10,
             "StandardOutPath": str(logs / (name + ".log")), "StandardErrorPath": str(logs / (name + ".log")),
-            "Umask": 0o077})
+            "Umask": 0o077,
+            **({"SoftResourceLimits": {"NumberOfFiles": 8192}}
+               if name in {"connector", "gateway"} else {})})
     else:
         directory = Path.home() / ".config/systemd/user"
         directory.mkdir(parents=True, exist_ok=True)

@@ -332,7 +332,7 @@ class BrowserStore:
         return {"session_id": key, "state": row["state"]}
 
 
-def mount_browser(server, config):
+def mount_browser(server, config, handoff=None):
     store = BrowserStore(config)
     annotations = {
         "browser_start_session": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
@@ -357,4 +357,8 @@ def mount_browser(server, config):
         "browser_close_session": "Close one owned BORG browser session after process identity verification.",
     }
     for name in TOOL_NAMES:
-        server.tool(name=name, annotations=annotations[name], description=descriptions[name])(getattr(store, name.removeprefix("browser_")))
+        function = getattr(store, name.removeprefix("browser_"))
+        if handoff:
+            function = handoff.store_function(store, name, function)
+        server.tool(name=name, annotations=annotations[name], description=descriptions[name])(function)
+    return store

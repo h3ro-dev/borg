@@ -27,6 +27,7 @@ from fastmcp.client.auth import BearerAuth
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from fastmcp.server.dependencies import get_access_token
+from process_resources import descriptor_status
 from runtime_paths import borg_home, loopback_mcp_url
 
 HOME = Path.home()
@@ -345,6 +346,7 @@ class BorgContext:
         except Exception:
             pass
         return {"observed_at": _now(), "connector": {"status": "PASS"},
+            "process_resources": descriptor_status(),
             "concurrency": self._scheduler.status() if hasattr(self, "_scheduler") else {"mode": "unknown"},
             "mem0": mem0_health,
             "access_mode": "owner_all", "project_roots": [str(p) for p in self.settings.project_roots],
@@ -512,17 +514,27 @@ def build_server(settings: Settings) -> FastMCP:
         description="Read one durable payload-free BORG operation receipt by UUID.")(operation_status)
     server.tool(name="borg_operations_recent", annotations=READ_ONLY,
         description="List recent payload-free BORG operation receipts for reconciliation after disconnects or restarts.")(operations_recent)
+    handoff = None
     if settings.computer:
-        mount_computer(server, settings.computer)
+        if settings.computer.get("handoff"):
+            from computer_tools import NativeComputer, DESCRIPTIONS
+            from process_handoff import ComputerHandoff
+            computer = ComputerHandoff(NativeComputer(), settings.computer["handoff"],
+                settings.identity, settings.inbound_authorization_file)
+            handoff = computer
+            for name in DESCRIPTIONS:
+                server.tool(name="computer_" + name)(getattr(computer, name))
+        else:
+            mount_computer(server, settings.computer)
         from job_tools import mount_jobs
-        mount_jobs(server, {"jobs_root": str(settings.state_root), **settings.computer})
+        mount_jobs(server, {"jobs_root": str(settings.state_root), **settings.computer}, handoff)
     if settings.browser:
         from native_browser import mount_browser
-        mount_browser(server, {"root": str(settings.state_root / "browser"), **settings.browser})
+        mount_browser(server, {"root": str(settings.state_root / "browser"), **settings.browser}, handoff)
     if settings.remote:
         from remote_tools import mount_remote
         mount_remote(server, {"hosts_file": str(settings.state_root / "hosts.json"),
-                              "jobs_root": str(settings.state_root), **settings.remote})
+                              "jobs_root": str(settings.state_root), **settings.remote}, handoff)
     if settings.ui:
         from native_ui import mount_ui
         mount_ui(server, settings.ui)
@@ -544,6 +556,8 @@ def main() -> None:
                         default=Path(os.environ.get("BORG_CONFIG_FILE", MEMORY / "borg-context/config.json")))
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
+    from process_resources import configure_descriptor_limit
+    configure_descriptor_limit()
     build_server(Settings.load(args.config)).run(transport="http", host="127.0.0.1", port=args.http,
                                                 stateless_http=True, show_banner=False)
 
