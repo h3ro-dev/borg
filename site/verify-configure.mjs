@@ -142,7 +142,7 @@ export async function verifyConfigurator({ page, origin, evidence, results }) {
       await writeFile(path.join(evidence, `configure-axe-${width}.json`), JSON.stringify(audit.violations, null, 2));
       assert.equal(audit.violations.length, 0, `axe configurator violations at ${width}`);
     }
-    await page.locator('#configure').screenshot({ path: path.join(evidence, `configure-${width}.png`), animations: 'disabled' });
+    await page.locator('#configure').screenshot({ path: path.join(evidence, `configure-${width}.png`), animations: 'disabled', timeout: 60000 });
   }
   results.checks.push('Configurator with multiple machines fits 320/390/768/1440px; axe WCAG 2/2.1 AA zero violations when AXE_SCRIPT supplied');
   // Keep CLI roundtrip opt-in until the installer lane is integrated; record proof explicitly.

@@ -178,7 +178,7 @@ async function start() {
     ];
     for (const [key, label, max, step] of numericFields) {
       const input = el('input', { id: `workload-${key}`, type: 'number', min: 0, max, step, required: true,
-        value: machine.workload[key], disabled: machine.profile === 'tools' && key === 'memory_millions', oninput: event => {
+        value: machine.workload[key], oninput: event => {
           machine.workload[key] = event.target.value === '' ? null : event.target.valueAsNumber;
           refresh();
         } });
@@ -188,7 +188,6 @@ async function start() {
       machine.workload.context_tokens = Number(event.target.value);
       refresh();
     });
-    contextSelect.disabled = machine.profile === 'tools';
     workload.append(field('Local model context', contextSelect));
     editor.replaceChildren(
       el('div', { class: 'editor-heading' }, el('h3', {}, 'Configure this machine'),

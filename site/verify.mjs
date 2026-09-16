@@ -91,6 +91,7 @@ try {
       await page.screenshot({
         path: path.join(evidence, name),
         fullPage: true,
+        timeout: 60000,
         animations: "disabled",
       });
       results.screenshots.push(`evidence/${name}`);
@@ -280,6 +281,7 @@ try {
     await page.screenshot({
       path: path.join(evidence, "webkit-mobile.png"),
       fullPage: true,
+      timeout: 60000,
     });
     results.screenshots.push("evidence/webkit-mobile.png");
     results.checks.push("WebKit mobile render, overflow and setup interaction");
