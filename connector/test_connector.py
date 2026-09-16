@@ -87,7 +87,7 @@ class ConnectorTests(unittest.TestCase):
     def test_http_tool_contract_and_annotations(self):
         rows = self.rpc("tools/list").json()["result"]["tools"]
         tools = {t["name"]: t for t in rows}
-        self.assertEqual(set(tools), {"borg_status", "borg_search", "borg_projects", "borg_project_context", "borg_remember", "borg_forget", "borg_tool_search", "borg_capabilities", "borg_operation_status", "borg_operations_recent"})
+        self.assertEqual(set(tools), {"borg_status", "borg_search", "borg_projects", "borg_project_context", "borg_remember", "borg_forget", "borg_tool_search", "borg_capabilities", "borg_operation_status", "borg_operations_recent", "borg_identity"})
         self.assertFalse(tools["borg_remember"]["annotations"]["readOnlyHint"])
         self.assertTrue(tools["borg_forget"]["annotations"]["destructiveHint"])
 
