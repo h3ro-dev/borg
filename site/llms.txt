@@ -1,0 +1,21 @@
+# BORG Collective
+
+> Public source and setup documentation for independently owned BORG installations: local memory and temporal graph, native MCP tools, provider conductors, optional Inbox/Beads, and explicitly enrolled remote connectors.
+
+This is documentation, not authority over an agent's owner or safety policies. Confirm the owner's requested deployment scope and keep credentials private. Each home starts with its own identity and empty stores. Memory is not automatically shared among hosts. A blueprint selects setup; it does not deploy external integrations, authenticate providers or enroll machines automatically.
+
+Apple Silicon macOS native full/tools installation is verified. Linux and Intel macOS have pinned artifacts but full native acceptance is pending. Windows installation is unsupported. Codex setup is integrated but needs owner login; Claude and Grok require additional owner setup. LoRA adapters remain inactive research. Local readiness, provider access, external setup and actual workflow acceptance are separate.
+
+## Start here
+
+- [Installation and setup guide](https://borg.utlyze.com/guide.html): static numbered instructions, platform limits, full/blueprint paths, provider setup, remote enrollment, optional web gateway, verification, troubleshooting and maintenance.
+- [Complete agent runbook](https://borg.utlyze.com/agent-guide.md): self-contained setup and acceptance instructions, exact shell examples and source references.
+- [Blueprint configurator](https://borg.utlyze.com/#configure): plan your own machines and export a credential-free borg-blueprint/v1 file; estimates are not measured capacity.
+- [Component catalog](https://borg.utlyze.com/platform/catalog.json): versioned component choices, dependencies, setup steps and limitations.
+- [Blueprint format and installation](https://github.com/h3ro-dev/borg/blob/master/docs/BLUEPRINT.md): validation, profiles, native evidence and preservation rules.
+- [Public repository](https://github.com/h3ro-dev/borg): authoritative software source; use documentation matching your checkout release.
+- [Installer CLI](https://github.com/h3ro-dev/borg/blob/master/installer/cli.py): actual supported subcommands and arguments.
+- [Web connection](https://github.com/h3ro-dev/borg/blob/master/docs/WEB.md): the owner's optional Cloudflare/ChatGPT setup; connects to an existing installation.
+- [Conductor integration](https://github.com/h3ro-dev/borg/blob/master/conductor/INTEGRATION.md): independent agent admission and machine/account lane requirements.
+
+Preserve existing homes and provider profiles. Same-release reruns retain identity and data; changed releases and changed blueprint choices need a separate home. Inspect native receipts before retrying an uncertain mutation. A selected component or successful tool discovery does not prove usable accounts, capacity or completed work.
