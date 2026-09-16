@@ -14,7 +14,7 @@ def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description=__doc__)
     commands = cli.add_subparsers(dest="command", required=True)
     for name in ["init", "dependencies", "install", "start", "stop", "status", "doctor", "auth", "hook", "mcp-stdio", "tools", "call", "onboard"]:
-        command = commands.add_parser(name)
+        command = commands.add_parser(name, allow_abbrev=name != "install")
         command.add_argument("--home", type=Path, default=Path(os.environ.get("BORG_HOME", Path.home() / ".borg")))
         if name in {"init", "install"}:
             command.add_argument("--owner")
@@ -86,6 +86,9 @@ def main(argv: list[str] | None = None) -> int:
             existing = blueprint.check_existing(args.home, selection)
             if existing and args.owner and existing["owner"] != args.owner:
                 raise ValueError("Existing BORG belongs to another owner; use a separate home")
+            owner = args.owner if args.owner is not None else (
+                existing["owner"] if existing else getpass.getuser().lower().replace(".", "-"))
+            config.validate_install_inputs(args.home, owner, args.port_base, args.projects)
             from installer.installation import source_files
             source_files()  # Refuse an incomplete package before creating owner state.
             if existing:

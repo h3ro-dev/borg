@@ -192,6 +192,41 @@ class BlueprintTests(unittest.TestCase):
             config.initialize(self.root, "different", blueprint_selection=doc["blueprint"])
         self.assertEqual(before, self.snapshot())
 
+    def test_shell_rejects_abbreviations_unknown_options_and_missing_values_before_bootstrap(self):
+        path = self.base / "invalid.json"
+        path.write_text('{}')
+        for options in [
+            ["--bluepr", str(path), "--mach", "node-1"],
+            ["--blueprint", str(path), "--mach", "node-1"],
+            ["--unknown"], ["--blueprint"], ["--owner", "--no-start"],
+        ]:
+            with self.subTest(options=options):
+                result = subprocess.run([str(SOURCE / "install.sh"), "--home", str(self.root), *options],
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(self.root.exists())
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            cli.parser().parse_args(["install", "--bluepr", str(path), "--mach", "node-1"])
+
+    def test_install_input_preflight_rejects_owner_ports_and_projects_without_writes(self):
+        self.runtime.stop()  # The shell subprocess validates its actual host.
+        self.value["machines"][0]["platform"] = bp.runtime_platform()
+        path = self.write()
+        for options in [["--owner", "INVALID OWNER"], ["--port-base", "65535"],
+                        ["--projects", str(self.base / "missing-project")]]:
+            args = ["--home", str(self.root), "--blueprint", str(path), "--machine", "node-1", *options]
+            with self.subTest(options=options), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(["install", "--validate-only", *args]), 1)
+                self.assertFalse(self.root.exists())
+                result = subprocess.run([str(SOURCE / "install.sh"), *args], capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(self.root.exists())
+        for kwargs in [{"owner": "INVALID OWNER"}, {"owner": "owner", "port_base": 65535},
+                       {"owner": "owner", "projects": [str(self.base / "missing-project")]}]:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                config.initialize(self.root, **kwargs)
+            self.assertFalse(self.root.exists())
+
     def test_existing_default_full_cannot_adopt_blueprint(self):
         config.initialize(self.root, "owner")
         before = self.snapshot()

@@ -150,6 +150,22 @@ def load(home: str | Path) -> dict:
     return doc
 
 
+def validate_owner(owner: str) -> None:
+    if not isinstance(owner, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", owner):
+        raise ValueError("Owner must be a stable lowercase identifier, 1-48 letters, digits, underscores or hyphens")
+
+
+def validate_install_inputs(home: str | Path, owner: str, port_base: int,
+                            projects: list[str] | None) -> None:
+    """Validate caller-controlled installation inputs without creating state."""
+    absolute_root(home)
+    validate_owner(owner)
+    if type(port_base) is not int or not 1024 <= port_base <= 65535 - max(PORT_OFFSETS.values()):
+        raise ValueError("BORG services need distinct unprivileged ports")
+    if projects and any(not absolute_root(p).is_dir() for p in projects):
+        raise ValueError("BORG projects must be existing absolute directories")
+
+
 def validate(doc: dict) -> None:
     if "blueprint" in doc:
         from installer import blueprint
@@ -158,8 +174,7 @@ def validate(doc: dict) -> None:
             raise ValueError("Invalid stored blueprint selection")
         blueprint.validate(selection["input"], blueprint.catalog())
         blueprint.machine(selection["input"], selection["machine_id"])
-    if not isinstance(doc.get("owner"), str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", doc["owner"]):
-        raise ValueError("Owner must be a stable lowercase identifier, 1-48 letters, digits, underscores or hyphens")
+    validate_owner(doc.get("owner"))
     uuid.UUID(doc["instance_id"])
     absolute_root(doc["home"])
     context_length = doc.get("models", {}).get("context_length", 16384)
@@ -177,6 +192,7 @@ def initialize(home: str | Path, owner: str, *, port_base: int = 18760,
                projects: list[str] | None = None, model: str = "qwen3:4b",
                blueprint_selection: dict | None = None) -> dict:
     root = absolute_root(home)
+    validate_install_inputs(root, owner, port_base, projects)
     from installer import blueprint
     if blueprint_selection is not None:
         blueprint.validate(blueprint_selection["input"], blueprint.catalog())

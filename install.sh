@@ -4,19 +4,32 @@ umask 077
 export PYTHONDONTWRITEBYTECODE=1
 borg_script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 borg_home=${BORG_HOME:-$HOME/.borg}
-borg_next_home=false
 borg_has_blueprint=false
+borg_value_option=
 for borg_arg in "$@"; do
+  # Reject unknown/abbreviated options and missing values before any bootstrap
+  # writes. Python's install parser uses the same exact long-option contract.
+  if [ -n "$borg_value_option" ]; then
+    case "$borg_arg" in --*) echo "$borg_value_option requires a value" >&2; exit 2 ;; esac
+    if [ "$borg_value_option" = --home ]; then borg_home=$borg_arg; fi
+    borg_value_option=
+    continue
+  fi
+  case "$borg_arg" in
+    --home|--owner|--port-base|--projects|--blueprint|--machine) borg_value_option=$borg_arg ;;
+    --home=*|--owner=*|--port-base=*|--projects=*|--blueprint=*|--machine=*) ;;
+    --system-dependencies|--no-start|--help|-h) ;;
+    *) echo "Unknown installer option; use ./install.sh --help" >&2; exit 2 ;;
+  esac
   case "$borg_arg" in --blueprint|--blueprint=*|--machine|--machine=*) borg_has_blueprint=true ;; esac
   case "$borg_arg" in --help|-h)
     echo 'Usage: ./install.sh [--home ABSOLUTE_PATH] [--owner OWNER] [--port-base PORT] [--blueprint FILE --machine ID] [--no-start]'
     echo 'Installs an independent BORG. Provider sign-in and optional external access use your own accounts.'
     exit 0 ;;
   esac
-  if "$borg_next_home"; then borg_home=$borg_arg; borg_next_home=false; continue; fi
-  case "$borg_arg" in --home) borg_next_home=true ;; --home=*) borg_home=${borg_arg#--home=} ;; esac
+  case "$borg_arg" in --home=*) borg_home=${borg_arg#--home=} ;; esac
 done
-if "$borg_next_home"; then echo "--home requires an absolute path" >&2; exit 2; fi
+if [ -n "$borg_value_option" ]; then echo "$borg_value_option requires a value" >&2; exit 2; fi
 case "$borg_home" in /*) ;; *) echo "BORG home must be an absolute path" >&2; exit 2 ;; esac
 case "$borg_home" in */../*|*/./*|*/..|*/.) echo "Use a canonical BORG home" >&2; exit 2 ;; esac
 borg_check=$borg_home
