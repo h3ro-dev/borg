@@ -38,6 +38,8 @@
     <script type="module" src="./configure.mjs"></script>
     <link rel="stylesheet" href="./configure.css" />
     <link rel="stylesheet" href="./fleet.css" />
+    <link rel="stylesheet" href="./fleet-explorer.css" />
+    <script type="module" src="./fleet-explorer.mjs"></script>
     <script type="importmap">
       { "imports": { "three": "./vendor/three/three.module.min.js" } }
     </script>
@@ -201,22 +203,41 @@
         </p>
       </section>
 
-      <section class="fleet section wrap" id="fleet" aria-labelledby="fleet-title">
+      <section class="fleet section wrap" id="fleet" aria-labelledby="fleet-title" data-motion="paused">
         <div class="section-heading">
           <p class="eyebrow">THE COLLECTIVE / A FULL BUILD</p>
           <h2 id="fleet-title">Every ship.<br /><span class="accent">A purpose.</span></h2>
-          <p>A local brain at the center. Provider agents around it. Your tools and machines within reach. Build the parts your work needs.</p>
+          <p>A local brain at the center. Provider agents around it. Select a ship to meet its unit, open its systems, and follow the flow of memory and work.</p>
         </div>
         <figure class="fleet-figure">
           <div class="fleet-image-frame">
-            <img src="./assets/borg-fleet.webp" width="2200" height="1375" loading="lazy" decoding="async"
+            <div class="fleet-space" aria-hidden="true">
+              <div class="star-layer star-near"></div>
+              <div class="star-layer star-far"></div>
+            </div>
+            <img src="./assets/borg-fleet-foreground.webp" width="2200" height="1375" loading="lazy" decoding="async"
               alt="Five industrial cube ships in space: a central BORG memory core linked to ships bearing OpenAI, Claude and Grok insignias, and a ship for native tools and enrolled remote nodes." />
+            <a class="fleet-hotspot" data-profile="memory" href="./guide.html#understand" style="--x:50%;--y:49%;--w:31%;--h:45%" aria-label="Inspect BORG memory and context"><span>01 <b>Inspect memory core</b> +</span></a>
+            <a class="fleet-hotspot" data-profile="codex" href="./guide.html#providers" style="--x:18.8%;--y:28%;--w:21%;--h:32%" aria-label="Inspect GPT and Codex"><span>02 <b>Inspect GPT / Codex</b> +</span></a>
+            <a class="fleet-hotspot" data-profile="claude" href="./guide.html#providers" style="--x:80.7%;--y:29%;--w:21%;--h:32%" aria-label="Inspect Claude"><span>03 <b>Inspect Claude</b> +</span></a>
+            <a class="fleet-hotspot" data-profile="grok" href="./guide.html#providers" style="--x:78.1%;--y:72%;--w:21%;--h:32%" aria-label="Inspect Grok"><span>04 <b>Inspect Grok</b> +</span></a>
+            <a class="fleet-hotspot" data-profile="tools" href="./guide.html#fleet" style="--x:20.1%;--y:73%;--w:21%;--h:32%" aria-label="Inspect tools and remote nodes"><span>05 <b>Inspect tools / nodes</b> +</span></a>
           </div>
           <figcaption>
             <span><i class="status-dot" aria-hidden="true"></i> ONE POSSIBLE COLLECTIVE</span>
-            <a class="text-link" href="./guide.html">Follow the build guide <span aria-hidden="true">↗</span></a>
+            <div class="fleet-motion-controls">
+              <button id="fleet-motion-toggle" type="button" aria-label="Toggle fleet motion" aria-pressed="false" hidden>Play motion</button>
+              <a class="text-link" href="./guide.html">Follow the build guide <span aria-hidden="true">↗</span></a>
+            </div>
           </figcaption>
         </figure>
+        <nav class="fleet-units" aria-label="Explore fleet units">
+          <a data-profile="memory" href="./guide.html#understand"><span>01</span><img src="./assets/mark.svg" alt="" width="22" height="24" /> Memory core <b>↗</b></a>
+          <a data-profile="codex" href="./guide.html#providers"><span>02</span><img src="./assets/providers/openai.svg" alt="" width="24" height="24" /> GPT / Codex <b>↗</b></a>
+          <a data-profile="claude" href="./guide.html#providers"><span>03</span> Claude <b>↗</b></a>
+          <a data-profile="grok" href="./guide.html#providers"><span>04</span> Grok <b>↗</b></a>
+          <a data-profile="tools" href="./guide.html#fleet"><span>05</span> Tools / nodes <b>↗</b></a>
+        </nav>
         <div class="fleet-legend">
           <article>
             <span class="fleet-coordinate">01 / THE CORE</span>
@@ -825,6 +846,62 @@ cd borg
         </div>
       </section>
     </main>
+    <dialog id="node-profile" class="node-profile" aria-labelledby="profile-name" aria-describedby="profile-summary">
+      <div class="profile-toolbar">
+        <span class="profile-dossier-label"><i class="status-dot" aria-hidden="true"></i> COLLECTIVE / UNIT DOSSIER</span>
+        <div class="profile-toolbar-actions">
+          <button id="profile-motion-toggle" type="button" aria-label="Toggle profile motion" aria-pressed="false" hidden>Play motion</button>
+          <button class="profile-close" type="button" aria-label="Close unit profile">Close <span aria-hidden="true">×</span></button>
+        </div>
+      </div>
+      <nav class="profile-unit-nav" aria-label="Choose a unit">
+        <button type="button" data-unit="memory">01 / Memory</button>
+        <button type="button" data-unit="codex">02 / GPT</button>
+        <button type="button" data-unit="claude">03 / Claude</button>
+        <button type="button" data-unit="grok">04 / Grok</button>
+        <button type="button" data-unit="tools">05 / Tools</button>
+      </nav>
+      <div class="profile-layout">
+        <div class="profile-anatomy">
+          <div class="profile-portrait">
+            <div class="profile-portrait-grid" aria-hidden="true"></div>
+            <div class="profile-unit-code" aria-hidden="true"></div>
+            <img id="profile-character" width="1100" height="1600" alt="" />
+            <img id="profile-chest-mark" alt="" hidden />
+            <svg class="profile-circuits" viewBox="0 0 100 145.4545" aria-hidden="true" preserveAspectRatio="none"></svg>
+            <div class="profile-body-points" aria-label="Inspect body modules"></div>
+            <div class="profile-scan" aria-hidden="true"></div>
+            <span class="profile-portrait-caption">SYSTEM ANATOMY / SELECT A MODULE</span>
+          </div>
+          <p class="profile-metaphor">A visual anatomy of the software. Select a module to see what it does.</p>
+          <div class="profile-parts" aria-label="Unit components"></div>
+        </div>
+        <div class="profile-systems">
+          <p id="profile-role" class="eyebrow"></p>
+          <h2 id="profile-name"></h2>
+          <p id="profile-summary"></p>
+          <div class="profile-tags"></div>
+          <section class="profile-component" aria-live="polite" aria-atomic="true">
+            <div class="profile-component-meta"><span id="component-coordinate"></span><span id="component-status"></span></div>
+            <h3 id="component-name"></h3>
+            <p id="component-description"></p>
+            <div id="component-stack"></div>
+            <a id="component-source" class="text-link" target="_blank" rel="noreferrer">Inspect the source <span aria-hidden="true">↗</span></a>
+          </section>
+          <section class="profile-flow" aria-labelledby="flow-title">
+            <div class="profile-flow-heading"><h3 id="flow-title">Follow the signal.</h3><span>ILLUSTRATED WORKFLOW</span></div>
+            <div class="profile-flow-map">
+              <svg viewBox="0 0 600 230" aria-hidden="true" preserveAspectRatio="none"><path class="profile-flow-rail" /><path class="profile-flow-signal" /></svg>
+              <div class="profile-flow-nodes"></div>
+            </div>
+            <p id="flow-detail"></p>
+          </section>
+          <div class="profile-boundaries"></div>
+          <a id="profile-setup" class="button primary">Set up this unit <span aria-hidden="true">↗</span></a>
+        </div>
+      </div>
+      <div class="profile-footnote">Architecture walkthrough. Connections and readiness depend on your installation.</div>
+    </dialog>
     <footer class="footer wrap">
       <a class="brand" href="./"
         ><img src="./assets/mark.svg" width="30" height="34" alt="" /><span

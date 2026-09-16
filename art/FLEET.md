@@ -37,6 +37,29 @@ The integrating release must update its asset pins and inventory. The seeded
 composition is reproducible; byte-for-byte renders can vary with Blender builds
 and denoising implementations. Use the published binary's hash for integrity.
 
+## Animated website background
+
+The website separates the ships from the stars. Rebuild the alpha foreground:
+
+```sh
+blender --background --threads 4 --python art/borg_fleet.py -- \
+  --transparent --output /tmp/borg-fleet-alpha --width 2200 --samples 32
+cwebp -q 88 -m 6 /tmp/borg-fleet-alpha/borg-fleet-foreground.png \
+  -o /tmp/borg-fleet-alpha/borg-fleet-foreground.webp
+```
+
+This uses the same ships, identifiers, camera and lighting, hides the star mesh,
+and preserves alpha through the Blender compositor. Two CSS star layers drift
+behind the foreground; complete-tile travel makes the loop seamless. Motion
+controls apply to the hero, fleet and unit profiles. Animation pauses when hidden
+or offscreen and starts static with reduced motion or JavaScript disabled.
+Explicit Play opts into motion. Stars work independently of WebGL availability.
+
+- Foreground: `site/assets/borg-fleet-foreground.webp`
+- Dimensions: 2200 × 1375 with alpha
+- Length: 244,494 bytes
+- SHA256: `c39ec8039abe79f65dcd8e9fe28f9d4ea31608562e2218b7ca99819d77760e40`
+
 ## Published still
 
 - File: `site/assets/borg-fleet.webp`

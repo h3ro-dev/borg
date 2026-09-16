@@ -1096,7 +1096,8 @@ pre:focus-visible,
   color: #a5b29b;
   letter-spacing: 0.04em;
 }
-#motion-toggle {
+#motion-toggle,
+#fleet-motion-toggle {
   color: #d8e1d0;
   background: #10170ecc;
   border: 1px solid #52634a;
@@ -1105,7 +1106,8 @@ pre:focus-visible,
   padding: 10px 13px;
   font: 10px var(--mono);
 }
-#motion-toggle:hover {
+#motion-toggle:hover,
+#fleet-motion-toggle:hover {
   border-color: var(--acid);
   color: var(--acid);
 }
@@ -1152,7 +1154,10 @@ pre:focus-visible,
 }
 .star-layer {
   position: absolute;
-  inset: -100px;
+  /* One complete tile of overscan makes every drift loop seamless. */
+  inset: -347px 0 0 -313px;
+  --star-travel-x: 313px;
+  --star-travel-y: 347px;
   opacity: 0.46;
   background-image:
     radial-gradient(1px 1px at 35px 47px, #d1ded4 70%, transparent 100%),
@@ -1160,22 +1165,24 @@ pre:focus-visible,
     radial-gradient(1.3px 1.3px at 84px 251px, #d8e4cd 70%, transparent 100%),
     radial-gradient(0.8px 0.8px at 227px 76px, #91b09d 70%, transparent 100%);
   background-size: 313px 347px;
-  animation: stars-drift 160s linear infinite;
+  animation: stars-drift 70s linear infinite;
 }
 .star-far {
-  transform: rotate(29deg);
+  --star-travel-x: 179px;
+  --star-travel-y: 227px;
   opacity: 0.18;
   background-size: 179px 227px;
-  animation-duration: 210s;
-  animation-direction: reverse;
+  background-position: 65px 47px;
+  animation-duration: 140s;
 }
 .hero[data-motion="paused"] .nebula,
-.hero[data-motion="paused"] .star-layer {
+.hero[data-motion="paused"] .star-layer,
+.fleet[data-motion="paused"] .star-layer {
   animation-play-state: paused;
 }
 @keyframes stars-drift {
   to {
-    translate: 110px 70px;
+    translate: var(--star-travel-x) var(--star-travel-y);
   }
 }
 @keyframes nebula-drift {
@@ -1778,8 +1785,9 @@ pre:focus-visible,
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .nebula,
-  .star-layer {
+  .hero:not([data-motion="running"]) .nebula,
+  .hero:not([data-motion="running"]) .star-layer,
+  .fleet:not([data-motion="running"]) .star-layer {
     animation: none !important;
   }
   .ship-stage .ship-poster,

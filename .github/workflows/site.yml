@@ -24,6 +24,8 @@ jobs:
         run: |
           node --check site/app.js
           node --check site/guide.js
+          node --check site/scene.js
+          node --check site/fleet-explorer.mjs
           node site/verify-links.mjs
           node --test platform/planner.test.mjs
           python3 borg.py blueprint inspect platform/examples/single-node.json
@@ -34,6 +36,7 @@ jobs:
           cp site/index.html site/styles.css site/app.js site/scene.js _site/
           cp site/configure.css site/configure.mjs _site/
           cp site/fleet.css site/guide.html site/guide.css site/guide.js _site/
+          cp site/fleet-explorer.css site/fleet-explorer.mjs site/fleet-profiles.mjs _site/
           cp site/llms.txt site/agent-guide.md _site/
           cp platform/catalog.json platform/planner.mjs _site/platform/
           cp -R site/assets/. _site/assets/

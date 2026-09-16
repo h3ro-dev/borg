@@ -2,10 +2,14 @@
 const hero = document.querySelector(".hero");
 const stage = document.querySelector(".ship-stage");
 const button = document.querySelector("#motion-toggle");
+const fleet = document.querySelector("#fleet");
+const fleetButton = document.querySelector("#fleet-motion-toggle");
+const motionButtons = [button, fleetButton, document.querySelector("#profile-motion-toggle")].filter(Boolean);
 const status = document.querySelector("#scene-status");
 const motionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
 let paused = motionPreference.matches;
 let visible = true;
+let fleetVisible = false;
 let loading = false;
 let failed = false;
 let renderer, scene, camera, ship, stars, environment;
@@ -16,14 +20,21 @@ let lastRender = 0;
 let THREE;
 
 function motionState() {
-  const running = !paused && visible && !document.hidden && !!ship && !failed;
-  hero.dataset.motion = running ? "running" : "paused";
-  button.textContent = paused ? "Play motion" : "Pause motion";
-  button.setAttribute("aria-pressed", String(!paused));
+  const running = !paused && !document.hidden;
+  document.documentElement.dataset.motion = running ? "running" : "paused";
+  hero.dataset.motion = running && visible ? "running" : "paused";
+  if (fleet) fleet.dataset.motion = running && fleetVisible ? "running" : "paused";
+  status.textContent = paused
+    ? (motionPreference.matches ? "Static view · reduced motion" : "Motion paused")
+    : (failed ? "Static ship · stars in motion" : "Your collective. In orbit.");
+  for (const control of motionButtons) {
+    control.textContent = paused ? "Play motion" : "Pause motion";
+    control.setAttribute("aria-pressed", String(!paused));
+  }
   cancelAnimationFrame(frame);
   frame = 0;
   previous = 0;
-  if (running) frame = requestAnimationFrame(animate);
+  if (running && visible && ship && !failed) frame = requestAnimationFrame(animate);
 }
 
 function render() {
@@ -87,12 +98,10 @@ function disposeScene() {
 
 function fallback() {
   failed = true;
-  paused = true;
-  motionState();
   disposeScene();
   stage.dataset.state = "fallback";
-  button.hidden = true;
-  status.textContent = "Static ship view";
+  // Background stars and their controls work even without the 3D renderer.
+  motionState();
 }
 
 async function initialize() {
@@ -236,41 +245,41 @@ async function initialize() {
   }
 }
 
-button.hidden = false;
-hero.dataset.motion = "paused";
-status.textContent = paused
-  ? "Static view · reduced motion"
-  : "Your collective. In orbit.";
-button.textContent = paused ? "Play motion" : "Pause motion";
-button.setAttribute("aria-pressed", String(!paused));
-button.addEventListener("click", () => {
-  paused = !paused;
-  if (!paused && !ship) initialize();
-  motionState();
-});
+for (const control of motionButtons) {
+  control.hidden = false;
+  control.addEventListener("click", () => {
+    paused = !paused;
+    if (!paused && visible && !ship) initialize();
+    motionState();
+  });
+}
+motionState();
 motionPreference.addEventListener("change", (event) => {
   paused = event.matches;
-  if (!paused && !ship) initialize();
-  status.textContent = paused
-    ? "Motion paused"
-    : "Your collective. In orbit.";
+  if (!paused && visible && !ship) initialize();
   motionState();
 });
 document.addEventListener("visibilitychange", motionState);
 const intersection = new IntersectionObserver(
   (entries) => {
-    visible = entries[0].isIntersecting;
+    for (const entry of entries) {
+      if (entry.target === hero) visible = entry.isIntersecting;
+      else fleetVisible = entry.isIntersecting;
+    }
     motionState();
     if (visible && !paused && !ship) initialize();
   },
   { threshold: 0.05 },
 );
 intersection.observe(hero);
+if (fleet) intersection.observe(fleet);
 const dimensions = new ResizeObserver(resize);
 dimensions.observe(stage);
 window.addEventListener("pagehide", () => {
   cancelAnimationFrame(frame);
   hero.dataset.motion = "paused";
+  document.documentElement.dataset.motion = "paused";
+  if (fleet) fleet.dataset.motion = "paused";
 });
 window.addEventListener("pageshow", motionState);
 // Reduced-motion users start with the poster and do not download Three.js or GLB.

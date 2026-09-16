@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { verifyConfigurator } from "./verify-configure.mjs";
 import { verifyGuide } from "./verify-guide.mjs";
+import { verifyExplorer } from "./verify-explorer.mjs";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const { chromium, webkit } = await import(
   process.env.PLAYWRIGHT_MODULE
@@ -172,8 +173,8 @@ try {
     (await page.locator('#agent-prompt').textContent()).trim());
   assert.match(await page.locator('.copy-status').textContent(), /Agent prompt copied/);
   await page.locator('#fleet').scrollIntoViewIfNeeded();
-  await page.locator('#fleet img').evaluate(image => image.decode());
-  assert(await page.locator('#fleet img').evaluate(image => image.complete && image.naturalWidth === 2200));
+  await page.locator('.fleet-image-frame > img').evaluate(image => image.decode());
+  assert(await page.locator('.fleet-image-frame > img').evaluate(image => image.complete && image.naturalWidth === 2200));
   results.checks.push('Homepage agent prompt copies exactly; full Blender fleet image loads');
   await page.evaluate(() => {
     navigator.clipboard.writeText = async () => {
@@ -257,6 +258,7 @@ try {
     );
   }
   await verifyConfigurator({ page, origin, evidence, results });
+  await verifyExplorer({ page, browser, origin, evidence, results });
   const nojs = await browser.newContext({
     javaScriptEnabled: false,
     viewport: { width: 390, height: 844 },
@@ -309,6 +311,7 @@ try {
     });
     results.screenshots.push("evidence/webkit-mobile.png");
     results.checks.push("WebKit mobile render, overflow and setup interaction");
+    await verifyExplorer({ page, browser, origin, evidence, results });
     await verifyGuide({ page, origin, evidence, results });
   }
 } catch (error) {
