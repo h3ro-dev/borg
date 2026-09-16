@@ -211,6 +211,7 @@ def build(opt):
     stars = bpy.data.objects.new('Fine starfield', mesh)
     bpy.context.collection.objects.link(stars)
     stars.data.materials.append(material('Distant starlight', (.42, .56, .68), 1))
+    stars.hide_render = opt.transparent
     scene = bpy.context.scene
     world = bpy.data.worlds.new('Deep space')
     world.use_nodes = True
@@ -234,9 +235,11 @@ def build(opt):
     scene.render.resolution_x = opt.width
     scene.render.resolution_y = round(opt.width*10/16)
     scene.render.resolution_percentage = 100
+    scene.render.film_transparent = opt.transparent
     scene.render.image_settings.file_format = 'PNG'
-    scene.render.image_settings.color_mode = 'RGB'
-    scene.render.filepath = str(out/'borg-fleet.png')
+    scene.render.image_settings.color_mode = 'RGBA' if opt.transparent else 'RGB'
+    stem = 'borg-fleet-foreground' if opt.transparent else 'borg-fleet'
+    scene.render.filepath = str(out/f'{stem}.png')
     scene.view_settings.view_transform = 'AgX'
     scene.view_settings.look = 'AgX - Medium High Contrast'
     scene.view_settings.exposure = .7
@@ -250,12 +253,21 @@ def build(opt):
     glow.inputs['Threshold'].default_value = 2.5
     output = tree.nodes.new('NodeGroupOutput')
     tree.links.new(render.outputs['Image'], glow.inputs['Image'])
-    tree.links.new(glow.outputs['Image'], output.inputs['Image'])
-    bpy.ops.wm.save_as_mainfile(filepath=str(out/'borg-fleet.blend'))
+    if opt.transparent:
+        # Keep the spaces between ships transparent for the website's star layers.
+        alpha = tree.nodes.new('CompositorNodeSetAlpha')
+        alpha.inputs['Type'].default_value = 'Replace Alpha'
+        tree.links.new(glow.outputs['Image'], alpha.inputs['Image'])
+        tree.links.new(render.outputs['Alpha'], alpha.inputs['Alpha'])
+        tree.links.new(alpha.outputs['Image'], output.inputs['Image'])
+    else:
+        tree.links.new(glow.outputs['Image'], output.inputs['Image'])
+    bpy.ops.wm.save_as_mainfile(filepath=str(out/f'{stem}.blend'))
     bpy.ops.render.render(write_still=True)
     inputs = ['site/assets/borg-ship.glb'] + [f'site/assets/providers/{p}.svg' for p in ('openai', 'claude', 'grok')]
     receipt = {
         'blender': bpy.app.version_string, 'seed': 20260916,
+        'transparent_foreground': opt.transparent,
         'dimensions': [scene.render.resolution_x, scene.render.resolution_y],
         'engine': scene.render.engine, 'device': scene.cycles.device,
         'threads': scene.render.threads, 'samples': scene.cycles.samples,
@@ -274,5 +286,7 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--width', type=int, default=2200)
     parser.add_argument('--samples', type=int, default=32)
+    parser.add_argument('--transparent', action='store_true',
+                        help='Render ships and labels with alpha, without baked stars')
     args = sys.argv[sys.argv.index('--')+1:] if '--' in sys.argv else []
     build(parser.parse_args(args))

@@ -1,8 +1,10 @@
 /* Fleet overview and the on-site guide entrance. The diagram also works without JS. */
 .fleet { border-bottom: 1px solid var(--line); }
 .fleet-figure { margin-top: 40px; border: 1px solid var(--line); background: #060909; }
-.fleet-image-frame { overflow: hidden; }
-.fleet-figure img { width: 100%; height: auto; }
+.fleet-image-frame { overflow: hidden; position: relative; isolation: isolate; }
+.fleet-space { position: absolute; inset: 0; overflow: hidden; background: radial-gradient(ellipse at 50% 45%, #07141b, #020a10 70%); }
+.fleet-figure img { position: relative; width: 100%; height: auto; }
+.fleet-motion-controls { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
 .fleet-figure figcaption { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 19px 24px; border-top: 1px solid var(--line); }
 .fleet-figure figcaption > span { display: flex; align-items: center; gap: 10px; font: 11px/1.5 var(--mono); color: #becdaf; letter-spacing: .06em; }
 .fleet-figure .text-link { font-size: 12px; }

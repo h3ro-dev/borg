@@ -138,7 +138,15 @@ Sources, original proportions and distributed hashes are recorded in
 `site/assets/providers/README.md` and `SHA256SUMS` in that directory. Their use
 does not imply a partnership or endorsement.
 
-The five-vessel fleet still at `site/assets/borg-fleet.webp` includes those same
+The five-vessel fleet images at `site/assets/borg-fleet.webp` and
+`site/assets/borg-fleet-foreground.webp` include those same
 provider identifiers on plain identification plates. The original scene and
 hulls use MIT; the embedded provider marks remain excluded from that grant.
 See `art/FLEET.md` for the editable scene build, input provenance and asset hash.
+
+The character portraits `site/assets/borg-drone.webp` and
+`site/assets/borg-drone-codex.webp` are original procedural Blender artwork.
+The character geometry uses MIT; the OpenAI identifier embedded in the Codex
+portrait retains its owner's trademark rights. The profile interface displays
+the same existing provider identifiers on the generic character's chest plate.
+See `art/DRONE.md` for the reproducible build, composition and exact asset hashes.
