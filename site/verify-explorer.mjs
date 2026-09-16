@@ -42,6 +42,7 @@ export async function verifyExplorer({ page, browser, origin, evidence, results 
     await page.keyboard.press('Tab');
     assert(await page.locator('#profile-motion-toggle').evaluate(el => el === document.activeElement));
     await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('#node-profile').open && document.body.style.overflow === '');
     assert(!(await dialog.isVisible()));
     assert(await trigger.evaluate(el => el === document.activeElement));
     assert.equal(await page.evaluate(() => document.body.style.overflow), '');
@@ -79,8 +80,8 @@ export async function verifyExplorer({ page, browser, origin, evidence, results 
   await page.waitForFunction(() => document.querySelector('#fleet').dataset.motion === 'running');
   assert.equal(await page.locator('.hero').getAttribute('data-motion'), 'paused');
   const stars = page.locator('#fleet .star-near');
-  const transform = await stars.evaluate(el => getComputedStyle(el).transform);
-  await page.waitForFunction(before => getComputedStyle(document.querySelector('#fleet .star-near')).transform !== before, transform);
+  const position = await stars.evaluate(el => getComputedStyle(el).translate);
+  await page.waitForFunction(before => getComputedStyle(document.querySelector('#fleet .star-near')).translate !== before, position);
   await page.locator('.fleet-units [data-profile="memory"]').click();
   const initial = await page.locator('#flow-detail').textContent();
   await page.waitForFunction(before => document.querySelector('#flow-detail').textContent !== before, initial, { timeout: 7000 });
