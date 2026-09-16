@@ -55,7 +55,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(result["schema"], "borg-onboarding/v1")
         self.assertEqual([step["id"] for step in result["steps"]], [
             "installation", "local-services", "codex-login", "codex-client", "codex-conductor",
-            "claude", "grok", "adapters", "web-connector", "own-machines", "os-permissions"])
+            "claude", "grok", "cursor", "adapters", "web-connector", "own-machines", "os-permissions"])
         self.assertEqual(result["state"], "action_required")
         self.assertIsNone(result["ready"])
         self.assertEqual(result["steps"][0]["state"], "missing")
@@ -75,6 +75,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(len(steps["codex-conductor"]["commands"]), 2)
         self.assertEqual(steps["claude"]["state"], "manual_setup_required")
         self.assertEqual(steps["grok"]["state"], "manual_setup_required")
+        self.assertEqual(steps["cursor"]["state"], "manual_setup_required")
         self.assertFalse(any(step["ready"] is True for step in steps.values()))
         self.assertIsNone(result["ready"])
 
@@ -97,6 +98,12 @@ class OnboardingTests(unittest.TestCase):
                 self.assertTrue(command["requires"])
             mcp = next(command for command in native if command["argv"][1:3] == ["mcp", "add"])
             self.assertEqual(mcp["argv"][-4:], [str(self.root / "bin/borg"), "mcp-stdio", "--home", str(self.root)])
+        cursor = steps["cursor"]["commands"]
+        self.assertEqual(cursor[0]["argv"][:3], ["mkdir", "-p", "-m"])
+        self.assertEqual(cursor[1]["argv"], ["cursor-agent", "login"])
+        self.assertEqual(cursor[2]["argv"], ["cursor-agent", "models"])
+        self.assertEqual(cursor[1]["env"], {})
+        self.assertNotIn("CURSOR_CONFIG_DIR", json.dumps(cursor))
 
     def test_partial_receipts_and_foreign_identity_never_count_as_configured(self):
         conductor = self.configured()

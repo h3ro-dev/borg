@@ -73,11 +73,26 @@ Grok CLI and credentials are not installed by BORG. The bridge is not part of Co
 
 This adapter does not provide native thread status, mid-turn steering or provider allowance routing.
 
+<a id="cursor"></a>
+
+### Cursor Grok launch adapter
+
+**Owner setup.** Launch a local Cursor agent loop, defaulting to a Grok model, through the provider launch bus.
+
+[Implementation](../conductor/providers/launch-bus.mjs)
+
+1. Install the Cursor agent CLI to an installation-owned path that does not replace another provider's `agent` binary.
+2. Create a Cursor user or service-account API key and expose it to the launch process as `CURSOR_API_KEY`.
+3. Set `providers.cursor.binary`, enable the provider, and set `providers.cursor.model` to a Grok ID from the Cursor model catalog.
+4. Use the documented launch packet with `runtime: "cursor"`, a bounded work ID, prompt and project path.
+
+This adapter does not provide native thread status, mid-turn steering or provider allowance routing. Cloud Agents cannot reach this installation's loopback Inbox or hooks.
+
 <a id="launch-bus"></a>
 
 ### Provider launch bus
 
-**Included.** Send a common work packet to the selected Codex, Grok or Claude backend and retain a launch receipt.
+**Included.** Send a common work packet to the selected Codex, Grok, Claude or Cursor backend and retain a launch receipt.
 
 [Implementation](../conductor/providers/launch-bus.mjs)
 

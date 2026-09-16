@@ -1,6 +1,6 @@
 {
   "schema": "borg-blueprint/v1",
-  "catalog_version": "2026-09-16.1",
+  "catalog_version": "2026-09-16.2",
   "goal": "automation",
   "machines": [
     {

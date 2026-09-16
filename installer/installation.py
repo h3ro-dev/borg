@@ -209,7 +209,7 @@ def complete_install(doc: dict, *, start: bool = True) -> int:
                         "--owner", doc["owner"], "--port", str(doc["ports"]["inbox"])], env=env, check=True)
     node = dependencies.executable(root, "node", "node")
     conductor = root / "app/conductor/borg-conductor.mjs"
-    if any(blueprint.selected(doc, name) for name in ["codex", "grok", "claude", "launch-bus"]):
+    if any(blueprint.selected(doc, name) for name in ["codex", "grok", "claude", "cursor", "launch-bus"]):
         subprocess.run([str(node), str(conductor), "bootstrap", "--borg-home", str(root),
             "--config", str(root / "conductors/config.json"), "--owner", doc["owner"],
             "--instance-id", doc["instance_id"], "--port", str(doc["ports"]["conductor"]),

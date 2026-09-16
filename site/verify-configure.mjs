@@ -35,6 +35,8 @@ export async function verifyConfigurator({ page, origin, evidence, results }) {
   assert(await page.locator('#choice-codex').isChecked());
   await page.locator('#choice-claude').check();
   assert(await page.locator('#choice-launch-bus').isChecked());
+  await page.locator('#choice-cursor').check();
+  assert(await page.locator('#choice-launch-bus').isChecked());
   await page.locator('#choice-training').check();
   assert(await page.locator('#choice-adapters').isChecked());
   const training = await download('blueprint-training');

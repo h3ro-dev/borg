@@ -1,6 +1,6 @@
 {
   "schema": "borg-catalog/v1",
-  "version": "2026-09-16.1",
+  "version": "2026-09-16.2",
   "reviewed": "2026-09-16",
   "profiles": [
     {
@@ -297,11 +297,45 @@
       "license": "BORG implementation: MIT; provider terms apply"
     },
     {
+      "id": "cursor",
+      "type": "component",
+      "name": "Cursor Grok launch adapter",
+      "category": "Orchestration",
+      "summary": "Launch a local Cursor agent loop, defaulting to a Grok model, through the provider launch bus.",
+      "status": "owner-setup",
+      "status_label": "Owner setup",
+      "requires": [
+        "launch-bus"
+      ],
+      "profiles": [
+        "full",
+        "tools"
+      ],
+      "platforms": [
+        "macos-arm64",
+        "macos-x64",
+        "linux-x64",
+        "linux-arm64"
+      ],
+      "source": "conductor/providers/launch-bus.mjs",
+      "docs": "docs/COMPONENTS.md#cursor",
+      "setup": [
+        "Install the Cursor agent CLI to an installation-owned path that does not replace another provider's agent binary.",
+        "Create a Cursor user or service-account API key and make it available to the launch process as CURSOR_API_KEY.",
+        "Set providers.cursor.binary, enable the provider, and set providers.cursor.model to a Grok ID from the Cursor model catalog.",
+        "Use the documented launch packet with runtime cursor, a bounded work ID, prompt and project path."
+      ],
+      "limitations": [
+        "Cursor CLI and credentials are not installed by BORG. This adapter does not provide native thread status, mid-turn steering or provider allowance routing. Cloud Agents cannot reach this installation's loopback Inbox or hooks."
+      ],
+      "license": "BORG implementation: MIT; provider terms apply"
+    },
+    {
       "id": "launch-bus",
       "type": "component",
       "name": "Provider launch bus",
       "category": "Orchestration",
-      "summary": "Send a common work packet to the selected Codex, Grok or Claude backend and retain a launch receipt.",
+      "summary": "Send a common work packet to the selected Codex, Grok, Claude or Cursor backend and retain a launch receipt.",
       "status": "packaged",
       "status_label": "Included",
       "requires": [],
@@ -1274,7 +1308,7 @@
     }
   ],
   "sizing": {
-    "version": "planning-2026-09-16.1",
+    "version": "planning-2026-09-16.2",
     "kind": "engineering_allowance",
     "memory_units": "GB planning units (decimal); purchase the next suitable hardware tier",
     "disk_units": "GB of free SSD space, not total drive size",

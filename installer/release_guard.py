@@ -82,6 +82,7 @@ APPROVED_NETWORK_HOSTS = {
     "cdn.playwright.dev",
     "code.claude.com",
     "claude.com",
+    "cursor.com",
     "developers.cloudflare.com",
     "developers.openai.com",
     "example.com",

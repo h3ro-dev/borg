@@ -11,15 +11,24 @@ test('defaults runtime to grok', () => {
   assert.equal(packet.runtime, 'grok');
 });
 
-test('accepts claude and codex', () => {
+test('accepts claude, cursor and codex', () => {
   assert.equal(readLaunchPacket({
     workId: 'w2',
     runtime: 'claude',
     cwd: '/opt/example/project',
     prompt: 'ping',
   }).runtime, 'claude');
-  assert.equal(readLaunchPacket({
+  const cursor = readLaunchPacket({
     workId: 'w3',
+    runtime: 'cursor',
+    cwd: '/opt/example/project',
+    prompt: 'ping',
+    model: 'grok-4-6',
+  });
+  assert.equal(cursor.runtime, 'cursor');
+  assert.equal(cursor.model, 'grok-4-6');
+  assert.equal(readLaunchPacket({
+    workId: 'w4',
     runtime: 'codex',
     cwd: '/opt/example/project',
     prompt: 'ping',
@@ -41,11 +50,14 @@ test('launch bus has no owner-home defaults and reports provider capability gaps
     providers: {
       grok: { enabled: true, host: '127.0.0.1', port: 4770 },
       claude: { enabled: false, binary: null },
+      cursor: { enabled: false, binary: null },
     },
     runtime: { nodeBin: '/opt/borg-owner/runtime/node', codexBin: '/opt/borg-owner/runtime/codex' },
   });
   assert.equal(config.launchRoot, '/opt/borg-owner/private/provider-launches');
   assert.deepEqual(config.providers.claude.missingCapabilities,
+    ['native-thread-status', 'mid-turn-steer', 'provider-allowance-routing']);
+  assert.deepEqual(config.providers.cursor.missingCapabilities,
     ['native-thread-status', 'mid-turn-steer', 'provider-allowance-routing']);
   assert.equal(JSON.stringify(config).includes('/Users/'), false);
 });

@@ -25,13 +25,13 @@ The shell installer needs Python 3 on PATH to validate blueprint input before bo
 | `inbox` | Bootstraps and starts the native installation-owned Inbox |
 | `beads` | Initializes the private embedded work store and installs the `bin/bd` wrapper |
 | `fleet` | Adds owner enrollment instructions; never discovers or enrolls machines automatically |
-| `grok`, `claude`, `launch-bus`, `router` | Bundled source and safe conductor configuration preparation; provider binary/profile/login and operational qualification remain owner steps |
+| `grok`, `claude`, `cursor`, `launch-bus`, `router` | Bundled source and safe conductor configuration preparation; provider binary/profile/login and operational qualification remain owner steps |
 | External integrations | Actionable catalog setup checklist; no deployment, credential import or authentication |
 | Adapters and training | Preparation intent only, restricted to full Apple Silicon nodes; no automatic download, training or promotion |
 
 The complete source and locked runtime package remain installed for either profile. Selection controls configured services and owner setup, not package trimming. Beads without Inbox prepares the native coordination configuration that its custody wrapper needs, without starting an Inbox service. Tools-only Codex gets the isolated BORG MCP connection with zero memory lifecycle hooks. Its watchdog probes authenticated connector liveness; absent memory is not treated as a working memory service.
 
-Grok and Claude binaries are not supplied by checking their boxes. Their provider entries remain disabled until the owner configures and qualifies their own runtime. Onboarding documents dedicated profiles and native sign-in, plus the bundled launch-bus/provider limitations. The installer does not enable automatic provider authentication. Prepared configuration does not prove a running service, provider account or usable quota.
+Grok, Claude and Cursor binaries are not supplied by checking their boxes. Their provider entries remain disabled until the owner configures and qualifies their own runtime. Onboarding documents dedicated profiles and native sign-in, plus the bundled launch-bus/provider limitations. The installer does not enable automatic provider authentication. Prepared configuration does not prove a running service, provider account or usable quota.
 
 Run `borg onboard` for selected setup instructions and `borg doctor` for observed readiness. `local_services_ready` covers selected native installation services. `ready` remains false when a selected external/research/operational capability has no automatic acceptance probe; `selected_setup` names those unverified choices. Follow the documented owner checks. Neither a checkbox nor a source directory proves those capabilities operational.
 

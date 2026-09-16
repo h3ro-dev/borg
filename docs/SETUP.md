@@ -113,12 +113,12 @@ active work claims, account matching and usable provider allowance. See the exac
 [conductor integration contract](../conductor/INTEGRATION.md). A configured lane,
 process or listening port does not establish admission.
 
-## 4. Optional Claude and Grok clients
+## 4. Optional Claude, Grok and Cursor clients
 
 BORG's installer currently bundles and provisions Codex. Install any additional CLI
 through that provider's supported distribution and use your own account. The native
 commands below were audited against installed CLI help; use your version's help if
-its interface differs. BORG does not implement `borg auth claude` or `borg auth grok`.
+its interface differs. BORG does not implement `borg auth claude`, `borg auth grok` or `borg auth cursor`.
 
 Create dedicated profiles beneath your own private home before using these examples.
 Preserve an existing profile; do not point either variable at a shared profile. Run
@@ -127,7 +127,8 @@ these steps from your BORG home so unrelated project configuration is not loaded
 ```sh
 cd "$BORG_HOME"
 umask 077
-mkdir -p "$BORG_HOME/providers/claude/profile" "$BORG_HOME/providers/grok/profile"
+mkdir -p "$BORG_HOME/providers/claude/profile" "$BORG_HOME/providers/grok/profile" \
+  "$BORG_HOME/providers/cursor/profile" "$BORG_HOME/providers/cursor/bin"
 ```
 
 For Claude Code:
@@ -165,6 +166,28 @@ MCP diagnostics do not establish provider login, model availability or allowance
 Never copy credentials from another installation or paste bearer values into MCP
 arguments: the local stdio bridge consumes this home's credential privately.
 
+For the Cursor agent CLI, install it to an installation-owned path named
+`cursor-agent`. Do not install it as `agent` if another provider already uses that
+name. BORG does not implement `borg auth cursor`. Create a user API key from
+[Cursor Dashboard → API Keys](https://cursor.com/dashboard/api) or complete the
+CLI's native login, then record a Grok model ID from the live catalog:
+
+```sh
+# Install the Cursor agent CLI into this home, then:
+cursor-agent login
+cursor-agent models
+```
+
+Set `providers.cursor.binary` to that absolute `cursor-agent` path, enable the
+provider, and set `providers.cursor.model` to a Grok ID returned by
+`cursor-agent models` or `GET https://api.cursor.com/v1/models`. Do not invent a
+model ID. The launch bus inherits `CURSOR_API_KEY` from its environment; it does
+not store the key in conductor configuration. See the
+[Cursor headless CLI](https://cursor.com/docs/cli/headless) and
+[authentication](https://cursor.com/docs/cli/reference/authentication) docs. The
+local agent loop still uses Cursor-hosted inference. Cursor Cloud Agents cannot
+reach this installation's loopback Inbox or hooks.
+
 ### Additional provider conductors
 
 The following boundaries describe this repository's implementation, regardless of
@@ -175,6 +198,7 @@ what a newer provider CLI itself may support:
 | Codex | Native app-server conductor and router | Installer bootstrap, native login/pin and admission checks are integrated. |
 | Claude | `conductor/providers/launch-bus.mjs` headless `claude -p` launch | Requires explicit `providers.claude.binary` and enablement in `conductors/config.json`. Supply `CLAUDE_CONFIG_DIR` to the launch process; the bus inherits it. No native thread-status, mid-turn steer or provider allowance routing is implemented. |
 | Grok | `conductor/providers/grok-conductor.mjs` and launch bus | Requires explicit CLI/profile, version, readiness evidence and loopback service configuration. No installer service, login orchestration or readiness-marker provisioning flow is supplied. |
+| Cursor | `conductor/providers/launch-bus.mjs` headless `cursor-agent -p --force` launch | Requires explicit `providers.cursor.binary`, enablement, and a Grok `model` from the Cursor catalog. The bus inherits `CURSOR_API_KEY`. No native thread-status, mid-turn steer or provider allowance routing is implemented. |
 
 For an owner-reviewed Claude launch-bus integration, the real entry point is:
 
@@ -186,6 +210,11 @@ CLAUDE_CONFIG_DIR="$BORG_HOME/providers/claude/profile" BORG_HOME="$BORG_HOME" \
 
 The packet supplies `workId`, `runtime: "claude"`, an absolute `cwd` and `prompt`.
 This launches real work and may incur provider charges; it is not a setup probe.
+
+The Cursor packet uses the same launch-bus entry point with `runtime: "cursor"`
+and an optional `model`. When `model` is omitted, the bus uses
+`providers.cursor.model`. Review the source's packet and provider contract
+before use.
 Review the source's packet and provider contract before use. This optional bus does
 not gain Codex routing admission or lifecycle features by being enabled.
 

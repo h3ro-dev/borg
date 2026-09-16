@@ -18,14 +18,14 @@
       "sha256": "1ee496077ddbd98476168881ef5fdb880c8f8f5cda97e8aacaa997a6c0a3f780"
     },
     {
-      "bytes": 9275,
+      "bytes": 9283,
       "path": "README.md",
-      "sha256": "b65606451cffa65bc563b1917e30144532a535561c7315890f647331658497d5"
+      "sha256": "c4f1b648b01605f26d7389e1df26b06d4fc98cb65ba6be09f3be1fe1cd93f26c"
     },
     {
       "bytes": 2934,
       "path": "RELEASE-ALLOWLIST.json",
-      "sha256": "f27ab677c370f499e6f4af41993f9fa789ed4d137daa84ecf276b1c8550f7c49"
+      "sha256": "563e28ef7beeab7a6e749846e989c6c8c44310835a4b29cdda5581e520c18b2b"
     },
     {
       "bytes": 7818,
@@ -148,14 +148,14 @@
       "sha256": "7e01bd436fe0c1242ff0128290ed43f05a4123c688b06b6b4d721e56ebbc06c0"
     },
     {
-      "bytes": 1794,
+      "bytes": 1990,
       "path": "conductor/config.example.json",
-      "sha256": "7c448cc4badca7720cedc54cd5f7fc4e39b28fcdc70d835a46a075e13f3bc3d9"
+      "sha256": "3f9beb9e62a8fe6b71cc06f105f1bb0cdceb326607f8045a57f802b3948b59a5"
     },
     {
-      "bytes": 12451,
+      "bytes": 12579,
       "path": "conductor/config.mjs",
-      "sha256": "70dd4729fc315ac92566cc9c07b99221e402bad73d43e06a9f02b24e11461db6"
+      "sha256": "54e7c27c40c268fabcd052ff8860edd847189a4a306ae739dcefdbf0831dec41"
     },
     {
       "bytes": 730,
@@ -188,14 +188,14 @@
       "sha256": "0057efc77a81c1ad534feecf5d299cec3a051838b0d50bc04e69a9db2ae3eafe"
     },
     {
-      "bytes": 9266,
+      "bytes": 10674,
       "path": "conductor/providers/launch-bus.mjs",
-      "sha256": "cc348f3156b0ad45cd1e0acc7cedd5455882c05effedc13137f86b3f0ad829d2"
+      "sha256": "e21047c31e834c7955098dede2c09a73382bedaac17c9385b192a13753f393f0"
     },
     {
-      "bytes": 1709,
+      "bytes": 2151,
       "path": "conductor/providers/launch-bus.test.mjs",
-      "sha256": "dc2f397239ace8ad8f31375c1c9c064148ec7956396be9408b32df15d0a35a4f"
+      "sha256": "e379da7827a6450d65ac410899ccc768c7b2f72d33d7b680dfdd47a3454c0670"
     },
     {
       "bytes": 22924,
@@ -753,19 +753,19 @@
       "sha256": "e59dbdbab95ab3749451d539f8bca3462af6bb79ff6924fec031bc15acefbb77"
     },
     {
-      "bytes": 6629,
+      "bytes": 6647,
       "path": "docs/BLUEPRINT.md",
-      "sha256": "264355fa8af08b6c6f529a35e497da9da746540d11457d2fdccf95fffe27aa98"
+      "sha256": "dbb346b3ec3f6e86a0b3eeffef4ddd03e7cb918a7281deb31b7277875929a124"
     },
     {
-      "bytes": 14235,
+      "bytes": 15105,
       "path": "docs/COMPONENTS.md",
-      "sha256": "db77beecf6b73621691566f759414c3e62a4e85218a71e341ded9c560fe1330b"
+      "sha256": "7ea9ac0c3b0773949b86c849b78f7bed64eb3e26ffc34c3ec534ae9f4f31170f"
     },
     {
-      "bytes": 8807,
+      "bytes": 8823,
       "path": "docs/DISTRIBUTION.md",
-      "sha256": "643e0975f55a2fa6e60540721ef2aa12bd6711095471117c9ce11b0359d66992"
+      "sha256": "3c2a793145971c865ae394b01c3b2a88e68e313b132f73c35b025420e49be00a"
     },
     {
       "bytes": 19414,
@@ -793,9 +793,9 @@
       "sha256": "4647078516660d9da47f1838ed35b7f94755d28c552ede5c8e2858b0f8d87aa5"
     },
     {
-      "bytes": 15395,
+      "bytes": 17176,
       "path": "docs/SETUP.md",
-      "sha256": "44c1a6066eb0db50f0968538b871c0d6369e9003f4229577a126fe490c958741"
+      "sha256": "6e347aa7d6a76df331bf48e363d338a559574bf8e52a3f726e8f19c55f026232"
     },
     {
       "bytes": 5816,
@@ -985,7 +985,7 @@
     {
       "bytes": 469,
       "path": "installer/fixtures/blueprint-v1.json",
-      "sha256": "45546cb909871259aa8db69ff5ef703216da87d4592bace3031a7c80e70c799a"
+      "sha256": "8ab36d592647846f432d764cace2de9d746a13a417dad901de29d39b6c4bad94"
     },
     {
       "bytes": 5214,
@@ -998,9 +998,9 @@
       "sha256": "561d1c1c2864a6709189b975e116760fa50342e9b266a6ab7522eb512dba4fb0"
     },
     {
-      "bytes": 14199,
+      "bytes": 14209,
       "path": "installer/installation.py",
-      "sha256": "ee9b3ee64dfd870b9775912f2c80693b387855bb3d80194f3fe94ccd25597479"
+      "sha256": "5a51b755aa0477fe863d114d9da5fcc343154e6f8d4de810df1b8eb06e14941b"
     },
     {
       "bytes": 479,
@@ -1033,14 +1033,14 @@
       "sha256": "0d34acd4457a0de2457a2e0b1ce9d29f31e1a4d9dc2db69e358ccae79f9da79c"
     },
     {
-      "bytes": 20705,
+      "bytes": 23393,
       "path": "installer/onboarding.py",
-      "sha256": "02860640403068e6184562161f8e452cbce31746371697b461be16a371edd281"
+      "sha256": "0f659f38e7f5aca0e0abc91b460826a4c067e535ca7e1932188d34bf6d2b94f4"
     },
     {
-      "bytes": 28468,
+      "bytes": 28486,
       "path": "installer/release_guard.py",
-      "sha256": "ee32045bf09da38d41f85eb175e9073b04da6f1a388f983c8f3ae81b8bd16684"
+      "sha256": "5dd27d791e1ea6484e2fd3c62efddb9876b6e90a20c52e59c426e7a84da98c5c"
     },
     {
       "bytes": 352,
@@ -1098,9 +1098,9 @@
       "sha256": "a0c07f456bf9504adc00be53eb923dfd44de9da4b88a8ef44af652d965533b94"
     },
     {
-      "bytes": 12240,
+      "bytes": 12698,
       "path": "installer/test_onboarding.py",
-      "sha256": "be3b8f79c7df0dbb30075cc27f266e22447eddfc43f6664d14b428571afc9a1b"
+      "sha256": "2198c629d7113ce2bfa98b6bff7d767ae9486e3cfd165725293f7eb7957c3172"
     },
     {
       "bytes": 9510,
@@ -1488,19 +1488,19 @@
       "sha256": "e7fbafcf0df3bf3aabbc70593a11145206b532cc69d83231d9ae295e13c63bd3"
     },
     {
-      "bytes": 46093,
+      "bytes": 47601,
       "path": "platform/catalog.json",
-      "sha256": "ecfbb532a854e3552351c48489c7b43e3907e9aefa52183449b7aca250884afa"
+      "sha256": "c5c02f5903ecfc031f7fee16c1e11f49b50bc8d599d3a076021e00a9444e2bba"
     },
     {
       "bytes": 1175,
       "path": "platform/examples/build-fleet.json",
-      "sha256": "f633329a92893c5acd121b4b28acd59459bc67ae6e1a294f14585f002f3fddc7"
+      "sha256": "e5d5a00b75dc91d54d0fe2ea02a51aee6232cecb1984fc68484ce9d5cccf7e4f"
     },
     {
       "bytes": 626,
       "path": "platform/examples/single-node.json",
-      "sha256": "25589b77b069331c1b4775f1a5e03b066f3a61cd852357982c0d859145c9dc27"
+      "sha256": "c3d97f92a616114311ed0da9182ba719d80ab3b7b35a085cf5a3da28ab50a8ee"
     },
     {
       "bytes": 11680,
@@ -1513,9 +1513,9 @@
       "sha256": "08d6ad9b4afa2a1c5977f88b2e4499538472ca8c06f0b6910de4d36a9f124edc"
     },
     {
-      "bytes": 31139,
+      "bytes": 31883,
       "path": "site/agent-guide.md",
-      "sha256": "e2d5eeb2ce1e090d08862be290dfb2d20577272b7262627a8018211e01d6015f"
+      "sha256": "e596e3ec40648c36c9b7b6c8c08a18bcf8fd73294ce29a85bfa8adaab8d08bdd"
     },
     {
       "bytes": 2718,
@@ -1643,9 +1643,9 @@
       "sha256": "b1466deeef059105426c7f813de5591707e8585a36aa83f5a108773c679a516c"
     },
     {
-      "bytes": 44265,
+      "bytes": 45347,
       "path": "site/guide.html",
-      "sha256": "ba90e6999af51c2cb2fc7ec86d4088d46a4f1a1420599fe18e31ba26a0e92908"
+      "sha256": "65709db4586f341960982309879aa469657b3428b862bfdf71500fa2091029e6"
     },
     {
       "bytes": 1044,
@@ -1658,9 +1658,9 @@
       "sha256": "89371ee52f8ce4cbeb2fd661de401083db31d152d1b013c8f6bd362d5cd3aecd"
     },
     {
-      "bytes": 2877,
+      "bytes": 2885,
       "path": "site/llms.txt",
-      "sha256": "bd2cceb71e4443839ddd0e05e112ad3a0a52958e516f1ab7d6f8a43e0ae39c52"
+      "sha256": "0339f8ebf639820a4dd0f5a0d054641c1b9b6c2d2e734da0a26f62aa99a0c604"
     },
     {
       "bytes": 9615,
@@ -1723,9 +1723,9 @@
       "sha256": "fda7e946b8e0b5ab39b779206589e7a1079a22eb24efb89d7223e03fdfb1f751"
     },
     {
-      "bytes": 10914,
+      "bytes": 11026,
       "path": "site/verify-configure.mjs",
-      "sha256": "2b32a829bcd7c11112d2269fc0ce40f6c809dbdfa1912c77761e118273309607"
+      "sha256": "51a81f692c8cecb9c8814dcb8b252100845ca64f39630365522a743ac9a50750"
     },
     {
       "bytes": 8442,
@@ -1818,7 +1818,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "c7c9d2f6152074f32aa6ab42f474eae1dac852c0c86f652dec91bc281dda232b",
+  "inventory_sha256": "f3e4ad65a7d9105393f2e606ed7a35a51fc9fdc2eab3ff87db5ace03e55c90ce",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 87653251
+  "total_bytes": 87664746
 }

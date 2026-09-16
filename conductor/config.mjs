@@ -262,6 +262,7 @@ export function buildDefaultConfig(borgHomeInput, codexBinInput, options = {}) {
     providers: {
       grok: { enabled: false, capabilities: ['reasoning', 'interrupt-resume-steer'] },
       claude: { enabled: false, capabilities: ['reasoning'], missingCapabilities: ['native-thread-status', 'mid-turn-steer'] },
+      cursor: { enabled: false, capabilities: ['reasoning'], missingCapabilities: ['native-thread-status', 'mid-turn-steer'] },
     },
   };
 }

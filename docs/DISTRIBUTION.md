@@ -21,7 +21,7 @@ hashes for the exact release. The implementation includes:
 | Installer | Managed runtimes, exact dependency/model locks, private configuration, service lifecycle, client setup, health checks and release guard |
 | Memory | Native Mem0 CLI and scoped MCP servers, recall/capture hooks, ingestion, retention and consolidation |
 | Graph | Scoped Graphiti feed/backfill, recall projection, schema shim, supervision and canary tools |
-| Conductors | Codex app-server bridge, account-aware routing/admission, Grok and launch-bus adapters, bootstrap and protocol tests |
+| Conductors | Codex app-server bridge, account-aware routing/admission, Grok, Claude, Cursor and launch-bus adapters, bootstrap and protocol tests |
 | Coordination | Native Inbox Hub, identities, grants, leased messages, assignments, discoveries and Beads bootstrap |
 | Connector | Native files/processes/jobs/browser/UI/SSH tools, credential handles, authenticated MCP, OAuth gateway and watchdog |
 | Adapters | Three LoRA weight files, configurations, model cards and a checksummed base-model manifest |
