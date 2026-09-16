@@ -311,6 +311,7 @@ try {
     });
     results.screenshots.push("evidence/webkit-mobile.png");
     results.checks.push("WebKit mobile render, overflow and setup interaction");
+    await verifyExplorer({ page, browser, origin, evidence, results });
     await verifyGuide({ page, origin, evidence, results });
   }
 } catch (error) {

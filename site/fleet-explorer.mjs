@@ -188,18 +188,16 @@ dialog.addEventListener('close', () => {
   if (opener?.isConnected) opener.focus({ preventScroll: true });
 });
 dialog.addEventListener('keydown', (event) => {
-  if (event.key !== 'Tab') return;
+  if (event.key !== 'Tab' || event.altKey || event.ctrlKey || event.metaKey) return;
   const controls = [...dialog.querySelectorAll('button:not([disabled]), a[href]')]
     .filter((node) => node.getClientRects().length > 0);
-  const first = controls[0];
-  const last = controls.at(-1);
-  if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
-    event.preventDefault();
-    last?.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first?.focus();
-  }
+  if (!controls.length) return;
+  const index = controls.indexOf(document.activeElement);
+  const next = index < 0 ? (event.shiftKey ? controls.length - 1 : 0)
+    : (index + (event.shiftKey ? -1 : 1) + controls.length) % controls.length;
+  // Include buttons consistently even when Safari's OS keyboard setting skips them.
+  event.preventDefault();
+  controls[next].focus();
 });
 new MutationObserver(syncMotion).observe(document.documentElement, { attributes: true, attributeFilter: ['data-motion'] });
 document.addEventListener('visibilitychange', syncMotion);
