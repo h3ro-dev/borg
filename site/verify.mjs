@@ -20,6 +20,10 @@ const mime = {
   ".json": "application/json",
   ".svg": "image/svg+xml",
   ".ttf": "font/ttf",
+  ".webp": "image/webp",
+  ".glb": "model/gltf-binary",
+  ".md": "text/markdown; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
 };
 const server = createServer(async (req, res) => {
   try {
@@ -162,6 +166,14 @@ try {
   results.checks.push(
     "Both copy buttons write exact displayed commands to native clipboard and announce success",
   );
+  await page.locator('[data-copy="agent-prompt"]').click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()),
+    (await page.locator('#agent-prompt').textContent()).trim());
+  assert.match(await page.locator('.copy-status').textContent(), /Agent prompt copied/);
+  await page.locator('#fleet').scrollIntoViewIfNeeded();
+  await page.locator('#fleet img').evaluate(image => image.decode());
+  assert(await page.locator('#fleet img').evaluate(image => image.complete && image.naturalWidth === 2200));
+  results.checks.push('Homepage agent prompt copies exactly; full Blender fleet image loads');
   await page.evaluate(() => {
     navigator.clipboard.writeText = async () => {
       throw new DOMException("Denied", "NotAllowedError");
