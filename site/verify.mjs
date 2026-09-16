@@ -5,6 +5,7 @@ import { readFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
+import { verifyConfigurator } from "./verify-configure.mjs";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const { chromium, webkit } = await import(
   process.env.PLAYWRIGHT_MODULE
@@ -15,6 +16,8 @@ const mime = {
   ".html": "text/html",
   ".css": "text/css",
   ".js": "text/javascript",
+  ".mjs": "text/javascript",
+  ".json": "application/json",
   ".svg": "image/svg+xml",
   ".ttf": "font/ttf",
 };
@@ -27,8 +30,9 @@ const server = createServer(async (req, res) => {
     }
     const relative =
       decodeURIComponent(url.pathname.slice("/borg/".length)) || "index.html";
-    const target = path.resolve(root, relative);
-    if (!target.startsWith(root + path.sep)) {
+    const publicRoot = relative.startsWith('platform/') ? path.dirname(root) : root;
+    const target = path.resolve(publicRoot, relative);
+    if (!target.startsWith(publicRoot + path.sep)) {
       res.writeHead(403).end();
       return;
     }
@@ -61,6 +65,7 @@ try {
     permissions: ["clipboard-read", "clipboard-write"],
   });
   const page = await context.newPage();
+  page.setDefaultTimeout(15000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("response", (response) => {
@@ -71,6 +76,7 @@ try {
     await page.setViewportSize({ width, height: width < 768 ? 844 : 1000 });
     await page.goto(origin + "/borg/");
     await page.evaluate(() => document.fonts.ready);
+    await page.locator("#download-blueprint").waitFor();
     const dimensions = await page.evaluate(() => ({
       viewport: innerWidth,
       content: document.documentElement.scrollWidth,
@@ -193,14 +199,13 @@ try {
     .evaluateAll((elements) => elements.map((el) => el.getAttribute("href")));
   for (const href of links.filter((link) => link.startsWith("#")))
     assert.equal(await page.locator(href).count(), 1);
-  assert(
-    links
-      .filter((link) => link.startsWith("https://"))
-      .every((link) => link.startsWith("https://github.com/h3ro-dev/borg")),
-  );
-  assert.equal(await page.locator("form, input").count(), 0);
+  const catalog = JSON.parse(await readFile(path.join(root, '../platform/catalog.json')));
+  const documentedLinks = new Set(catalog.items.flatMap(item => [item.docs, item.source]));
+  assert(links.filter(link => link.startsWith('https://')).every(link =>
+    link.startsWith('https://github.com/h3ro-dev/borg') || documentedLinks.has(link)));
+  assert.equal(await page.locator('input[type="password"], input[type="email"]').count(), 0);
   results.checks.push(
-    "All in-page anchors resolve; public links point to project source/docs; no forms or token inputs",
+    "All in-page anchors resolve; public links point to project or catalog source/docs; no credential inputs",
   );
   assert.deepEqual(errors, []);
   results.checks.push("No JavaScript errors or HTTP asset errors under /borg/");
@@ -237,6 +242,7 @@ try {
       "axe WCAG 2 A/AA and 2.1 AA: zero automated violations in all three setup panels",
     );
   }
+  await verifyConfigurator({ page, origin, evidence, results });
   const nojs = await browser.newContext({
     javaScriptEnabled: false,
     viewport: { width: 390, height: 844 },
@@ -263,6 +269,7 @@ try {
     });
     await page.goto(origin + "/borg/");
     await page.evaluate(() => document.fonts.ready);
+    await page.locator("#download-blueprint").waitFor();
     assert(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -278,7 +285,7 @@ try {
     results.checks.push("WebKit mobile render, overflow and setup interaction");
   }
 } catch (error) {
-  results.failures.push(error.message);
+  results.failures.push(error.stack || error.message);
   process.exitCode = 1;
 } finally {
   if (browser) await browser.close();
