@@ -35,6 +35,20 @@
       "line": 266,
       "line_sha256": "7d46c91dda486706ae7492be8a0c58041387b609dc3dd40dd26c6b350ce3da6a",
       "reason": "Inert upstream documentation example in unmodified Three.js r180 GLTFLoader; not a configured endpoint. Source https://github.com/mrdoob/three.js/blob/r180/examples/jsm/loaders/GLTFLoader.js"
+    },
+    {
+      "rule": "estate-machine-default",
+      "path": "platform/catalog.json",
+      "line": 141,
+      "line_sha256": "d0c55a82528f03d6d278e40fe644ab24cb5f41f3cbbf1efbcf1d1e0384304850",
+      "reason": "Public Label Studio software catalog ID, not a machine identity or owner routing default. Official project documentation: https://labelstud.io/guide/"
+    },
+    {
+      "rule": "estate-machine-default",
+      "path": "platform/catalog.json",
+      "line": 1152,
+      "line_sha256": "f0a5d0be31a0d2b7bb8a8eb1c6a41a3e4f48c6ea7d384a4169829b185d9e3b3b",
+      "reason": "Public Label Studio software catalog ID, not a machine identity or owner routing default. Official project documentation: https://labelstud.io/guide/"
     }
   ]
 }
