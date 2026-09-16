@@ -39,9 +39,9 @@ def tool_search(query: str = "", limit: int = 10, offset: int = 0) -> dict:
         "machine_groups": catalog.get("machines", {}),
         "notice": "Catalog status is a dated claim, not current readiness or authority. Verify the selected native tool and its ownership before acting. The catalog is not an exhaustive list of everything installed.",
         "use": "Run the documented installed CLI/API through computer_start_process; inspect results with computer_read_process_output and files with computer_read_file. Read the tool's current instructions first. Keep credentials in local vault/hub consumers. Use a new, supported task identity for shared coordination; never borrow another task's client configuration.",
-        "local_sources": {
+        "local_sources": catalog.get("local_sources", {
             "runtime_instructions": str(borg_home() / "conductors/primary/profile/AGENTS.md"),
             "capability_map": str(CATALOG),
             "skills": [str(borg_home() / "conductors/primary/profile/skills")],
-        },
+        }),
     }

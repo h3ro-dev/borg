@@ -116,6 +116,16 @@ class ConnectorTests(unittest.TestCase):
             second = self.call("borg_tool_search", {"query": "documents", "limit": 2, "offset": 2})
             self.assertEqual(second["structuredContent"]["tools"], entries[2:])
             self.assertIsNone(second["structuredContent"]["next_offset"])
+            self.assertEqual(data["local_sources"]["capability_map"], str(catalog))
+            sources = {"runtime_instructions": "/example/existing/AGENTS.md",
+                       "capability_map": "/example/existing/capabilities.md",
+                       "skills": ["/example/existing/skills"]}
+            configured = json.loads(catalog.read_text())
+            configured["local_sources"] = sources
+            catalog.write_text(json.dumps(configured))
+            updated = self.call("borg_tool_search", {"query": "documents", "limit": 2})
+            self.assertEqual(updated["structuredContent"]["local_sources"], sources)
+            self.assertEqual(updated["structuredContent"]["tools"], entries[:2])
             catalog.unlink()
             missing = self.call("borg_tool_search", {})
             self.assertTrue(missing["isError"])
