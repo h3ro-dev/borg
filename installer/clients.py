@@ -9,7 +9,7 @@ from pathlib import Path
 import shlex
 import sys
 
-from installer import config, services
+from installer import blueprint, config, services
 
 
 def tool_command(doc: dict, action: str, prefix: str = "", tool: str = "", arguments: str = "{}") -> int:
@@ -45,6 +45,8 @@ def tool_command(doc: dict, action: str, prefix: str = "", tool: str = "", argum
 
 
 def hook(doc: dict, mode: str) -> None:
+    if not blueprint.full(doc):
+        raise ValueError("Memory capture hooks are disabled in the tools profile")
     root = Path(doc["home"])
     env = {**os.environ, **services.service_environment(doc),
            "MEM0_HOOK_SCOPES": doc["memory"]["default_scope"],
@@ -71,15 +73,19 @@ def stdio_proxy(doc: dict) -> None:
 
 def configure_clients(doc: dict) -> dict:
     root = Path(doc["home"])
-    hub = config.read_private(root / "coordination/config.json")
-    hub_client = Path(hub["connector_client_config"])
-    if not hub_client.resolve().is_relative_to(root / "coordination/data"):
-        raise ValueError("The connector Inbox identity must belong to this installation")
-    connector_path = root / "borg-context/config.json"
-    with config.private_writer(connector_path) as write_connector:
-        connector = config.read_private(connector_path)
-        connector["computer"]["inbox_client_config"] = str(hub_client)
-        write_connector(json.dumps(connector, indent=2) + "\n", replace=True)
+    if blueprint.selected(doc, "inbox"):
+        hub = config.read_private(root / "coordination/config.json")
+        hub_client = Path(hub["connector_client_config"])
+        if not hub_client.resolve().is_relative_to(root / "coordination/data"):
+            raise ValueError("The connector Inbox identity must belong to this installation")
+        connector_path = root / "borg-context/config.json"
+        with config.private_writer(connector_path) as write_connector:
+            connector = config.read_private(connector_path)
+            connector["computer"]["inbox_client_config"] = str(hub_client)
+            write_connector(json.dumps(connector, indent=2) + "\n", replace=True)
+
+    if not blueprint.selected(doc, "codex"):
+        return {"state": "not_selected"}
 
     # Use the existing native app-server protocol and CAS provisioning helpers.
     native = importlib.machinery.SourceFileLoader(
@@ -112,8 +118,14 @@ def configure_clients(doc: dict) -> dict:
             raise ValueError("An owner-edited BORG client configuration needs reconciliation")
         edits = [{"keyPath": "mcp_servers.borg", "value": mcp, "mergeStrategy": "replace"}]
         commands = {}
-        for event, mode in [("SessionStart", "prime"), ("UserPromptSubmit", "start"),
-                            ("Stop", "end"), ("SessionEnd", "end")]:
+        events = ([("SessionStart", "prime"), ("UserPromptSubmit", "start"),
+                   ("Stop", "end"), ("SessionEnd", "end")] if blueprint.full(doc) else [])
+        if not blueprint.full(doc):
+            for groups in current.get("hooks", {}).values():
+                if isinstance(groups, list) and any(" hook --home " in h.get("command", "")
+                        for g in groups for h in g.get("hooks", [])):
+                    raise ValueError("Tools profile cannot retain memory capture hooks; preserve and reconcile the profile")
+        for event, mode in events:
             text = shlex.join([*command, "hook", "--home", str(root), mode])
             commands[event] = text
             child = {"type": "command", "command": text, "timeout": 3 if mode == "prime" else 20}
@@ -137,9 +149,11 @@ def configure_clients(doc: dict) -> dict:
         rows = native.hooks_data(rpc.call("hooks/list", {"cwd": str(profile)}))
         selected = [r for r in rows if r.get("command") in commands.values()
                     and Path(str(r.get("sourcePath", ""))).resolve() == target.resolve()]
-        if len(selected) != 4:
+        if len(selected) != len(events):
             raise RuntimeError("The native provider did not discover all four BORG lifecycle hooks")
         layer = native.raw_user_layer(rpc.call("config/read", {"includeLayers": True}), target)
+        if layer["config"].get("mcp_servers", {}).get("borg") != mcp:
+            raise RuntimeError("Native BORG MCP configuration readback failed")
         state = dict(layer["config"].get("hooks", {}).get("state", {}))
         for row in selected:
             if not row.get("key") or not str(row.get("currentHash", "")).startswith("sha256:"):
@@ -156,7 +170,7 @@ def configure_clients(doc: dict) -> dict:
             if actual.get("trustStatus") != "trusted" or actual.get("currentHash") != expected["currentHash"]:
                 raise RuntimeError("Native hook trust readback failed")
         receipt = {"state": "configured", "profile": str(profile), "hooks": len(selected),
-                   "native_trust_verified": True, "mcp_server": "borg", "account_credentials_imported": False}
+                   "native_trust_verified": bool(events), "mcp_server": "borg", "account_credentials_imported": False}
         path = root / "conductors/primary/borg-client-receipt.json"
         config.write_private(path, json.dumps(receipt, indent=2) + "\n", replace=path.exists())
         return receipt

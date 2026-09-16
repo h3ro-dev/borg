@@ -4,6 +4,7 @@
 you install and control.
 
 [Explore BORG Collective](https://borg.utlyze.com/) ·
+[Size and configure your machines](https://borg.utlyze.com/#configure) ·
 [Set up your collective](docs/SETUP.md) ·
 [Hardware guide](docs/HARDWARE.md) · [MIT license](LICENSE)
 
@@ -68,6 +69,12 @@ through your own Cloudflare Access application and tunnel.
    account sessions, secrets or private corpora.
 
 ## Quickstart
+
+Use the [machine planner](https://borg.utlyze.com/#configure) to choose roles,
+orchestrators, integrations and workload for each machine. Download its blueprint,
+then follow the [blueprint guide](docs/BLUEPRINT.md). The [component catalog](docs/COMPONENTS.md)
+distinguishes included services, provider setup, external integrations and inactive
+research adapters. [Sizing assumptions](docs/SIZING.md) are public and versioned.
 
 Start with an empty directory on an Apple Silicon Mac:
 

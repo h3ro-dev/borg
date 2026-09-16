@@ -82,6 +82,9 @@ def specifications(doc: dict) -> dict[str, dict]:
                           "port": ports["tunnel_metrics"]}
     if (root / "borg-context/watchdog/config.json").exists():
         rows["watchdog"] = {"args": [py, str(root / "borg-context/connection_watchdog.py")]}
+    from installer.blueprint import service_names
+    enabled = set(service_names(doc))
+    rows = {name: row for name, row in rows.items() if name in enabled}
     for name, row in rows.items():
         row["env"] = {**base, **row.get("env", {})}
         row["cwd"] = str(root)
@@ -140,6 +143,8 @@ def install_definition(doc: dict, name: str, spec: dict) -> Path:
 def start(doc: dict, components: list[str] | None = None) -> dict:
     rows = specifications(doc)
     chosen = components or list(rows)
+    if any(name not in rows for name in chosen):
+        raise ValueError("A requested service is unselected or has no installed service contract")
     for name in chosen:
         spec = rows[name]
         if running(doc, name):
@@ -166,7 +171,10 @@ def start(doc: dict, components: list[str] | None = None) -> dict:
 
 
 def stop(doc: dict, components: list[str] | None = None) -> None:
+    from installer.blueprint import service_names
     chosen = components or list(specifications(doc))
+    if any(name not in service_names(doc) for name in chosen):
+        raise ValueError("A requested service is unselected or has no installed service contract")
     for name in reversed(chosen):
         target = label(doc, name)
         command = (["launchctl", "bootout", f"gui/{os.getuid()}/{target}"] if platform.system() == "Darwin"

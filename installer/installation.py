@@ -13,10 +13,10 @@ import subprocess
 import sys
 import time
 
-from installer import config, dependencies, services
+from installer import blueprint, config, dependencies, services
 
 SOURCE = Path(__file__).resolve().parent.parent
-DIRECTORIES = ["connector", "conductor", "memory", "graph", "training", "adapters", "coordination", "installer"]
+DIRECTORIES = ["connector", "conductor", "memory", "graph", "training", "adapters", "coordination", "installer", "platform"]
 
 
 def source_files() -> list[Path]:
@@ -144,6 +144,11 @@ def install_sources(doc: dict) -> str:
         {"id": "inbox", "name": "Agent Inbox", "category": "coordination", "invoke": {"source": str(app / "coordination")}},
         {"id": "beads", "name": "Beads work store", "category": "coordination", "invoke": {"cli": str(bindir / "bd")}}],
         "machines": {"this_installation": ["local"]}}
+    if doc.get("blueprint"):
+        enabled_tools = {"borg"} | ({"memory"} if blueprint.full(doc) else set())
+        enabled_tools |= {service for component, service in [("codex", "conductor"), ("inbox", "inbox"), ("beads", "beads")]
+                          if blueprint.selected(doc, component)}
+        catalog["tools"] = [row for row in catalog["tools"] if row["id"] in enabled_tools]
     if not (root / "ops/tools.json").exists():
         config.write_private(root / "ops/tools.json", json.dumps(catalog, indent=2) + "\n")
     return digest
@@ -162,6 +167,8 @@ def wait_for_port(port: int, *, seconds: int = 60) -> None:
 
 def login(doc: dict, provider: str) -> int:
     root = Path(doc["home"])
+    if not blueprint.selected(doc, "codex"):
+        raise ValueError("Codex is not selected in this blueprint")
     env = services.service_environment(doc)
     command = [str(dependencies.executable(root, "node", "node")),
                str(root / "app/conductor/borg-conductor.mjs"), "auth"]
@@ -197,22 +204,25 @@ def complete_install(doc: dict, *, start: bool = True) -> int:
     if not bootstrap.is_file():
         raise RuntimeError("The native coordination bootstrap is missing from this package")
     env = services.service_environment(doc)
-    subprocess.run([str(root / "mem0/venv/bin/python"), str(bootstrap), "bootstrap", "--home", str(root),
-                    "--owner", doc["owner"], "--port", str(doc["ports"]["inbox"])], env=env, check=True)
+    if blueprint.selected(doc, "inbox") or blueprint.selected(doc, "beads"):
+        subprocess.run([str(root / "mem0/venv/bin/python"), str(bootstrap), "bootstrap", "--home", str(root),
+                        "--owner", doc["owner"], "--port", str(doc["ports"]["inbox"])], env=env, check=True)
     node = dependencies.executable(root, "node", "node")
     conductor = root / "app/conductor/borg-conductor.mjs"
-    subprocess.run([str(node), str(conductor), "bootstrap", "--borg-home", str(root),
-        "--config", str(root / "conductors/config.json"), "--owner", doc["owner"],
-        "--instance-id", doc["instance_id"], "--port", str(doc["ports"]["conductor"]),
-        "--node-bin", str(node), "--codex-bin", str(root / "runtime/npm/node_modules/.bin/codex")], env=env, check=True)
-    subprocess.run([str(root / "mem0/venv/bin/python"), str(bootstrap), "init-beads",
-                    "--home", str(root), "--bd", str(dependencies.executable(root, "beads", "bd"))], env=env, check=True)
-    beads_launcher = "#!/bin/sh\nexec " + shlex.join([
-        str(root / "mem0/venv/bin/python"), "-B", str(bootstrap), "exec-beads", "--home", str(root),
-        "--bd", str(dependencies.executable(root, "beads", "bd")), "--"]) + ' "$@"\n'
-    target = root / "bin/bd"
-    config.write_private(target, beads_launcher, replace=target.exists())
-    target.chmod(0o700)
+    if any(blueprint.selected(doc, name) for name in ["codex", "grok", "claude", "launch-bus"]):
+        subprocess.run([str(node), str(conductor), "bootstrap", "--borg-home", str(root),
+            "--config", str(root / "conductors/config.json"), "--owner", doc["owner"],
+            "--instance-id", doc["instance_id"], "--port", str(doc["ports"]["conductor"]),
+            "--node-bin", str(node), "--codex-bin", str(root / "runtime/npm/node_modules/.bin/codex")], env=env, check=True)
+    if blueprint.selected(doc, "beads"):
+        subprocess.run([str(root / "mem0/venv/bin/python"), str(bootstrap), "init-beads",
+                        "--home", str(root), "--bd", str(dependencies.executable(root, "beads", "bd"))], env=env, check=True)
+        beads_launcher = "#!/bin/sh\nexec " + shlex.join([
+            str(root / "mem0/venv/bin/python"), "-B", str(bootstrap), "exec-beads", "--home", str(root),
+            "--bd", str(dependencies.executable(root, "beads", "bd")), "--"]) + ' "$@"\n'
+        target = root / "bin/bd"
+        config.write_private(target, beads_launcher, replace=target.exists())
+        target.chmod(0o700)
     from installer.clients import configure_clients
     configure_clients(doc)
     from installer.web import configure_watchdog
@@ -220,22 +230,27 @@ def complete_install(doc: dict, *, start: bool = True) -> int:
     if not start:
         print(json.dumps({"state": "installed_not_started", "home": str(root), "source_sha256": digest}))
         return 0
-    services.start(doc, ["qdrant", "graph", "ollama"])
-    for name in ["qdrant", "graph", "ollama"]:
-        wait_for_port(doc["ports"][name])
-    doc = dependencies.pull_models(doc)
-    # Initialize the native memory store and scope registry before readiness.
-    # These operations create no memories and make an empty installation usable.
-    env = services.service_environment(doc)
-    subprocess.run([str(root / "mem0/venv/bin/python"), str(root / "app/installer/brain_service.py"),
-                    "initialize"], env=env, check=True)
+    if blueprint.full(doc):
+        services.start(doc, ["qdrant", "graph", "ollama"])
+        for name in ["qdrant", "graph", "ollama"]:
+            wait_for_port(doc["ports"][name])
+        doc = dependencies.pull_models(doc)
+        # Initialize the native memory store and scope registry before readiness.
+        # These operations create no memories and make an empty installation usable.
+        env = services.service_environment(doc)
+        subprocess.run([str(root / "mem0/venv/bin/python"), str(root / "app/installer/brain_service.py"),
+                        "initialize"], env=env, check=True)
     services.start(doc)
-    for name in ["memory", "connector", "inbox", "conductor"]:
+    for name in [name for name in ["memory", "connector", "inbox", "conductor"] if name in blueprint.service_names(doc)]:
         wait_for_port(doc["ports"][name])
     from installer.health import wait_for_local_ready
     result = wait_for_local_ready(doc)
     print(json.dumps(result, indent=2))
-    print("Connect your own provider account with: " + str(root / "bin/borg") + " auth codex")
+    if blueprint.selected(doc, "codex"):
+        print("Connect your own provider account with: " + str(root / "bin/borg") + " auth codex")
+    if doc.get("blueprint"):
+        from installer.onboarding import plan
+        print(json.dumps(plan(doc), indent=2))
     return 0 if result["local_services_ready"] else 1
 
 

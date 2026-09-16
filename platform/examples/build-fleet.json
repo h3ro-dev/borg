@@ -1,0 +1,60 @@
+{
+  "schema": "borg-blueprint/v1",
+  "catalog_version": "2026-09-16.1",
+  "goal": "automation",
+  "machines": [
+    {
+      "id": "core",
+      "label": "Core node",
+      "platform": "macos-arm64",
+      "profile": "full",
+      "components": [
+        "codex",
+        "router",
+        "launch-bus",
+        "inbox",
+        "beads",
+        "fleet"
+      ],
+      "integrations": [
+        "n8n",
+        "grafana"
+      ],
+      "workload": {
+        "agents": 2,
+        "browsers": 1,
+        "builds": 0,
+        "memory_millions": 0.1,
+        "project_gb": 50,
+        "context_tokens": 16384,
+        "training": false
+      }
+    },
+    {
+      "id": "build-worker",
+      "label": "Build worker",
+      "platform": "macos-arm64",
+      "profile": "tools",
+      "components": [
+        "codex",
+        "router",
+        "inbox",
+        "beads",
+        "fleet",
+        "browser"
+      ],
+      "integrations": [
+        "github"
+      ],
+      "workload": {
+        "agents": 4,
+        "browsers": 2,
+        "builds": 3,
+        "memory_millions": 0,
+        "project_gb": 100,
+        "context_tokens": 16384,
+        "training": false
+      }
+    }
+  ]
+}

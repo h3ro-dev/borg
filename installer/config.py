@@ -150,9 +150,31 @@ def load(home: str | Path) -> dict:
     return doc
 
 
-def validate(doc: dict) -> None:
-    if not isinstance(doc.get("owner"), str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", doc["owner"]):
+def validate_owner(owner: str) -> None:
+    if not isinstance(owner, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,47}", owner):
         raise ValueError("Owner must be a stable lowercase identifier, 1-48 letters, digits, underscores or hyphens")
+
+
+def validate_install_inputs(home: str | Path, owner: str, port_base: int,
+                            projects: list[str] | None) -> None:
+    """Validate caller-controlled installation inputs without creating state."""
+    absolute_root(home)
+    validate_owner(owner)
+    if type(port_base) is not int or not 1024 <= port_base <= 65535 - max(PORT_OFFSETS.values()):
+        raise ValueError("BORG services need distinct unprivileged ports")
+    if projects and any(not absolute_root(p).is_dir() for p in projects):
+        raise ValueError("BORG projects must be existing absolute directories")
+
+
+def validate(doc: dict) -> None:
+    if "blueprint" in doc:
+        from installer import blueprint
+        selection = doc["blueprint"]
+        if not isinstance(selection, dict) or set(selection) != {"input", "machine_id"}:
+            raise ValueError("Invalid stored blueprint selection")
+        blueprint.validate(selection["input"], blueprint.catalog())
+        blueprint.machine(selection["input"], selection["machine_id"])
+    validate_owner(doc.get("owner"))
     uuid.UUID(doc["instance_id"])
     absolute_root(doc["home"])
     context_length = doc.get("models", {}).get("context_length", 16384)
@@ -167,8 +189,15 @@ def validate(doc: dict) -> None:
 
 
 def initialize(home: str | Path, owner: str, *, port_base: int = 18760,
-               projects: list[str] | None = None, model: str = "qwen3:4b") -> dict:
+               projects: list[str] | None = None, model: str = "qwen3:4b",
+               blueprint_selection: dict | None = None) -> dict:
     root = absolute_root(home)
+    validate_install_inputs(root, owner, port_base, projects)
+    from installer import blueprint
+    if blueprint_selection is not None:
+        blueprint.validate(blueprint_selection["input"], blueprint.catalog())
+        blueprint.check_runtime(blueprint.machine(blueprint_selection["input"], blueprint_selection["machine_id"]))
+    blueprint.check_existing(root, blueprint_selection)
     if (root / "config.json").exists():
         doc = load(root)
         if doc["owner"] != owner:
@@ -197,6 +226,10 @@ def initialize(home: str | Path, owner: str, *, port_base: int = 18760,
            "conductor": {"profile": "primary", "model": None},
            "components": {name: "included" for name in
                           ["memory", "graph", "capture", "adapters", "conductor", "coordination", "connector"]}}
+    if blueprint_selection is not None:
+        doc["blueprint"] = blueprint_selection
+        row = blueprint.selected_machine(doc)
+        doc["models"]["context_length"] = row["workload"]["context_tokens"]
     validate(doc)
     for sub in ["mem0/data", "graphiti/data", "borg-context/private", "ops", "logs", "services",
                 "models/ollama", "conductors/primary", "coordination/data", "beads"]:
@@ -210,6 +243,8 @@ def initialize(home: str | Path, owner: str, *, port_base: int = 18760,
                    "allowed_scopes": ["*"], "write_scope": doc["memory"]["default_scope"]}
                   for name, value in [(owner, owner_token), (doc["memory"]["principal"], upstream)]]
     write_private(root / "mem0/data/mcp-tokens.json", json.dumps({"version": 1, "principals": principals}, indent=2))
+    if blueprint_selection is not None:
+        write_private(root / "blueprint.json", json.dumps(blueprint_selection["input"], indent=2) + "\n")
     write_private(root / "config.json", json.dumps(doc, indent=2) + "\n")
     write_connector_config(doc)
     return doc

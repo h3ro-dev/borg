@@ -56,6 +56,24 @@ FORBIDDEN_NAMES = {
 FORBIDDEN_SUFFIXES = {".db", ".key", ".p12", ".pem", ".pyc", ".sqlite", ".token"}
 
 APPROVED_NETWORK_HOSTS = {
+    # Official documentation links in the configurable component catalog.
+    "developers.figma.com",
+    "developers.google.com",
+    "developers.notion.com",
+    "docs.frappe.io",
+    "docs.n8n.io",
+    "docs.railway.com",
+    "docs.sentry.io",
+    "docs.slack.dev",
+    "docs.twenty.com",
+    "grafana.com",
+    "help.penpot.app",
+    "labelstud.io",
+    "mlflow.org",
+    "vercel.com",
+    "www.blender.org",
+    "www.metabase.com",
+    "www.postgresql.org",
     "127.0.0.1",
     "apple.com",
     "cloudflare.com",

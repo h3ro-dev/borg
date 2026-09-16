@@ -2,7 +2,7 @@ name: Publish BORG Collective website
 on:
   push:
     branches: [master]
-    paths: [site/**, .github/workflows/site.yml]
+    paths: [site/**, platform/**, .github/workflows/site.yml]
   workflow_dispatch:
 permissions:
   contents: read
@@ -20,10 +20,17 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Verify machine planning contract
+        run: |
+          node --test platform/planner.test.mjs
+          python3 borg.py blueprint inspect platform/examples/single-node.json
+          python3 borg.py blueprint inspect platform/examples/build-fleet.json
       - name: Stage public website files
         run: |
-          mkdir -p _site/assets
+          mkdir -p _site/assets _site/platform
           cp site/index.html site/styles.css site/app.js site/scene.js _site/
+          cp site/configure.css site/configure.mjs _site/
+          cp platform/catalog.json platform/planner.mjs _site/platform/
           cp -R site/assets/. _site/assets/
           cp -R site/vendor _site/vendor
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4

@@ -1,5 +1,9 @@
 # BORG system and hardware guide
 
+Use the [per-machine calculator](https://borg.utlyze.com/#configure) for a workload-based
+plan, or read its [sizing assumptions](SIZING.md). It exports the [installer blueprint](BLUEPRINT.md)
+for your selected roles, orchestration components and integration setup.
+
 For a new full-system setup, we recommend **one Apple Silicon Mac with at least
 32 GB unified memory and 100 GB free SSD space**. Consider **64 GB** when BORG
 shares the machine with several active development/browser workloads or optional
