@@ -21,6 +21,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
@@ -42,7 +43,7 @@ DESCRIPTIONS = {
     "get_file_info": "Read a local file's metadata.",
     "edit_block": "Replace an exact text block in a local file. Read the current content, make the smallest requested change, then verify it.",
     "start_process": "Run a local command as the macOS user, or start an interactive process. Use existing installed tools. Inspect current state and applicable AGENTS.md, preserve other agents' work, and verify changes. Never print secrets or environments; use vault/hub pipes into local consumers. Login, MFA and consent belong in the normal provider interface. OS permissions still apply. An uncertain write result must be checked before retrying.",
-    "read_process_output": "Read bounded output from a command session started by this connector. Never request credential output.",
+    "read_process_output": "Read bounded output from a command session started by this connector. Length and offset are bytes; omit offset to continue from the previous read. Explicit offsets replay retained output (up to 2 MB). Never request credential output.",
     "interact_with_process": "Send input to a command session started by this connector. Never send credentials in tool arguments.",
     "force_terminate": "Terminate a command session started by this connector after checking its ownership and current state.",
     "list_sessions": "List command sessions started by this connector.",
@@ -332,9 +333,16 @@ class NativeComputer:
     def __init__(self):
         self._searches: dict[str, dict] = {}
         self._processes: dict[int, subprocess.Popen] = {}
+        self._process_output: dict[int, dict] = {}
         self._registry_lock = threading.Lock()
 
-    def read_file(self, path: str, offset: int = 0, length: int = MAX_FILE_BYTES) -> dict:
+    def read_file(self, path: str, offset: int = 0, length: int = MAX_FILE_BYTES,
+                  origin: Literal["llm", "ui"] = "llm", isUrl: bool = False,
+                  options: dict | None = None, range: str | None = None,
+                  sheet: str | None = None) -> dict:
+        # Origin is legacy caller metadata, never an authorization grant.
+        if isUrl or options or range or sheet:
+            raise ToolError("BORG capability unavailable: native read_file supports local byte ranges only")
         target = _path(path)
         offset = max(0, int(offset))
         length = max(0, min(int(length), MAX_FILE_BYTES))
@@ -355,7 +363,8 @@ class NativeComputer:
     def read_multiple_files(self, paths: list[str]) -> dict:
         return {"files": [self.read_file(path) for path in list(paths)[:50]]}
 
-    def write_file(self, path: str, content: str, mode: str = "rewrite") -> dict:
+    def write_file(self, path: str, content: str, mode: str = "rewrite",
+                   origin: Literal["llm", "ui"] = "llm") -> dict:
         target = _path(path)
         if len(content.encode()) > MAX_FILE_BYTES:
             raise ToolError("BORG file content exceeds the bounded write size")
@@ -403,7 +412,8 @@ class NativeComputer:
         target = _path(path); target.mkdir(parents=True, exist_ok=True)
         return {"path": str(target), "created": True}
 
-    def list_directory(self, path: str, depth: int = 1) -> dict:
+    def list_directory(self, path: str, depth: int = 1,
+                       origin: Literal["llm", "ui"] = "llm") -> dict:
         root = _path(path); depth = max(1, min(int(depth), 5)); rows = []
         deadline = time.monotonic() + SCAN_SECONDS
         truncated = False
@@ -426,11 +436,18 @@ class NativeComputer:
                 "bytes": info.st_size, "mode": oct(info.st_mode & 0o777),
                 "modified": info.st_mtime}
 
-    def edit_block(self, file_path: str, old_string: str, new_string: str) -> dict:
+    def edit_block(self, file_path: str, old_string: str | None = None,
+                   new_string: str | None = None, expected_replacements: int = 1,
+                   origin: Literal["llm", "ui"] = "llm", content: object = None,
+                   options: dict | None = None, range: str | None = None) -> dict:
+        if content is not None or options or range:
+            raise ToolError("BORG capability unavailable: edit_block supports exact text replacements only")
+        if not old_string or new_string is None or expected_replacements < 1:
+            raise ToolError("BORG edit requires old_string, new_string and a positive expected_replacements")
         target = _path(file_path); text = target.read_text(encoding="utf-8")
         count = text.count(old_string)
-        if count != 1:
-            raise ToolError("BORG edit requires exactly one matching text block")
+        if count != expected_replacements:
+            raise ToolError("BORG edit requires exactly the expected number of matching text blocks")
         return self.write_file(str(target), text.replace(old_string, new_string), "rewrite") | {"replacements": count}
 
     def start_search(self, path: str, pattern: str = "*", search_term: str = "",
@@ -479,46 +496,82 @@ class NativeComputer:
             return {"searches": [{"search_id": key, "remaining": len(value["rows"]) - value["offset"]}
                                  for key, value in self._searches.items()]}
 
-    def start_process(self, command: str, cwd: str | None = None, timeout_ms: int = 1000) -> dict:
+    def start_process(self, command: str, cwd: str | None = None, timeout_ms: int = 1000,
+                      shell: str | None = None, origin: Literal["llm", "ui"] = "llm",
+                      verbose_timing: bool = False) -> dict:
+        started = time.monotonic()
         if not command or len(command) > 4000: raise ToolError("BORG command is empty or too long")
+        executable = shell or ("/bin/zsh" if Path("/bin/zsh").is_file() else "/bin/sh")
+        executable = shutil.which(executable)
+        if executable is None or Path(executable).name not in {"sh", "bash", "zsh", "dash", "ksh"}:
+            raise ToolError("BORG capability unavailable: requested shell must be an installed POSIX shell")
         working = str(_path(cwd)) if cwd else str(Path.home())
-        proc = subprocess.Popen(["/bin/zsh", "-lc", command], cwd=working,
+        proc = subprocess.Popen([executable, "-lc", command], cwd=working,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 bufsize=0)
         for stream in (proc.stdin, proc.stdout, proc.stderr):
             os.set_blocking(stream.fileno(), False)
         with self._registry_lock:
             self._processes[proc.pid] = proc
+            self._process_output[proc.pid] = {"data": bytearray(), "base": 0, "cursor": 0}
         time.sleep(min(max(int(timeout_ms), 0), 250) / 1000)
-        return {"pid": proc.pid, "PID": proc.pid, "process ID": proc.pid,
+        result = {"pid": proc.pid, "PID": proc.pid, "process ID": proc.pid,
                 "message": f"process ID: {proc.pid}", "running": proc.poll() is None,
                 "returncode": proc.poll()}
+        if verbose_timing:
+            result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+        return result
 
-    def read_process_output(self, pid: int, timeout_ms: int = 1000) -> dict:
+    def read_process_output(self, pid: int, timeout_ms: int = 1000,
+                            length: int = MAX_OUTPUT_BYTES, offset: int | None = None,
+                            verbose_timing: bool = False) -> dict:
+        started = time.monotonic()
         proc = self._processes.get(int(pid));
         if proc is None: raise ToolError("BORG process session not found")
+        state = self._process_output[int(pid)]
+        start = state["cursor"] if offset is None else int(offset)
+        if length < 0 or start < 0:
+            raise ToolError("BORG process output length and offset must be nonnegative bytes")
+        if start < state["base"] or start > state["base"] + len(state["data"]):
+            raise ToolError("BORG process output offset is outside retained output; use the returned next_offset")
+        limit = min(int(length), MAX_OUTPUT_BYTES)
+        needed = max(0, start + limit - state["base"] - len(state["data"]))
         deadline = time.monotonic() + min(max(int(timeout_ms), 0), 5000) / 1000
-        chunks = []
         streams = [stream for stream in (proc.stdout, proc.stderr) if not stream.closed]
         size = 0
-        while streams and size < MAX_OUTPUT_BYTES:
+        while streams and size < needed:
             ready, _, _ = select.select(streams, [], [], max(0, deadline - time.monotonic()))
             if not ready: break
             for stream in ready:
                 try:
-                    chunk = os.read(stream.fileno(), MAX_OUTPUT_BYTES - size)
+                    chunk = os.read(stream.fileno(), needed - size)
                 except BlockingIOError:
                     continue
                 if chunk:
-                    chunks.append(chunk)
+                    state["data"].extend(chunk)
                     size += len(chunk)
                 else:
                     streams.remove(stream)
-                if size == MAX_OUTPUT_BYTES: break
+                    stream.close()
+                if size == needed: break
             if time.monotonic() >= deadline: break
-        output = b"".join(chunks).decode("utf-8", "replace")
-        return {"pid": proc.pid, "output": output, "running": proc.poll() is None,
-                "returncode": proc.poll(), "truncated": size == MAX_OUTPUT_BYTES}
+        excess = max(0, len(state["data"]) - MAX_FILE_BYTES)
+        if excess:
+            del state["data"][:excess]
+            state["base"] += excess
+        data = bytes(state["data"][start - state["base"]:start - state["base"] + limit])
+        next_offset = start + len(data)
+        state["cursor"] = max(state["cursor"], next_offset)
+        returncode = proc.poll()
+        if returncode is not None and proc.stdin is not None and not proc.stdin.closed:
+            proc.stdin.close()
+        result = {"pid": proc.pid, "output": data.decode("utf-8", "replace"),
+                  "running": returncode is None, "returncode": returncode,
+                  "offset": start, "next_offset": next_offset, "retained_from": state["base"],
+                  "bytes": len(data), "truncated": bool(limit and len(data) == limit)}
+        if verbose_timing:
+            result["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+        return result
 
     def interact_with_process(self, pid: int, input: str = "") -> dict:
         proc = self._processes.get(int(pid));
