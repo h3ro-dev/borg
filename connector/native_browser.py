@@ -258,7 +258,8 @@ class BrowserStore:
             try:
                 row = self._read_meta(path.parent.name); alive = self._pid_identity(int(row.get("pid", 0))) == row.get("pid_start")
                 if row.get("state") == "running" and not alive:
-                    row["state"] = "outcome_unknown"; self._write_meta(path, row)
+                    # Discovery must not overwrite a concurrent close/update.
+                    row["state"] = "outcome_unknown"
                 rows.append({k: row.get(k) for k in ("session_id", "state", "headless", "created_at")})
             except ToolError:
                 continue

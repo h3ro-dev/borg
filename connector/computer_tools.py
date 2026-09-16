@@ -17,9 +17,9 @@ import select
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastmcp.exceptions import ToolError
@@ -67,7 +67,7 @@ def contains_secret(value: str) -> bool:
 FAILURE_MESSAGES = {
     "credential_withheld": "Credential material was withheld. Verify any preceding change before retrying.",
     "authentication_required": "Authentication or a user-owned sign-in step is required.",
-    "busy": "The selected BORG capability is busy. Retry after the current bounded lane clears; do not replay an uncertain write.",
+    "busy": "BORG host capacity or the selected resource is busy. Check concurrency in borg_status; reconcile any uncertain write before retrying.",
     "permission_denied": "The native operation lacks a required operating-system or provider permission.",
     "policy_refused": "The downstream execution policy refused this operation. Do not bypass it; use a narrower supported operation or inspect admission requirements.",
     "admission_required": "The operation needs current ownership, lease, claim, or fleet admission before execution.",
@@ -153,29 +153,8 @@ class BoundaryMiddleware(Middleware):
         self.authorize = authorize
         self.settings = settings
         self.ledger = ledger
-        self.locks = {name: asyncio.Lock() for name in ("computer", "desktop", "job", "browser", "remote", "ui", "credential")}
-        self.pending = {name: 0 for name in self.locks}
-        self.lane_queue_limit = 8
-        self.lane_wait_seconds = 15.0
-
-    @asynccontextmanager
-    async def lane(self, name):
-        lock = self.locks[name]
-        if self.pending[name] >= 1 + self.lane_queue_limit:
-            raise ToolError("BORG_BUSY: capability queue is full")
-        self.pending[name] += 1
-        acquired = False
-        try:
-            try:
-                await asyncio.wait_for(lock.acquire(), timeout=self.lane_wait_seconds)
-                acquired = True
-            except TimeoutError:
-                raise ToolError("BORG_BUSY: capability wait deadline exceeded") from None
-            yield
-        finally:
-            if acquired:
-                lock.release()
-            self.pending[name] -= 1
+        from concurrency import CallScheduler
+        self.scheduler = CallScheduler(settings.computer.get("concurrency"))
 
     @staticmethod
     def _lane_name(tool_name: str) -> str | None:
@@ -258,8 +237,7 @@ class BoundaryMiddleware(Middleware):
                 receipt = await asyncio.to_thread(self.ledger.start, name, self._fingerprint(name, arguments))
             lane_name = self._lane_name(name)
             if lane_name:
-                async with self.lane(lane_name):
-                    result = await call_next(context)
+                result = await self.scheduler.run(name, arguments, lambda: call_next(context))
             else:
                 result = await call_next(context)
             dumped = result.model_dump()
@@ -313,6 +291,24 @@ class BoundaryMiddleware(Middleware):
 MAX_FILE_BYTES = 2_000_000
 MAX_OUTPUT_BYTES = 256_000
 MAX_SEARCH_RESULTS = 500
+MAX_SCAN_ENTRIES = 10_000
+SCAN_SECONDS = 5.0
+
+
+def _walk(root: Path, depth: int | None = None):
+    """Traverse only requested levels, without following directory symlinks."""
+    stack = [(root, 1)]
+    while stack:
+        directory, level = stack.pop()
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    yield entry
+                    if (depth is None or level < depth) and entry.is_dir(follow_symlinks=False):
+                        stack.append((Path(entry.path), level + 1))
+        except OSError:
+            if directory == root:
+                raise
 
 
 def _path(value: str) -> Path:
@@ -336,6 +332,7 @@ class NativeComputer:
     def __init__(self):
         self._searches: dict[str, dict] = {}
         self._processes: dict[int, subprocess.Popen] = {}
+        self._registry_lock = threading.Lock()
 
     def read_file(self, path: str, offset: int = 0, length: int = MAX_FILE_BYTES) -> dict:
         target = _path(path)
@@ -407,15 +404,17 @@ class NativeComputer:
         return {"path": str(target), "created": True}
 
     def list_directory(self, path: str, depth: int = 1) -> dict:
-        root = _path(path); depth = max(0, min(int(depth), 5)); rows = []
-        if depth == 0:
-            entries = list(root.iterdir())
-        else:
-            entries = [p for p in root.rglob("*") if len(p.relative_to(root).parts) <= depth]
-        for entry in sorted(entries)[:1000]:
-            rows.append({"path": str(entry), "name": entry.name,
-                         "type": "directory" if entry.is_dir() else "file"})
-        return {"path": str(root), "entries": rows, "truncated": len(entries) > 1000}
+        root = _path(path); depth = max(1, min(int(depth), 5)); rows = []
+        deadline = time.monotonic() + SCAN_SECONDS
+        truncated = False
+        for entry in _walk(root, depth):
+            if len(rows) >= 1000 or time.monotonic() >= deadline:
+                truncated = True
+                break
+            rows.append({"path": entry.path, "name": entry.name,
+                         "type": "directory" if entry.is_dir(follow_symlinks=False) else "file"})
+        return {"path": str(root), "entries": sorted(rows, key=lambda row: row["path"]),
+                "truncated": truncated}
 
     def move_file(self, source: str, destination: str) -> dict:
         src, dst = _path(source), _path(destination); dst.parent.mkdir(parents=True, exist_ok=True)
@@ -437,17 +436,32 @@ class NativeComputer:
     def start_search(self, path: str, pattern: str = "*", search_term: str = "",
                      max_results: int = 100) -> dict:
         root = _path(path); max_results = max(1, min(int(max_results), MAX_SEARCH_RESULTS)); rows = []
-        for candidate in root.rglob("*"):
-            if len(rows) >= MAX_SEARCH_RESULTS: break
+        deadline = time.monotonic() + SCAN_SECONDS
+        scanned = 0
+        truncated = False
+        content_truncated = 0
+        for entry in _walk(root):
+            if len(rows) >= MAX_SEARCH_RESULTS or scanned >= MAX_SCAN_ENTRIES or time.monotonic() >= deadline:
+                truncated = True
+                break
+            scanned += 1
+            candidate = Path(entry.path)
             if not fnmatch.fnmatch(candidate.name, pattern): continue
             if search_term and candidate.is_file():
                 try:
-                    if search_term not in candidate.read_text(encoding="utf-8", errors="ignore"):
+                    with candidate.open("rb") as handle:
+                        data = handle.read(MAX_FILE_BYTES + 1)
+                    content_truncated += int(len(data) > MAX_FILE_BYTES)
+                    if search_term not in data[:MAX_FILE_BYTES].decode("utf-8", "ignore"):
                         continue
                 except OSError: continue
             rows.append({"path": str(candidate), "type": "directory" if candidate.is_dir() else "file"})
-        search_id = str(uuid.uuid4()); self._searches[search_id] = {"rows": rows, "offset": max_results}
-        return {"search_id": search_id, "results": rows[:max_results], "has_more": len(rows) > max_results}
+        search_id = str(uuid.uuid4())
+        with self._registry_lock:
+            self._searches[search_id] = {"rows": rows, "offset": max_results}
+        return {"search_id": search_id, "results": rows[:max_results], "has_more": len(rows) > max_results,
+                "scan_truncated": truncated, "scanned_entries": scanned,
+                "content_truncated_files": content_truncated, "content_bytes_per_file": MAX_FILE_BYTES}
 
     def get_more_search_results(self, search_id: str, limit: int = 100) -> dict:
         state = self._searches.get(str(search_id));
@@ -456,19 +470,25 @@ class NativeComputer:
         return {"search_id": str(search_id), "results": rows, "has_more": state["offset"] < len(state["rows"])}
 
     def stop_search(self, search_id: str) -> dict:
-        existed = self._searches.pop(str(search_id), None) is not None
+        with self._registry_lock:
+            existed = self._searches.pop(str(search_id), None) is not None
         return {"search_id": str(search_id), "stopped": existed}
 
     def list_searches(self) -> dict:
-        return {"searches": [{"search_id": key, "remaining": len(value["rows"]) - value["offset"]}
-                             for key, value in self._searches.items()]}
+        with self._registry_lock:
+            return {"searches": [{"search_id": key, "remaining": len(value["rows"]) - value["offset"]}
+                                 for key, value in self._searches.items()]}
 
     def start_process(self, command: str, cwd: str | None = None, timeout_ms: int = 1000) -> dict:
         if not command or len(command) > 4000: raise ToolError("BORG command is empty or too long")
         working = str(_path(cwd)) if cwd else str(Path.home())
         proc = subprocess.Popen(["/bin/zsh", "-lc", command], cwd=working,
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self._processes[proc.pid] = proc
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                bufsize=0)
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            os.set_blocking(stream.fileno(), False)
+        with self._registry_lock:
+            self._processes[proc.pid] = proc
         time.sleep(min(max(int(timeout_ms), 0), 250) / 1000)
         return {"pid": proc.pid, "PID": proc.pid, "process ID": proc.pid,
                 "message": f"process ID: {proc.pid}", "running": proc.poll() is None,
@@ -477,21 +497,46 @@ class NativeComputer:
     def read_process_output(self, pid: int, timeout_ms: int = 1000) -> dict:
         proc = self._processes.get(int(pid));
         if proc is None: raise ToolError("BORG process session not found")
-        deadline = time.monotonic() + min(max(int(timeout_ms), 0), 5000) / 1000; chunks = []
-        while time.monotonic() < deadline:
-            ready, _, _ = select.select([proc.stdout, proc.stderr], [], [], max(0, deadline - time.monotonic()))
+        deadline = time.monotonic() + min(max(int(timeout_ms), 0), 5000) / 1000
+        chunks = []
+        streams = [stream for stream in (proc.stdout, proc.stderr) if not stream.closed]
+        size = 0
+        while streams and size < MAX_OUTPUT_BYTES:
+            ready, _, _ = select.select(streams, [], [], max(0, deadline - time.monotonic()))
             if not ready: break
             for stream in ready:
-                chunk = os.read(stream.fileno(), MAX_OUTPUT_BYTES)
-                if chunk: chunks.append(chunk)
-            if proc.poll() is not None and not ready: break
-        output = b"".join(chunks)[:MAX_OUTPUT_BYTES].decode("utf-8", "replace")
-        return {"pid": proc.pid, "output": output, "running": proc.poll() is None, "returncode": proc.poll()}
+                try:
+                    chunk = os.read(stream.fileno(), MAX_OUTPUT_BYTES - size)
+                except BlockingIOError:
+                    continue
+                if chunk:
+                    chunks.append(chunk)
+                    size += len(chunk)
+                else:
+                    streams.remove(stream)
+                if size == MAX_OUTPUT_BYTES: break
+            if time.monotonic() >= deadline: break
+        output = b"".join(chunks).decode("utf-8", "replace")
+        return {"pid": proc.pid, "output": output, "running": proc.poll() is None,
+                "returncode": proc.poll(), "truncated": size == MAX_OUTPUT_BYTES}
 
     def interact_with_process(self, pid: int, input: str = "") -> dict:
         proc = self._processes.get(int(pid));
         if proc is None or proc.stdin is None: raise ToolError("BORG process session not found")
-        proc.stdin.write(input.encode()); proc.stdin.flush(); return {"pid": proc.pid, "sent": len(input.encode())}
+        data = input.encode()
+        if len(data) > MAX_OUTPUT_BYTES:
+            raise ToolError("BORG process input exceeds the bounded write size")
+        sent = 0
+        deadline = time.monotonic() + 1.0
+        while sent < len(data):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([], [proc.stdin], [], max(0, remaining))[1]:
+                raise ToolError(f"BORG process input timed out after {sent} bytes; inspect the process before retrying")
+            try:
+                sent += os.write(proc.stdin.fileno(), data[sent:])
+            except BlockingIOError:
+                continue
+        return {"pid": proc.pid, "sent": sent}
 
     def force_terminate(self, pid: int) -> dict:
         proc = self._processes.get(int(pid));
@@ -507,8 +552,10 @@ class NativeComputer:
         return {"pid": proc.pid, "terminated": True}
 
     def list_sessions(self) -> dict:
+        with self._registry_lock:
+            processes = list(self._processes.items())
         return {"sessions": [{"pid": pid, "running": proc.poll() is None, "returncode": proc.poll()}
-                             for pid, proc in self._processes.items()]}
+                             for pid, proc in processes]}
 
 
 def mount_computer(server, config):

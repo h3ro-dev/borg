@@ -110,14 +110,14 @@ class LaneTests(unittest.IsolatedAsyncioTestCase):
         release = asyncio.Event()
 
         async def desktop():
-            async with middleware.lane("desktop"):
+            async with middleware.scheduler.slot(("physical-desktop",)):
                 desktop_entered.set()
                 await release.wait()
 
         task = asyncio.create_task(desktop())
         await desktop_entered.wait()
         async with asyncio.timeout(0.2):
-            async with middleware.lane("computer"):
+            async with middleware.scheduler.slot():
                 pass
         release.set()
         await task
@@ -126,24 +126,25 @@ class LaneTests(unittest.IsolatedAsyncioTestCase):
         middleware = BoundaryMiddleware(lambda: None, SimpleNamespace(
             inbound_authorization_file=Path("/nonexistent"), mem0_token_file=Path("/nonexistent"),
             computer={}, desktop={}), ledger=None)
-        middleware.lane_queue_limit = 1
+        from concurrency import CallScheduler
+        middleware.scheduler = CallScheduler({"max_in_flight": 1, "queue_limit": 1})
         entered = asyncio.Event()
         release = asyncio.Event()
 
         async def holder():
-            async with middleware.lane("desktop"):
+            async with middleware.scheduler.slot(("physical-desktop",)):
                 entered.set()
                 await release.wait()
 
         first = asyncio.create_task(holder())
         await entered.wait()
         async def queued_waiter():
-            async with middleware.lane("desktop"):
+            async with middleware.scheduler.slot(("physical-desktop",)):
                 await release.wait()
         waiter = asyncio.create_task(queued_waiter())
         await asyncio.sleep(0)
         with self.assertRaisesRegex(server.ToolError, "BORG_BUSY"):
-            async with middleware.lane("desktop"):
+            async with middleware.scheduler.slot(("physical-desktop",)):
                 pass
         release.set()
         await first
@@ -157,9 +158,18 @@ class NativeComputerTests(unittest.IsolatedAsyncioTestCase):
             "/usr/bin/python3 -u -c 'print(\"BORG_NATIVE_OK\", flush=True)'",
             timeout_ms=100,
         )
-        output = computer.read_process_output(result["pid"], timeout_ms=1000)
-        self.assertIn("BORG_NATIVE_OK", output["output"])
-        computer.force_terminate(result["pid"])
+        import time
+        deadline = time.monotonic() + 5
+        chunks = []
+        try:
+            while time.monotonic() < deadline:
+                output = computer.read_process_output(result["pid"], timeout_ms=1000)
+                chunks.append(output["output"])
+                if "BORG_NATIVE_OK" in "".join(chunks) or not output["running"]:
+                    break
+            self.assertIn("BORG_NATIVE_OK", "".join(chunks))
+        finally:
+            computer.force_terminate(result["pid"])
 
     async def test_native_edit_requires_one_exact_block(self):
         computer = NativeComputer()

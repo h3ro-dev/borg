@@ -333,6 +333,7 @@ class BorgContext:
         except Exception:
             pass
         return {"observed_at": _now(), "connector": {"status": "PASS"},
+            "concurrency": self._scheduler.status() if hasattr(self, "_scheduler") else {"mode": "unknown"},
             "mem0": mem0_health,
             "access_mode": "owner_all", "project_roots": [str(p) for p in self.settings.project_roots],
             "capabilities": {"memory_read": mem0_health["status"] == "PASS",
@@ -448,8 +449,10 @@ def build_server(settings: Settings) -> FastMCP:
     ledger = OperationLedger(getattr(settings, "state_root", MEMORY / "borg-context") / "operations")
     server = FastMCP("borg-context", auth=BorgBearerVerifier(settings),
                      instructions=INSTRUCTIONS, mask_error_details=True)
-    server.add_middleware(BoundaryMiddleware(authorize, settings, ledger=ledger))
+    boundary = BoundaryMiddleware(authorize, settings, ledger=ledger)
+    server.add_middleware(boundary)
     context = BorgContext(settings)
+    context._scheduler = boundary.scheduler
     for name in ("borg_status", "borg_search", "borg_projects", "borg_project_context"):
         server.tool(annotations=READ_ONLY)(getattr(context, name))
     server.tool(annotations=WRITE)(context.borg_remember)

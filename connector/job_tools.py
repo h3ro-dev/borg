@@ -13,8 +13,11 @@ import os
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
+from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 
 from fastmcp.exceptions import ToolError
@@ -48,6 +51,14 @@ def _scrub(text: str) -> str:
     return text[:MAX_OUTPUT_BYTES]
 
 
+def _serialized_job(method):
+    @wraps(method)
+    def call(self, job_id, *args, **kwargs):
+        with self._job_lock(_id(job_id)):
+            return method(self, job_id, *args, **kwargs)
+    return call
+
+
 class JobStore:
     def __init__(self, root: Path):
         self.root = root
@@ -59,6 +70,24 @@ class JobStore:
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.chmod(directory, 0o700)
         self.processes: dict[str, subprocess.Popen] = {}
+        self._locks_guard = threading.Lock()
+        self._locks = {}
+
+    @contextmanager
+    def _job_lock(self, key):
+        with self._locks_guard:
+            lock, users = self._locks.get(key, (threading.RLock(), 0))
+            self._locks[key] = (lock, users + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with self._locks_guard:
+                lock, users = self._locks[key]
+                if users == 1:
+                    del self._locks[key]
+                else:
+                    self._locks[key] = (lock, users - 1)
 
     def close_all(self) -> None:
         """Release resident child handles without changing durable job truth."""
@@ -167,21 +196,28 @@ class JobStore:
         self.processes[job_id] = proc
         return {k: row[k] for k in ("job_id", "state", "pid", "started_at", "command_sha256")}
 
-    def status(self, job_id: str) -> dict:
-        row = self._read(self._job_path(job_id))
-        key = _id(job_id)
+    def _observed_status(self, row: dict) -> dict:
+        row = dict(row)
+        key = row["job_id"]
         proc = self.processes.get(key)
         if proc is not None and proc.poll() is not None:
             row["state"] = "succeeded" if proc.returncode == 0 else "failed"
             row["returncode"] = proc.returncode
             row["finished_at"] = row.get("finished_at") or _now()
-            self._write(self._job_path(key), row)
         elif row.get("state") == "running" and not self._alive(row):
             # After an adapter restart the process may have finished, but its
             # exit status is not provable without a resident waiter.
             row["state"] = "outcome_unknown"
             row["finished_at"] = row.get("finished_at") or _now()
             row["returncode"] = None
+        return row
+
+    @_serialized_job
+    def status(self, job_id: str) -> dict:
+        key = _id(job_id)
+        original = self._read(self._job_path(key))
+        row = self._observed_status(original)
+        if row != original:
             self._write(self._job_path(key), row)
         return {k: row.get(k) for k in ("job_id", "state", "pid", "started_at", "finished_at", "returncode", "command_sha256")}
 
@@ -204,6 +240,7 @@ class JobStore:
         return {"job_id": _id(job_id), "stream": stream, "offset": offset,
                 "output": _scrub(text), "bytes": len(data), "truncated": len(data) >= length}
 
+    @_serialized_job
     def cancel(self, job_id: str) -> dict:
         key = _id(job_id); row = self._read(self._job_path(key))
         if row.get("state") != "running":
@@ -229,7 +266,10 @@ class JobStore:
             paths = []
         for path in paths[:limit]:
             try:
-                rows.append(self.status(path.stem))
+                # Discovery reads atomic snapshots and never joins a native job
+                # writer's lock while occupying a shared execution slot.
+                row = self._observed_status(self._read(path))
+                rows.append({k: row.get(k) for k in ("job_id", "state", "pid", "started_at", "finished_at", "returncode", "command_sha256")})
             except ToolError:
                 continue
         return {"jobs": rows}

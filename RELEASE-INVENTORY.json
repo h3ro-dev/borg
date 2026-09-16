@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 280,
+  "file_count": 282,
   "files": [
     {
       "bytes": 29,
@@ -193,9 +193,9 @@
       "sha256": "1600e1b9bb2eda4fad5790d5ef17bb17d2e868439b58fceebcad09e1af3c071d"
     },
     {
-      "bytes": 1354,
+      "bytes": 3327,
       "path": "connector/README.md",
-      "sha256": "66d7dba5177e52ed33a02ea9a0de6bffdee5a195c5c444b173508047d27cec99"
+      "sha256": "9762c27b31a8e2de233c9e57b19b3418549aa712ef091881772db83bf306c82a"
     },
     {
       "bytes": 791,
@@ -208,9 +208,9 @@
       "sha256": "5dbd10ab2ca3ac830d79b2fc16455174496cc0d04e20e4911eeddff8073aa087"
     },
     {
-      "bytes": 28111,
+      "bytes": 28288,
       "path": "connector/borg_context_server.py",
-      "sha256": "2c83dd039b48f1f39bce0266ab01a9aee497b5489511289a7192b8ae4d0796d0"
+      "sha256": "1088a0c865bb57c9c8ad732093c6a6032bb5010da0836e080ccdb4f3ad5e9c4e"
     },
     {
       "bytes": 7432,
@@ -228,9 +228,14 @@
       "sha256": "626a4a31fec9be8d81640a4745e6ea8a0b97b8c30e663affb4817b47995a2d4a"
     },
     {
-      "bytes": 26850,
+      "bytes": 28840,
       "path": "connector/computer_tools.py",
-      "sha256": "213b795676d3bec37ce885b080ccbedd4b56e70afca1de5c97ba2ab0473c7ffb"
+      "sha256": "c707510d653c3462b14c600fd41f31258297165fcc11674c2a5ef71786e06a51"
+    },
+    {
+      "bytes": 9415,
+      "path": "connector/concurrency.py",
+      "sha256": "d36169e933073e3652aefdf93342a06125b5e7b1020d862fb8ff0c1b18eaca45"
     },
     {
       "bytes": 13787,
@@ -248,14 +253,14 @@
       "sha256": "b47e976b390b5867fce5b88f5e23367d934cc6271c1b64f36087a19311ea79f4"
     },
     {
-      "bytes": 14678,
+      "bytes": 16049,
       "path": "connector/job_tools.py",
-      "sha256": "d45cb0c1e74dcb442aaa23a21542dd7bd16185d12c92336fe96d6c9f0c301fbf"
+      "sha256": "39b91c88b7dcaa3acca48999ff0389e6c86d7328d82896b7b374c6ccdb994465"
     },
     {
-      "bytes": 18802,
+      "bytes": 18851,
       "path": "connector/native_browser.py",
-      "sha256": "c33a16c14b997378b138a4887c1e08fcac064a7943c88e1ee7375e3f8dc0287d"
+      "sha256": "4e9b79fdfa90848ef0d15b436798f4fad0d6c58e3e04fc57470f0e897b9c1de6"
     },
     {
       "bytes": 6914,
@@ -308,6 +313,11 @@
       "sha256": "7240910b538d7323bcc8c597aa229217d857f653b131e78ee67975ed28f22944"
     },
     {
+      "bytes": 19169,
+      "path": "connector/test_concurrency.py",
+      "sha256": "5f5cd55ceba5348d1c519ab8cffb20659de8dce2ab951bb4e7271ac9bf916520"
+    },
+    {
       "bytes": 7534,
       "path": "connector/test_connection_watchdog.py",
       "sha256": "0894b284dd34af6495190116a4b7670bede640225b81155278061eabccedaf7b"
@@ -348,9 +358,9 @@
       "sha256": "af93c743bc29f59ab44798acebd6e6429b730a48e2e958fa8757af395e2f5406"
     },
     {
-      "bytes": 14005,
+      "bytes": 14511,
       "path": "connector/test_resilience.py",
-      "sha256": "72add193e97b8ac14c1c1cf5c098c26529932dd28e642cda72049e36fd83db3e"
+      "sha256": "865b2f3bc8b45ac43cfc322c49a45835965240f9c7903a1c6996e98324894af4"
     },
     {
       "bytes": 23,
@@ -1403,7 +1413,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "674691ffdcdd7d5c3e646e7d89164eb6a95faa1dcaa9074112cf96611ccd5cdb",
+  "inventory_sha256": "404577d36b257dc00afa80270abf114420b6686fdc92f01b4ab647dc30afcc9c",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 82233958
+  "total_bytes": 82268608
 }
