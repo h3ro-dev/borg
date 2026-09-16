@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#10120f" />
+    <meta name="theme-color" content="#080b09" />
     <meta
       name="description"
       content="Your machines. Your agents. Your memory. BORG Collective is an independent agent-first operating platform you install and own."
@@ -17,6 +17,12 @@
       content="A shared local brain, native tools, and agent orchestration. Build a collective on your own terms."
     />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://borg.utlyze.com/" />
+    <meta
+      property="og:image"
+      content="https://borg.utlyze.com/assets/borg-ship-poster.webp"
+    />
+    <link rel="canonical" href="https://borg.utlyze.com/" />
     <title>BORG Collective — Your system. Your collective.</title>
     <link rel="icon" href="./assets/mark.svg" type="image/svg+xml" />
     <link
@@ -28,6 +34,10 @@
     />
     <link rel="stylesheet" href="./styles.css" />
     <script src="./app.js" defer></script>
+    <script type="importmap">
+      { "imports": { "three": "./vendor/three/three.module.min.js" } }
+    </script>
+    <script type="module" src="./scene.js"></script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
@@ -38,55 +48,153 @@
         ></a
       >
       <nav aria-label="Main navigation">
-        <a href="#system">The system</a><a href="#setup">Get started</a
+        <a class="nav-system" href="#system">The system</a
+        ><a href="#hardware">Hardware</a><a href="#setup">Install</a
         ><a class="nav-source" href="https://github.com/h3ro-dev/borg"
-          >Source <span aria-hidden="true">↗</span></a
+          >GitHub <span aria-hidden="true">↗</span></a
         >
       </nav>
     </header>
-    <main id="main">
-      <section class="hero wrap" aria-labelledby="hero-title">
-        <div class="hero-copy">
-          <p class="eyebrow">
-            <span class="square" aria-hidden="true"></span> Independent.
-            Agent-first. Yours.
-          </p>
-          <h1 id="hero-title">
-            YOUR MACHINES.<br />YOUR AGENTS.<br /><span>ONE COLLECTIVE.</span>
-          </h1>
-          <p class="hero-description">
-            Give your agents a shared brain and the tools to act. Memory,
-            coordination, and native control — running on a system you own.
-          </p>
-          <div class="hero-actions">
-            <a class="button primary" href="#setup"
-              >Build your collective <span aria-hidden="true">↗</span></a
-            ><a class="text-link" href="https://github.com/h3ro-dev/borg"
-              >Explore the source <span aria-hidden="true">↗</span></a
-            >
-          </div>
-          <p class="hero-note">
-            Local installation verified on Apple Silicon macOS.
-          </p>
+    <main id="main" tabindex="-1">
+      <section class="hero" aria-labelledby="hero-title" data-motion="paused">
+        <div class="cosmos" aria-hidden="true">
+          <div class="nebula"></div>
+          <div class="star-layer star-near"></div>
+          <div class="star-layer star-far"></div>
         </div>
-        <figure class="hero-art">
-          <img
-            src="./assets/collective-cube.svg"
-            width="680"
-            height="660"
-            alt="An original isometric cube built from interlocking dark circuit panels and acid-green connections."
-          />
-          <figcaption>
-            <span>FIG. 01 / THE COLLECTIVE</span
-            ><span>INDEPENDENT BY DESIGN</span>
-          </figcaption>
-        </figure>
-        <div class="hero-bottom">
-          <span>ONE OWNER. A CONNECTED SYSTEM.</span
-          ><a href="#system"
-            >Discover the architecture <span aria-hidden="true">↓</span></a
+        <div class="hero-layout wrap">
+          <div class="hero-copy">
+            <p class="eyebrow">
+              <span class="square" aria-hidden="true"></span> A collective.
+              Under your control.
+            </p>
+            <h1 id="hero-title">
+              YOUR MACHINES.<br />YOUR AGENTS.<br /><span>ONE COLLECTIVE.</span>
+            </h1>
+            <p class="hero-description">
+              A shared memory. The tools to act.<br />Bring your agents into a
+              system that remembers your work — and runs on infrastructure you
+              own.
+            </p>
+            <div class="hero-actions">
+              <a class="button primary" href="#setup"
+                >Build your collective <span aria-hidden="true">↗</span></a
+              ><a class="text-link" href="https://github.com/h3ro-dev/borg"
+                >Explore the source <span aria-hidden="true">↗</span></a
+              >
+            </div>
+            <p class="hero-note">
+              Independent &amp; open source.
+              <a href="https://github.com/h3ro-dev/borg/blob/master/LICENSE"
+                >BORG code: MIT ↗</a
+              >
+            </p>
+          </div>
+          <figure class="hero-art">
+            <div class="ship-stage" data-state="poster">
+              <img
+                class="ship-poster"
+                src="./assets/borg-ship-poster.webp"
+                width="1200"
+                height="1200"
+                fetchpriority="high"
+                alt="A dark industrial cube ship floating in space, with layered metallic plates, recessed channels and green illuminated details."
+              />
+            </div>
+            <figcaption>
+              <span id="scene-status">Your collective. In orbit.</span
+              ><button
+                type="button"
+                id="motion-toggle"
+                aria-label="Toggle scene motion"
+                aria-pressed="false"
+                hidden
+              >
+                Play motion
+              </button>
+            </figcaption>
+          </figure>
+        </div>
+        <div class="hero-bottom wrap">
+          <span>YOUR CONTEXT. YOUR COMPUTE. YOUR CALL.</span
+          ><a href="#providers"
+            >Enter the collective <span aria-hidden="true">↓</span></a
           >
         </div>
+      </section>
+
+      <section
+        class="provider-section wrap"
+        id="providers"
+        aria-labelledby="providers-title"
+      >
+        <div class="provider-intro">
+          <p class="eyebrow">BRING YOUR OWN ACCOUNTS</p>
+          <h2 id="providers-title">Different agents.<br />Shared context.</h2>
+          <p>
+            Choose your clients. BORG connects them to your local memory and
+            tools.
+          </p>
+        </div>
+        <div class="provider-strip">
+          <article>
+            <div class="provider-name">
+              <img
+                src="./assets/providers/openai.svg"
+                width="38"
+                height="38"
+                alt=""
+              />
+              <h3>GPT / Codex</h3>
+            </div>
+            <span class="integration-label">NATIVE CODEX SETUP</span>
+            <p>
+              Codex gets a conductor, MCP tools, and automatic memory hooks.
+              ChatGPT web access is an optional OAuth connection.
+            </p>
+          </article>
+          <article>
+            <div class="provider-name">
+              <img
+                class="claude-wordmark"
+                src="./assets/providers/claude.svg"
+                width="118"
+                height="26"
+                alt="Claude"
+              />
+              <h3 class="sr-only">Claude</h3>
+            </div>
+            <span class="integration-label">OWNER-CONFIGURED</span>
+            <p>
+              Connect your own Claude Code client through MCP. Included
+              conductor source requires explicit configuration.
+            </p>
+          </article>
+          <article>
+            <div class="provider-name">
+              <img
+                class="grok-wordmark"
+                src="./assets/providers/grok.svg"
+                width="88"
+                height="33"
+                alt="Grok"
+              />
+              <h3 class="sr-only">Grok</h3>
+            </div>
+            <span class="integration-label">OWNER-CONFIGURED</span>
+            <p>
+              Use a compatible Grok CLI with your own login and MCP setup.
+              Configure and verify the optional conductor separately.
+            </p>
+          </article>
+        </div>
+        <p class="provider-note">
+          Provider marks identify integrations, not partnerships or
+          endorsements.
+          <a href="https://github.com/h3ro-dev/borg/blob/master/docs/SETUP.md"
+            >See each provider’s setup boundaries ↗</a
+          >
+        </p>
       </section>
 
       <section
@@ -95,11 +203,9 @@
         aria-labelledby="system-title"
       >
         <div class="section-heading">
-          <p class="eyebrow">01 / THE SYSTEM</p>
+          <p class="eyebrow">01 / HOW IT FITS TOGETHER</p>
           <h2 id="system-title">
-            More than a session.<br /><span class="muted"
-              >A system that remembers.</span
-            >
+            One system.<br /><span class="muted">Four connected layers.</span>
           </h2>
           <p>
             Bring your agents, context, and tools together. Each installation
@@ -115,9 +221,10 @@
             </div>
             <h3>A shared local brain.</h3>
             <p>
-              Semantic memory and a temporal knowledge graph carry context
-              across sessions. Your source records stay the authority; memory
-              helps agents find them.
+              Semantic memory finds relevant facts. The temporal graph connects
+              entities, relationships, and time. Pinned Qwen extraction and
+              local embeddings power the default brain; your source records
+              remain the authority.
             </p>
             <a
               class="text-link"
@@ -159,79 +266,139 @@
               >See the native tools <span aria-hidden="true">↗</span></a
             >
           </article>
+          <article>
+            <span class="module-id">[ 04 / LEARN ]</span>
+            <div class="module-icon adapter-icon" aria-hidden="true">
+              <i></i><i></i><i></i>
+            </div>
+            <h3>Small models.<br />Explicit evidence.</h3>
+            <p>
+              Three trained LoRA adapters ship with the source: two for graph
+              extraction, one for memory capture. All remain inactive until
+              exact-base and real-pipeline validation.
+            </p>
+            <a
+              class="text-link"
+              href="https://github.com/h3ro-dev/borg/blob/master/adapters/README.md"
+              >Inspect the model cards <span aria-hidden="true">↗</span></a
+            >
+          </article>
+        </div>
+      </section>
+
+      <section class="adapter-section wrap" aria-labelledby="adapter-title">
+        <div>
+          <p class="eyebrow">INCLUDED RESEARCH / INACTIVE BY DEFAULT</p>
+          <h2 id="adapter-title">
+            Learning is a process.<br /><span class="muted"
+              >Promotion is a decision.</span
+            >
+          </h2>
+        </div>
+        <div class="adapter-explainer">
+          <p>
+            The default brain runs pinned Qwen and a local embedding model. The
+            shipped adapters are optional research artifacts, not a prerequisite
+            for daily use.
+          </p>
+          <p>
+            None has passed a promotion canary. The capture adapter’s semantic
+            content quality is still unknown. Validate the exact base model and
+            the real extraction workflow before activation.
+          </p>
+          <a
+            class="text-link"
+            href="https://github.com/h3ro-dev/borg/blob/master/adapters/README.md"
+            >Read the evidence, including the failures
+            <span aria-hidden="true">↗</span></a
+          >
         </div>
       </section>
 
       <section
-        class="architecture section"
-        aria-labelledby="architecture-title"
+        class="hardware section"
+        id="hardware"
+        aria-labelledby="hardware-title"
       >
-        <div class="wrap architecture-grid">
-          <div class="architecture-copy">
-            <p class="eyebrow">02 / YOUR COLLECTIVE</p>
-            <h2 id="architecture-title">
-              Your infrastructure.<br /><span class="accent"
-                >A common purpose.</span
-              >
+        <div class="wrap">
+          <div class="section-heading">
+            <p class="eyebrow">02 / CHOOSE YOUR FOUNDATION</p>
+            <h2 id="hardware-title">
+              A home for<br /><span class="accent">the whole system.</span>
             </h2>
             <p>
-              Start with one machine. Add your own hosts explicitly, verify
-              their identities, and discover their actual tools. Independent
-              work can run concurrently within your capacity and permissions.
-              Credentials stay on their target machines; operation receipts
-              record outcomes.
+              Memory, graph, local models, and native tools run together. Plan
+              for the system you will use, with room for your data and other
+              apps.
             </p>
-            <p class="fine-print">
-              Illustrative architecture. Generic machines and connections below
-              represent an owner-configured system, not a live fleet. Your
-              installation never joins another owner’s fleet automatically.
+          </div>
+          <div class="hardware-tiers">
+            <article>
+              <span class="tier-label">EVALUATE ON AN EXISTING MAC</span>
+              <h3>Start small.</h3>
+              <div class="tier-spec">16 <span>GB unified memory</span></div>
+              <p class="tier-disk">Plan for 50 GB free SSD</p>
+              <p>
+                A cautious starter evaluation with a light workload. Observe
+                memory pressure and model latency before depending on it.
+              </p>
+              <span class="tier-boundary"
+                >Evaluation guidance, not a measured minimum.</span
+              >
+            </article>
+            <article class="recommended">
+              <span class="tier-label">PRACTICAL FULL-SYSTEM PLAN</span>
+              <h3>Build your daily brain.</h3>
+              <div class="tier-spec">32+ <span>GB unified memory</span></div>
+              <p class="tier-disk">Plan for 100 GB free SSD</p>
+              <p>
+                A practical planning baseline for the default local brain,
+                services, and a modest daily agent workload.
+              </p>
+              <span class="tier-boundary"
+                >Capacity depends on context, jobs, and other apps.</span
+              >
+            </article>
+            <article>
+              <span class="tier-label">MORE WORK IN FLIGHT</span>
+              <h3>Leave room to grow.</h3>
+              <div class="tier-spec">64+ <span>GB unified memory</span></div>
+              <p class="tier-disk">Plan for 200 GB free SSD</p>
+              <p>
+                More headroom for concurrent work, larger corpora, and
+                experiments. Add owner-configured machines as your needs grow.
+              </p>
+              <span class="tier-boundary"
+                >Headroom is not unlimited concurrency.</span
+              >
+            </article>
+          </div>
+          <div class="hardware-notes">
+            <p>
+              <strong>Planning tiers, not benchmarks.</strong> The installer
+              documents at least 20 GB free disk for initial runtimes, models,
+              and caches. These larger allowances include working space; no RAM
+              minimum has been measured.
+            </p>
+            <p>
+              <strong>Daily inference ≠ training.</strong> Running the default
+              brain does not train models. Optional adapter preparation adds
+              base weights and an MLX runtime; training needs a separately
+              measured workload and budget.
+            </p>
+          </div>
+          <div class="hardware-foot">
+            <p>
+              Full native installation:
+              <strong>Apple Silicon macOS verified.</strong><br />Linux and
+              Intel Mac acceptance pending. Windows unsupported.
             </p>
             <a
               class="text-link"
-              href="https://github.com/h3ro-dev/borg/blob/master/docs/SETUP.md"
-              >Follow the owner setup guide
+              href="https://github.com/h3ro-dev/borg/blob/master/docs/HARDWARE.md"
+              >Hardware guide &amp; evidence
               <span aria-hidden="true">↗</span></a
             >
-          </div>
-          <div
-            class="topology"
-            role="group"
-            aria-label="Illustrative architecture: agents connect to a local brain and owner-configured tools"
-          >
-            <div class="diagram-label">
-              <span class="square" aria-hidden="true"></span> ILLUSTRATIVE /
-              OWNER-CONFIGURED
-            </div>
-            <div class="providers">
-              <div><strong>Codex</strong><span>Automatic hooks</span></div>
-              <div><strong>Claude</strong><span>Configurable</span></div>
-              <div><strong>Grok</strong><span>Configurable</span></div>
-            </div>
-            <div class="diagram-bus" aria-hidden="true"></div>
-            <div class="brain">
-              <img src="./assets/mark.svg" width="39" height="44" alt="" />
-              <div>
-                <strong>YOUR BORG</strong
-                ><span>Local memory + temporal graph</span>
-              </div>
-              <span class="brain-cross" aria-hidden="true">+</span>
-            </div>
-            <div class="diagram-bus lower" aria-hidden="true"></div>
-            <div class="machines">
-              <div>
-                <span class="machine-glyph" aria-hidden="true">▣</span
-                ><strong>Workstation</strong><span>Local tools</span>
-              </div>
-              <div>
-                <span class="machine-glyph" aria-hidden="true">▣</span
-                ><strong>Build host</strong><span>Configured SSH</span>
-              </div>
-              <div>
-                <span class="machine-glyph" aria-hidden="true">▣</span
-                ><strong>Lab node</strong><span>Configured SSH</span>
-              </div>
-            </div>
-            <p class="diagram-foot">MEMORY · CONDUCTOR · INBOX · BEADS</p>
           </div>
         </div>
       </section>
@@ -242,7 +409,7 @@
         aria-labelledby="setup-title"
       >
         <div class="section-heading">
-          <p class="eyebrow">03 / INITIALIZE</p>
+          <p class="eyebrow">03 / INITIALIZE YOUR SYSTEM</p>
           <h2 id="setup-title">Make it yours.</h2>
           <p>
             Install your own system first. Connect your own accounts. Add web
@@ -518,74 +685,70 @@ cd borg
       </section>
 
       <section
-        class="principles section wrap"
-        aria-labelledby="principles-title"
+        class="source-section section wrap"
+        id="source"
+        aria-labelledby="source-title"
       >
         <div>
-          <p class="eyebrow">04 / OPERATING PRINCIPLES</p>
-          <h2 id="principles-title">Ownership comes<br />with clarity.</h2>
-          <a
-            class="text-link"
-            href="https://github.com/h3ro-dev/borg#the-rules-the-system-lives-by"
-            >Read the project principles <span aria-hidden="true">↗</span></a
-          >
+          <p class="eyebrow">04 / OPEN SOURCE. OPEN TO INSPECTION.</p>
+          <h2 id="source-title">
+            Your system.<br /><span class="accent">All the way down.</span>
+          </h2>
+          <p>
+            Read the code. Inspect the model cards. Build your own collective
+            from the public repository.
+          </p>
+          <div class="source-actions">
+            <a class="button primary" href="https://github.com/h3ro-dev/borg"
+              >Get the source on GitHub <span aria-hidden="true">↗</span></a
+            ><a class="text-link" href="#setup"
+              >Start your installation <span aria-hidden="true">↑</span></a
+            >
+          </div>
         </div>
-        <div class="principle-list">
+        <div class="license-stack">
           <article>
             <span>01</span>
             <div>
-              <h3>Your data starts with you.</h3>
+              <h3>BORG code + shipped adapters</h3>
               <p>
-                New identities. Empty stores. Private provider profiles. No
-                inherited account sessions or connection to the author’s
-                infrastructure.
+                MIT licensed. The public source and included adapter weights are
+                yours to inspect and use under the license.
               </p>
+              <a
+                class="text-link"
+                href="https://github.com/h3ro-dev/borg/blob/master/LICENSE"
+                >Read the MIT license <span aria-hidden="true">↗</span></a
+              >
             </div>
           </article>
           <article>
             <span>02</span>
             <div>
-              <h3>Evidence before activation.</h3>
+              <h3>Base models + dependencies</h3>
               <p>
-                Three LoRA adapters are included, but inactive. Validate exact
-                base-model compatibility and your real extraction workflow
-                before promotion. Default extraction uses pinned Qwen.
+                Upstream components retain their own licenses, including
+                FalkorDB’s SSPL. Model weights and provider services have their
+                own terms.
               </p>
               <a
                 class="text-link"
-                href="https://github.com/h3ro-dev/borg/blob/master/adapters/README.md"
-                >Read the model cards <span aria-hidden="true">↗</span></a
+                href="https://github.com/h3ro-dev/borg/blob/master/THIRD_PARTY_NOTICES.md"
+                >Third-party notices <span aria-hidden="true">↗</span></a
               >
             </div>
           </article>
           <article>
             <span>03</span>
             <div>
-              <h3>Open to inspection.</h3>
+              <h3>Your installation + your data</h3>
               <p>
-                BORG-authored code and included adapters are MIT licensed.
-                Runtime dependencies and base models retain their own licenses,
-                documented in the source.
+                Fresh identities and empty data stores. Your provider accounts,
+                machines, and permissions. No automatic connection to another
+                owner’s fleet.
               </p>
-              <a
-                class="text-link"
-                href="https://github.com/h3ro-dev/borg/blob/master/THIRD_PARTY_NOTICES.md"
-                >Licenses &amp; third-party notices
-                <span aria-hidden="true">↗</span></a
-              >
             </div>
           </article>
-        </div>
-      </section>
-      <section class="closing wrap" aria-label="Start building">
-        <span class="eyebrow"
-          >THE NEXT SESSION DOESN’T HAVE TO START FROM ZERO.</span
-        >
-        <div>
-          <h2>BUILD YOUR<br /><span>COLLECTIVE.</span></h2>
-          <a class="button primary" href="#setup"
-            >Initialize your system <span aria-hidden="true">↗</span></a
-          >
         </div>
       </section>
     </main>

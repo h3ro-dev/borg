@@ -23,9 +23,9 @@ jobs:
       - name: Stage public website files
         run: |
           mkdir -p _site/assets
-          cp site/index.html site/styles.css site/app.js _site/
-          cp site/assets/mark.svg site/assets/collective-cube.svg _site/assets/
-          cp site/assets/chakra-petch-regular.ttf site/assets/chakra-petch-bold.ttf site/assets/OFL.txt _site/assets/
+          cp site/index.html site/styles.css site/app.js site/scene.js _site/
+          cp -R site/assets/. _site/assets/
+          cp -R site/vendor _site/vendor
       - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
           path: _site

@@ -118,4 +118,22 @@ The website includes Chakra Petch Regular and Bold from the
 [Google Fonts Chakra Petch distribution](https://github.com/google/fonts/tree/main/ofl/chakrapetch).
 Copyright 2018 The Chakra Petch Project Authors. Licensed under the SIL Open Font
 License 1.1; the complete license is included at `site/assets/OFL.txt`.
-The website's cube and mark are original SVG artwork.
+
+## Website scene and provider identifiers
+
+The cube ship is original procedural Blender artwork, distributed under BORG's
+MIT license with its reproducible source in `art/`. The BORG mark is original
+SVG artwork. No franchise mesh, image or texture is bundled.
+
+The website vendors selected files from **Three.js 0.180.0 (r180)** under MIT,
+including the upstream Meshopt decoder. Full notices are preserved in
+`site/vendor/three/LICENSE` and `site/vendor/three/LICENSE.meshoptimizer`.
+The local runtime's source URLs, version and integrity list are documented in
+`site/vendor/three/README.md` and `SHA256SUMS` in that directory.
+
+The OpenAI, Claude and Grok identifiers are sourced from their official public
+websites to identify the integrations described beside them. They retain their
+owners' trademark rights and are not relicensed under BORG's MIT grant.
+Sources, original proportions and distributed hashes are recorded in
+`site/assets/providers/README.md` and `SHA256SUMS` in that directory. Their use
+does not imply a partnership or endorsement.

@@ -3,8 +3,9 @@
 **Your machines. Your agents. One collective.** An agent-first operating platform
 you install and control.
 
-[Explore the website](https://h3ro-dev.github.io/borg/) ·
-[Set up your collective](docs/SETUP.md)
+[Explore BORG Collective](https://borg.utlyze.com/) ·
+[Set up your collective](docs/SETUP.md) ·
+[Hardware guide](docs/HARDWARE.md) · [MIT license](LICENSE)
 
 BORG gives your AI agents a shared local brain and native tools. Each installation has
 its own memory, temporal graph, computer and browser tools, conductor, Agent Inbox,

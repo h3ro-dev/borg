@@ -112,6 +112,7 @@ deliberately excluded from a distribution, so do not scan the working checkout:
 borg_source="$(mktemp -d)"
 git archive HEAD | tar -x -C "$borg_source"
 python3 -B "$borg_source/installer/release_guard.py" --root "$borg_source" \
+  --allowlist "$borg_source/RELEASE-ALLOWLIST.json" \
   --inventory "$borg_source/RELEASE-INVENTORY.json"
 ```
 
@@ -126,8 +127,10 @@ weights are present, generate and verify its deterministic inventory:
 
 ```sh
 python3 -B "$borg_source/installer/release_guard.py" --root "$borg_source" \
+  --allowlist "$borg_source/RELEASE-ALLOWLIST.json" \
   --write-inventory "$borg_source/RELEASE-INVENTORY.json"
 python3 -B "$borg_source/installer/release_guard.py" --root "$borg_source" \
+  --allowlist "$borg_source/RELEASE-ALLOWLIST.json" \
   --inventory "$borg_source/RELEASE-INVENTORY.json"
 ```
 
@@ -139,7 +142,9 @@ tree, the guard records and validates its explicit `excluded_self` path.
 
 Public author attribution or a necessary non-secret fixture that triggers a
 heuristic can be approved only with an exact rule, path, line number, full-line
-SHA-256, and reason in a `borg-release-guard-allowlist/v1` JSON document. Stale
+SHA-256, and reason in a `borg-release-guard-allowlist/v1` JSON document.
+`RELEASE-ALLOWLIST.json` preserves only exact public copyright and inert example
+lines in the unmodified website runtime; it grants no runtime network access. Stale
 entries fail. Credentials, private state/artifacts, private user paths,
 implicit owner data/policy sources, private network addresses, and weight
 integrity failures cannot be allowlisted. Reserved example domains and clearly
