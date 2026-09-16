@@ -1,11 +1,11 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 301,
+  "file_count": 323,
   "files": [
     {
-      "bytes": 1168,
+      "bytes": 1069,
       "path": ".github/workflows/site.yml",
-      "sha256": "533503c25b07e0762807e589e9d2552166476af4117cfc195b2ff9f8733a4242"
+      "sha256": "ce9982fff96baf9751a9146aedd18126ac8aa616d7f81f75e4ec1ec07ef33f5b"
     },
     {
       "bytes": 29,
@@ -18,14 +18,19 @@
       "sha256": "1ee496077ddbd98476168881ef5fdb880c8f8f5cda97e8aacaa997a6c0a3f780"
     },
     {
-      "bytes": 8602,
+      "bytes": 8662,
       "path": "README.md",
-      "sha256": "4b0c28aa25c5e402cae4c4cd6fca87c7e0e380e1e4595fb60c7967be4d2bd3f3"
+      "sha256": "64244ad9b7ae820dd9a2d53e63b4ffb767971cb1d6b373f3065a01651bb0033a"
     },
     {
-      "bytes": 6002,
+      "bytes": 2197,
+      "path": "RELEASE-ALLOWLIST.json",
+      "sha256": "2555dcd971e0d6b8331a0f91bd2a66296a2aa2f6d9a69fac6ff20b98b87d9323"
+    },
+    {
+      "bytes": 7004,
       "path": "THIRD_PARTY_NOTICES.md",
-      "sha256": "d2caa792542016f5cab26b5e544a23881e7bd8ce3a0c4b2e8dc17859b3ce4697"
+      "sha256": "0ee4ee0b71796a6e75818484170c6e41d7bb0e63bc03848e20078020062dd286"
     },
     {
       "bytes": 16390,
@@ -81,6 +86,16 @@
       "bytes": 29384266,
       "path": "adapters/graphiti-extraction-qwen3-4b/adapters.safetensors",
       "sha256": "2fe2159b1ad20333911a0d6b52de1f7fe8d0960e5a413b188075aeebf8186f7f"
+    },
+    {
+      "bytes": 2344,
+      "path": "art/README.md",
+      "sha256": "cbb9b39a08c8c6641efcfb21f6f02738f4e99dc8be9b01cda285438e8efebe92"
+    },
+    {
+      "bytes": 9462,
+      "path": "art/borg_ship.py",
+      "sha256": "ae0e4a767c4f2fe6f107dc48bc78defc2c09ce1d3794f6176ba0ca2e13f87914"
     },
     {
       "bytes": 179,
@@ -693,9 +708,14 @@
       "sha256": "e59dbdbab95ab3749451d539f8bca3462af6bb79ff6924fec031bc15acefbb77"
     },
     {
-      "bytes": 8486,
+      "bytes": 8807,
       "path": "docs/DISTRIBUTION.md",
-      "sha256": "e735220b8c12f1c84ea0035aa1f59bba4eaee0036c5d98112fd47bb8760243d0"
+      "sha256": "643e0975f55a2fa6e60540721ef2aa12bd6711095471117c9ce11b0359d66992"
+    },
+    {
+      "bytes": 19148,
+      "path": "docs/HARDWARE.md",
+      "sha256": "ba5ee1cfd5569a72c8bc7cd85af5fd81311a4c2000ade6e56259543a24cee0f6"
     },
     {
       "bytes": 6630,
@@ -948,9 +968,9 @@
       "sha256": "893b78141c1971b53a1795c3c9e7b49361a131aafc37f948834baaf41ccbc19b"
     },
     {
-      "bytes": 27188,
+      "bytes": 27536,
       "path": "installer/release_guard.py",
-      "sha256": "aab108a3924399f965bd29ef20aff76291213628385639a7eb5891b42e397d9c"
+      "sha256": "41b7d9a1c6249c765431e3eca3ce00a10923ff5e00182348f64b8269880692f0"
     },
     {
       "bytes": 352,
@@ -1008,9 +1028,9 @@
       "sha256": "be3b8f79c7df0dbb30075cc27f266e22447eddfc43f6664d14b428571afc9a1b"
     },
     {
-      "bytes": 9507,
+      "bytes": 9510,
       "path": "installer/test_release_guard.py",
-      "sha256": "2b3e9d24a7ac92923eb6ee5b0abe5e353ca2209f69b68eb843a12ba442d22edf"
+      "sha256": "846c401865704f0cd8a3b62971a957ed12067059db33ea05b09103783d074dc2"
     },
     {
       "bytes": 3605,
@@ -1398,6 +1418,16 @@
       "sha256": "13831d02389d917d22fcfa6c79f98f8acbf61d230add0e73a4d4dc5f3bfb9e56"
     },
     {
+      "bytes": 175862,
+      "path": "site/assets/borg-ship-poster.webp",
+      "sha256": "1f148822cef00792c725464c091f1ad2c4a0fe831f1e911d4f847252cd30dc70"
+    },
+    {
+      "bytes": 1709776,
+      "path": "site/assets/borg-ship.glb",
+      "sha256": "05fd62b658ba07593d9754c530f7229be55f9646acdac706bee21e13969aa2c7"
+    },
+    {
       "bytes": 78384,
       "path": "site/assets/chakra-petch-bold.ttf",
       "sha256": "65fbf76d95651697275e19db4d717c0e95a789ddd3476478b05292104db278a0"
@@ -1423,14 +1453,94 @@
       "sha256": "9d76a542ec65363b8a126da7115c117682e6b63352700e4f12af484e0ef99afc"
     },
     {
-      "bytes": 23037,
-      "path": "site/index.html",
-      "sha256": "54f55195d1df445813fd6133aabf678e4fd68e22ca753877dc93ecc6ae2012d3"
+      "bytes": 1574,
+      "path": "site/assets/providers/README.md",
+      "sha256": "c0935c6ecc61e33f8b3faa1bf83187d4b6404d72b8be283780a7f77fb6bb93ff"
     },
     {
-      "bytes": 21653,
+      "bytes": 229,
+      "path": "site/assets/providers/SHA256SUMS",
+      "sha256": "86b722b513bd00533916fccc3183af198dd390b1cfa3c06d482c10fb8a9261a7"
+    },
+    {
+      "bytes": 7989,
+      "path": "site/assets/providers/claude.svg",
+      "sha256": "2a6d57bedf1f5ed852a66c6ed023f343d82f8f40897451fbe8e2a68cec789568"
+    },
+    {
+      "bytes": 2269,
+      "path": "site/assets/providers/grok.svg",
+      "sha256": "fa72776bd7c25a9a12e62d676db83e255424f3f62530e704684ad67c99b6694f"
+    },
+    {
+      "bytes": 1918,
+      "path": "site/assets/providers/openai.svg",
+      "sha256": "b6930d08a383f03735bbf317ab9e410648501804f501cf58f563e8d5274e0880"
+    },
+    {
+      "bytes": 29279,
+      "path": "site/index.html",
+      "sha256": "07b70a024762a67e4ba84a4a904052c3add34a2926ade769fc6d70a14b17fd8d"
+    },
+    {
+      "bytes": 8942,
+      "path": "site/scene.js",
+      "sha256": "8447934c55bcbb77fff915f067e455cf55f4193ca6f6030b09fcfcd87210c05f"
+    },
+    {
+      "bytes": 31704,
       "path": "site/styles.css",
-      "sha256": "8f59fdab026a82e37ccfd581e1657e05a4926ef6a78243089767403e12300281"
+      "sha256": "dcdcc1dfce3d000c2e278ff38f34e49cdc9f8a0b4a81d6586742920e2a1620a3"
+    },
+    {
+      "bytes": 1081,
+      "path": "site/vendor/three/LICENSE",
+      "sha256": "bfe119ea4fd413f5f7ca3fcd63adb0c4a073ed39daa2fe7d3e6b769e21272601"
+    },
+    {
+      "bytes": 1079,
+      "path": "site/vendor/three/LICENSE.meshoptimizer",
+      "sha256": "d1bc307ff896c7fc65e3ff4823cc478194f7a5bc6436f99534ebede4d9e2017a"
+    },
+    {
+      "bytes": 1782,
+      "path": "site/vendor/three/README.md",
+      "sha256": "f897beedd9ea3631a2420e1c787521fe9114c236204de0795ca55b9da49b52df"
+    },
+    {
+      "bytes": 710,
+      "path": "site/vendor/three/SHA256SUMS",
+      "sha256": "a10f07067cfad5872df3600730f998a86f09964f8e0aa9327b10b471a065357d"
+    },
+    {
+      "bytes": 4899,
+      "path": "site/vendor/three/environments/RoomEnvironment.js",
+      "sha256": "c20f0b4677f6128a138d7152b85cbef9091f4f45cdfa05adca04d40c1697c7ae"
+    },
+    {
+      "bytes": 24848,
+      "path": "site/vendor/three/libs/meshopt_decoder.module.js",
+      "sha256": "784315b6959c85459eab77f51776158cc381d7e7d77b919ff7c4935f088a7c5c"
+    },
+    {
+      "bytes": 114739,
+      "path": "site/vendor/three/loaders/GLTFLoader.js",
+      "sha256": "67ac5551fdafa6e349bd80c8f8e5e39c136d6b2fb1ad647db9abb21dc86f9e4a"
+    },
+    {
+      "bytes": 381124,
+      "path": "site/vendor/three/three.core.min.js",
+      "sha256": "61ba0df005b05991361d040d8ff670e1aadfd0ce7aeebd1fdb0725957a8957de"
+    },
+    {
+      "bytes": 338908,
+      "path": "site/vendor/three/three.module.min.js",
+      "sha256": "e2b5ee6bccd38fd6d8a2428546b83c5f2426d84b152ef82be8055556e3b40eb6"
+    },
+    {
+      "bytes": 35539,
+      "path": "site/vendor/three/utils/BufferGeometryUtils.js",
+      "sha256": "fda7e946b8e0b5ab39b779206589e7a1079a22eb24efb89d7223e03fdfb1f751"
     },
     {
       "bytes": 10309,
@@ -1508,7 +1618,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "3f5bf9c7b1cda2ee4af8f5069c31663d85d432814b707f5e0e174ec38be9bf1e",
+  "inventory_sha256": "660e0f6557bbb29701cefde9d9ae18595b214624f7a79f20795c9c2369cee8de",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 82724551
+  "total_bytes": 85588898
 }

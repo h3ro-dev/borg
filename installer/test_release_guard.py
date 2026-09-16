@@ -67,9 +67,9 @@ class ReleaseGuardTests(unittest.TestCase):
         self.assertNotIn("prior-owner", output)
         self.assertNotIn(secret, output)
 
-    def test_only_reviewed_font_bytes_are_accepted(self) -> None:
+    def test_only_reviewed_asset_bytes_are_accepted(self) -> None:
         public_root = Path(__file__).resolve().parents[1]
-        for relative in release_guard.PUBLIC_FONT_ASSETS:
+        for relative in release_guard.PUBLIC_BINARY_ASSETS:
             path = self.root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes((public_root / relative).read_bytes())

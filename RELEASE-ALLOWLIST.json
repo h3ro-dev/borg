@@ -1,0 +1,40 @@
+{
+  "schema": "borg-release-guard-allowlist/v1",
+  "entries": [
+    {
+      "rule": "unapproved-email",
+      "path": "site/vendor/three/libs/meshopt_decoder.module.js",
+      "line": 2,
+      "line_sha256": "ed9c5e05168c791f06da46fd0b9a4990ebcc8ed5cf5eda908aac5062873938ce",
+      "reason": "Public upstream copyright contact in the unmodified Three.js r180 Meshopt decoder; source https://github.com/mrdoob/three.js/blob/r180/examples/jsm/libs/meshopt_decoder.module.js"
+    },
+    {
+      "rule": "unapproved-network-host",
+      "path": "site/vendor/three/loaders/GLTFLoader.js",
+      "line": 263,
+      "line_sha256": "e2ec67ace68357aa664678ff1fe18993a0e4ce0226c1079fb740541ca798c818",
+      "reason": "Inert upstream documentation example in unmodified Three.js r180 GLTFLoader; not a configured endpoint. Source https://github.com/mrdoob/three.js/blob/r180/examples/jsm/loaders/GLTFLoader.js"
+    },
+    {
+      "rule": "unapproved-network-host",
+      "path": "site/vendor/three/loaders/GLTFLoader.js",
+      "line": 264,
+      "line_sha256": "fa3af29f9da5426706b093b0644366cdeae5d56510399438333f1fbd80f29d53",
+      "reason": "Inert upstream documentation example in unmodified Three.js r180 GLTFLoader; not a configured endpoint. Source https://github.com/mrdoob/three.js/blob/r180/examples/jsm/loaders/GLTFLoader.js"
+    },
+    {
+      "rule": "unapproved-network-host",
+      "path": "site/vendor/three/loaders/GLTFLoader.js",
+      "line": 265,
+      "line_sha256": "a0d2ca7c1a0477baf01049a202a976f0333bff301f50a5dce50f1696fbf3709c",
+      "reason": "Inert upstream documentation example in unmodified Three.js r180 GLTFLoader; not a configured endpoint. Source https://github.com/mrdoob/three.js/blob/r180/examples/jsm/loaders/GLTFLoader.js"
+    },
+    {
+      "rule": "unapproved-network-host",
+      "path": "site/vendor/three/loaders/GLTFLoader.js",
+      "line": 266,
+      "line_sha256": "7d46c91dda486706ae7492be8a0c58041387b609dc3dd40dd26c6b350ce3da6a",
+      "reason": "Inert upstream documentation example in unmodified Three.js r180 GLTFLoader; not a configured endpoint. Source https://github.com/mrdoob/three.js/blob/r180/examples/jsm/loaders/GLTFLoader.js"
+    }
+  ]
+}

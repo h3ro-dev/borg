@@ -59,8 +59,11 @@ APPROVED_NETWORK_HOSTS = {
     "127.0.0.1",
     "apple.com",
     "cloudflare.com",
+    "borg.utlyze.com",
+    "brandfolder.com",
     "cdn.playwright.dev",
     "code.claude.com",
+    "claude.com",
     "developers.cloudflare.com",
     "developers.openai.com",
     "example.com",
@@ -74,6 +77,7 @@ APPROVED_NETWORK_HOSTS = {
     "h3ro-dev.github.io",
     "help.openai.com",
     "googleapis.com",
+    "grok.com",
     "localhost",
     "modelcontextprotocol.io",
     "microsoft.com",
@@ -87,16 +91,20 @@ APPROVED_NETWORK_HOSTS = {
     "qdrant.tech",
     "raw.githubusercontent.com",
     "scripts.sil.org",
+    "threejs.org",
     "www.w3.org",
+    "x.ai",
     "registry.npmjs.org",
     "registry.ollama.ai",
 }
 
-# Reviewed SIL OFL 1.1 website fonts from google/fonts/ofl/chakrapetch.
+# Reviewed OFL fonts and original Blender artwork (see art/README.md).
 # Exact pins permit only these public assets, never arbitrary binary payloads.
-PUBLIC_FONT_ASSETS = {
+PUBLIC_BINARY_ASSETS = {
     "site/assets/chakra-petch-regular.ttf": (78488, "98fcd638baa5c81ff0316b7538ce330ee3b23b1302726de3526d5933a8ecf986"),
     "site/assets/chakra-petch-bold.ttf": (78384, "65fbf76d95651697275e19db4d717c0e95a789ddd3476478b05292104db278a0"),
+    "site/assets/borg-ship.glb": (1709776, "05fd62b658ba07593d9754c530f7229be55f9646acdac706bee21e13969aa2c7"),
+    "site/assets/borg-ship-poster.webp": (175862, "1f148822cef00792c725464c091f1ad2c4a0fe831f1e911d4f847252cd30dc70"),
 }
 APPROVED_NETWORK_SUFFIXES = (
     ".example",
@@ -460,9 +468,9 @@ def scan(root: Path, *, skip: set[str] | None = None, allowlist_path: Path | Non
             continue
         digest = _sha256(data)
         inventory.append({"path": relative, "bytes": len(data), "sha256": digest})
-        if relative in PUBLIC_FONT_ASSETS:
-            if (len(data), digest) != PUBLIC_FONT_ASSETS[relative]:
-                findings.append(_path_finding("public-asset-integrity-mismatch", relative, "website font does not match its reviewed public source"))
+        if relative in PUBLIC_BINARY_ASSETS:
+            if (len(data), digest) != PUBLIC_BINARY_ASSETS[relative]:
+                findings.append(_path_finding("public-asset-integrity-mismatch", relative, "website asset does not match its reviewed public source"))
             continue
         if relative in expected_weights:
             expected_size, expected_digest = expected_weights[relative]
