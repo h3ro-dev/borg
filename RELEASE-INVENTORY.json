@@ -873,9 +873,9 @@
       "sha256": "7e8c8698a04b2e0b6e016add12633aa79f15e4219332a08f33a9c350a1f82c77"
     },
     {
-      "bytes": 9354,
+      "bytes": 9412,
       "path": "installer/clients.py",
-      "sha256": "f1b1aab17ff88bcd3b6c3b226d6ae25795e58250a48644a9ef604b33d241c6be"
+      "sha256": "723ab1cfd2be3cfbfcf499a8059da78063eea7a13cef47f0fdfcc3bc3cf051ca"
     },
     {
       "bytes": 13519,
@@ -993,9 +993,9 @@
       "sha256": "3e3c6f2e760d213b9e4405b159b69c60d2ac5bf3a7d51ab8d80fbcb392b0d591"
     },
     {
-      "bytes": 12237,
+      "bytes": 14901,
       "path": "installer/test_fleet_installation.py",
-      "sha256": "916860886266d7e4b3b9f59b3f18c3f93c737a1ba43874f54f80bc5ca9ac549c"
+      "sha256": "afd694d9d4f8240575f6e5bc633b044a05be0d0782f63c62746def167b926c96"
     },
     {
       "bytes": 7977,
@@ -1508,7 +1508,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "09824f27e45d3b9bfad88cf8d7e944987d53f355253eb0384d3d6391d3269af8",
+  "inventory_sha256": "9d9f05ed06f48443d64136db3fce58535b689667158268345456a192338fc757",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 82720674
+  "total_bytes": 82723396
 }

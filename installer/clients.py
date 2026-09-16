@@ -76,9 +76,10 @@ def configure_clients(doc: dict) -> dict:
     if not hub_client.resolve().is_relative_to(root / "coordination/data"):
         raise ValueError("The connector Inbox identity must belong to this installation")
     connector_path = root / "borg-context/config.json"
-    connector = config.read_private(connector_path)
-    connector["computer"]["inbox_client_config"] = str(hub_client)
-    config.write_private(connector_path, json.dumps(connector, indent=2) + "\n", replace=True)
+    with config.private_writer(connector_path) as write_connector:
+        connector = config.read_private(connector_path)
+        connector["computer"]["inbox_client_config"] = str(hub_client)
+        write_connector(json.dumps(connector, indent=2) + "\n", replace=True)
 
     # Use the existing native app-server protocol and CAS provisioning helpers.
     native = importlib.machinery.SourceFileLoader(

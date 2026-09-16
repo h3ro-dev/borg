@@ -12,6 +12,7 @@ from unittest.mock import patch
 import uuid
 
 from installer import config
+from installer import clients
 from installer.fleet import manage
 from fleet_tools import Fleet
 
@@ -71,6 +72,62 @@ class FleetInstallationTests(unittest.TestCase):
         self.assertEqual(current["identity"], self.expected)
         self.assertEqual(result["state"], "enrolled")
         self.assertTrue(result["restart_connector_required"])
+
+    def test_client_setup_and_enrollment_preserve_both_updates(self):
+        self.legacy_config()
+        client_path = self.root / "coordination/data/connector-client.json"
+        config.write_private(self.root / "coordination/config.json",
+                             json.dumps({"connector_client_config": str(client_path)}))
+        read_paused, release_read, verified, enrolled = [threading.Event() for _ in range(4)]
+        errors = []
+        original_read = config.read_private
+
+        def read(path):
+            value = original_read(path)
+            if path == self.connector and threading.current_thread().name == "client-setup":
+                read_paused.set()
+                if not release_read.wait(5):
+                    raise RuntimeError("test did not release client setup")
+            return value
+
+        def setup():
+            try:
+                clients.configure_clients(self.doc)
+            except RuntimeError as exc:
+                if str(exc) != "stop before provider setup":
+                    errors.append(exc)
+
+        def enroll():
+            try:
+                manage(self.doc, self.args)
+                enrolled.set()
+            except Exception as exc:
+                errors.append(exc)
+
+        with self.peer(verified.set), patch.object(config, "read_private", read), \
+             patch.object(clients.importlib.machinery.SourceFileLoader, "load_module",
+                          side_effect=RuntimeError("stop before provider setup")):
+            setup_thread = threading.Thread(target=setup, name="client-setup", daemon=True)
+            enroll_thread = threading.Thread(target=enroll, daemon=True)
+            setup_thread.start()
+            try:
+                self.assertTrue(read_paused.wait(2))
+                enroll_thread.start()
+                self.assertTrue(verified.wait(2))
+                self.assertFalse(enrolled.wait(.1), "enrollment must wait for the client's read/write transaction")
+            finally:
+                release_read.set()
+                setup_thread.join(5)
+                if enroll_thread.ident is not None:
+                    enroll_thread.join(5)
+            self.assertFalse(setup_thread.is_alive())
+            self.assertFalse(enroll_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(enrolled.is_set())
+        current = config.read_private(self.connector)
+        self.assertEqual(current["identity"], self.expected)
+        self.assertEqual(current["fleet"], {"registry_file": str(self.registry)})
+        self.assertEqual(current["computer"]["inbox_client_config"], str(client_path))
 
     def test_conflicting_owner_pins_during_verification_prevent_enrollment(self):
         for legacy in (True, False):
