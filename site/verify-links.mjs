@@ -35,7 +35,7 @@ for (const document of ['llms.txt', 'agent-guide.md']) {
   const text = await readFile(path.join(site, document), 'utf8');
   assert(text.length > 500, `${document} must contain readable orientation`);
   for (const match of text.matchAll(/https:\/\/borg\.utlyze\.com\/[^\s)<>"`\]]*/g)) {
-    await check(match[0], document);
+    await check(match[0].replace(/[.,;!?]+$/, ''), document);
   }
 }
 console.log(`Verified ${checked} local page, asset and agent-document links.`);

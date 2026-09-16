@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import assert from "node:assert/strict";
 import { verifyConfigurator } from "./verify-configure.mjs";
+import { verifyGuide } from "./verify-guide.mjs";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const { chromium, webkit } = await import(
   process.env.PLAYWRIGHT_MODULE
@@ -271,6 +272,17 @@ try {
     "No-JavaScript fallback exposes all setup guidance and selectable commands without inactive controls",
   );
   await nojs.close();
+  await verifyGuide({ page, origin, evidence, results });
+  if (process.env.AXE_SCRIPT) {
+    await page.addScriptTag({ path: process.env.AXE_SCRIPT });
+    const audit = await page.evaluate(async () => await axe.run(document, {
+      runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa'] },
+    }));
+    await writeFile(path.join(evidence, 'guide-accessibility.json'), JSON.stringify(audit, null, 2));
+    assert.equal(audit.violations.length, 0, 'Guide accessibility violations');
+    results.checks.push('Guide axe WCAG 2/2.1 AA: zero automated violations');
+  }
+  assert.deepEqual(errors, [], 'Homepage and guide must load without script or asset failures');
   await context.close();
   await browser.close();
   browser = null;
@@ -297,6 +309,7 @@ try {
     });
     results.screenshots.push("evidence/webkit-mobile.png");
     results.checks.push("WebKit mobile render, overflow and setup interaction");
+    await verifyGuide({ page, origin, evidence, results });
   }
 } catch (error) {
   results.failures.push(error.stack || error.message);
