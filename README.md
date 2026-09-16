@@ -5,6 +5,8 @@ you install and control.
 
 [Explore BORG Collective](https://borg.utlyze.com/) ·
 [Size and configure your machines](https://borg.utlyze.com/#configure) ·
+[Install guide](https://borg.utlyze.com/guide.html) ·
+[Agent entry point](https://borg.utlyze.com/llms.txt) ·
 [Set up your collective](docs/SETUP.md) ·
 [Hardware guide](docs/HARDWARE.md) · [MIT license](LICENSE)
 

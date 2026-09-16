@@ -30,6 +30,8 @@ jobs:
           mkdir -p _site/assets _site/platform
           cp site/index.html site/styles.css site/app.js site/scene.js _site/
           cp site/configure.css site/configure.mjs _site/
+          cp site/fleet.css site/guide.html site/guide.css site/guide.js _site/
+          cp site/llms.txt site/agent-guide.md _site/
           cp platform/catalog.json platform/planner.mjs _site/platform/
           cp -R site/assets/. _site/assets/
           cp -R site/vendor _site/vendor

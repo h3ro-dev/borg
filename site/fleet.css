@@ -1,0 +1,47 @@
+/* Fleet overview and the on-site guide entrance. The diagram also works without JS. */
+.fleet { border-bottom: 1px solid var(--line); }
+.fleet-figure { margin-top: 40px; border: 1px solid var(--line); background: #060909; }
+.fleet-image-frame { overflow: hidden; }
+.fleet-figure img { width: 100%; height: auto; }
+.fleet-figure figcaption { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 19px 24px; border-top: 1px solid var(--line); }
+.fleet-figure figcaption > span { display: flex; align-items: center; gap: 10px; font: 11px/1.5 var(--mono); color: #becdaf; letter-spacing: .06em; }
+.fleet-figure .text-link { font-size: 12px; }
+.fleet-legend { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 35px; }
+.fleet-legend article { padding-right: 28px; }
+.fleet-legend article + article { padding-left: 28px; border-left: 1px solid var(--line); }
+.fleet-coordinate { color: var(--acid); font: 10px/1.6 var(--mono); letter-spacing: .07em; }
+.fleet-legend h3 { font-size: 22px; margin-top: 17px; line-height: 1.2; }
+.fleet-legend p { color: var(--muted); font-size: 14px; margin-top: 14px; line-height: 1.8; }
+.fleet-boundary { color: var(--muted); font-size: 12px; line-height: 1.9; max-width: 960px; margin-top: 30px; }
+.fleet-actions, .handoff-links { display: flex; flex-wrap: wrap; align-items: center; gap: 20px 28px; margin-top: 28px; }
+.fleet-actions .text-link { font-size: 12px; }
+.agent-handoff { display: grid; grid-template-columns: .9fr 1.1fr; gap: 44px; margin-top: 40px; padding: 34px; border: 1px solid #566d3d; background: linear-gradient(115deg, #192312, #0d120d 80%); align-items: center; }
+.agent-handoff .eyebrow { font-size: 10px; color: #c9d9b8; }
+.agent-handoff h3 { font-size: 32px; letter-spacing: -.02em; line-height: 1.15; margin-top: 16px; }
+.agent-handoff p:not(.eyebrow) { color: #bec9b3; font-size: 14px; margin-top: 18px; max-width: 390px; }
+.handoff-links { gap: 16px 24px; }
+.handoff-links .button { font-size: 12px; padding: 13px 18px; }
+.handoff-links .text-link { font-size: 12px; }
+.handoff-prompt { min-width: 0; }
+.handoff-prompt pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; padding: 23px; font-size: 13px; }
+.handoff-prompt .terminal-footer a { text-decoration: underline; text-underline-offset: 4px; }
+@media (max-width: 1000px) {
+  .agent-handoff { gap: 26px; padding: 26px; }
+  .fleet-legend h3 { font-size: 20px; }
+}
+@media (max-width: 700px) {
+  .fleet-figure { margin-top: 28px; }
+  .fleet-figure figcaption { padding: 16px; align-items: start; flex-direction: column; gap: 12px; }
+  .fleet-figure figcaption > span { font-size: 9px; }
+  .fleet-legend { grid-template-columns: 1fr; margin-top: 10px; }
+  .fleet-legend article { padding: 25px 0; }
+  .fleet-legend article + article { padding-left: 0; border-left: 0; border-top: 1px solid var(--line); }
+  .fleet-legend h3 { margin-top: 10px; font-size: 22px; }
+  .fleet-legend p { margin-top: 10px; }
+  .fleet-boundary { margin-top: 0; }
+  .agent-handoff { grid-template-columns: 1fr; padding: 22px 18px; margin-top: 28px; }
+  .agent-handoff h3 { font-size: 29px; }
+  .handoff-prompt pre { padding: 18px 14px; font-size: 12px; }
+  .handoff-prompt .terminal-header { gap: 10px; }
+  .handoff-prompt .terminal-footer { padding: 14px; font-size: 10px; }
+}
