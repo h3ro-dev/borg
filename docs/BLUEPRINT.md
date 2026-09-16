@@ -49,3 +49,9 @@ The format is `borg-blueprint/v1` and must match the release's `platform/catalog
 The selected blueprint is stored as mode `0600` in `BORG_HOME/blueprint.json`, with its machine ID recorded in the private installation configuration. Rerun with the identical blueprint and machine; `borg onboard` supplies that command. For an installation made with `--no-start`, rerun the installer without that flag to initialize the selected stores and models.
 
 An existing default/full home cannot be converted to a blueprint or tools home. A changed blueprint, owner or machine is rejected, preserving current files and services. Use a new home for different choices. Existing source-manifest, private-file, profile, account-pin and native service identity checks still apply; a changed release is not silently installed over another release.
+
+## Native acceptance
+
+On 2026-09-16, browser-exported full and tools blueprints were installed into separate fresh Apple Silicon macOS homes. Both passed native selected-service readiness, file write/read and process execution. Identical reruns preserved installation identity and source; changed blueprints were refused. Blueprint files had mode `0600`.
+
+The full node verified memory authentication, graph storage, model digests, four trusted capture hooks, an actual brain cycle, Inbox and Beads. The tools node verified its connector, watchdog, selected conductor, Inbox and Beads with no memory services listening and no capture hooks. Both correctly reported that provider sign-in was still required. These checks do not establish Linux/Intel acceptance, hosted web-client OAuth, external integrations or real provider throughput.
