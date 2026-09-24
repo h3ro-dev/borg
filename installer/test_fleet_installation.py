@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -14,6 +15,10 @@ import uuid
 from installer import config
 from installer import clients
 from installer.fleet import manage
+
+# Match the connector import used by installer.fleet without requiring a caller's
+# PYTHONPATH to include the source tree's connector directory.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "connector"))
 from fleet_tools import Fleet
 
 

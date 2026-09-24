@@ -8,8 +8,8 @@ borg-conductor route-status --config /absolute/BORG_HOME/conductors/config.json 
   --cwd /absolute/workspace --work-id stable-work-id
 ```
 
-Use the workspace (any spelling of it resolves to the same filesystem-canonical
-path) and stable work ID supplied to `route`. This is
+Use the workspace and stable work ID supplied to `route`. For intents created by
+this version, every spelling resolves to the same filesystem-canonical path. This is
 read-only reconciliation: it does not create, resume, cancel or complete a worker.
 The returned receipt contains a bounded phase history, attempt ID, selected lane,
 native thread/turn IDs when proved, and error classification. Prompt text is not
@@ -61,9 +61,12 @@ where `route` validates the workspace; paths reported for different machines are
 never assumed disjoint. A claimed workspace that no longer exists still blocks
 its ancestors. A claim without `cwd` reserves only its work ID; a malformed or
 unresolvable claimed `cwd` refuses dispatch (`WORKSPACE_CLAIM_UNRESOLVED`).
-Intents recorded under a lexical path by earlier versions still block replay and
-remain visible to `route-status`. Symlinks inside a workspace that point
-elsewhere are not traced.
+External collectors must report paths that the router host can resolve; even one
+inaccessible path blocks dispatch until the claim or filesystem access is repaired.
+Intents recorded by earlier versions are keyed by the spelling used then; that
+spelling still blocks replay and finds status. A different spelling is protected
+only while the legacy receipt is active, through work-ID and workspace claims.
+Symlinks inside a workspace that point elsewhere are not traced.
 
 A receipt scan is all-or-error. Malformed JSON, unsafe file permissions, symlinks,
 unknown receipt states, active receipts without a work ID or absolute workspace,

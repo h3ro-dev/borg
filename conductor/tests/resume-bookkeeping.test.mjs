@@ -24,7 +24,7 @@ test('resume rebuilds bookkeeping from effective native settings and complete re
   const port = await unusedLoopbackPort();
   const historicalCwd = path.join(root, 'historical-worktree');
   const effectiveCwd = path.join(root, 'relocated-worktree');
-  fs.writeFileSync(fakeCodex, `#!/usr/bin/env node
+  fs.writeFileSync(fakeCodex, `#!${process.execPath}
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
