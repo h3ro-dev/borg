@@ -59,8 +59,10 @@ codes. No discretionary reservation or allowance floor is created.
 
 Dispatch holds a private lock, persists an intent before admission scans,
 rechecks the configured fleet before selection, and refuses duplicate
-`{workId,cwd}` intents across process restarts. Active workspace and work-ID
-claims are checked before native lifecycle calls. An ambiguous thread or turn
+`{workId,cwd}` intents across process restarts. Workspaces are compared by
+filesystem-canonical identity, so aliases and parent/child paths overlap. Active
+workspace and work-ID claims, including this router's own receipts under any
+claims collector, are checked before native lifecycle calls. An ambiguous thread or turn
 response remains `DO_NOT_RETRY` evidence.
 
 Use `route-status --cwd ABS --work-id ID` to inspect saved phase history and

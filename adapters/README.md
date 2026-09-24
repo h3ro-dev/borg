@@ -19,9 +19,13 @@ capture. Those shapes are what the scrub inserted: synthetic stand-ins look like
 identifiers because they were built to. No screened registry term appeared in any
 generation.
 
-**Compatibility is exact-match by construction.** A LoRA adapter is a low-rank delta on one
-specific frozen base model. Each adapter below loads only with the exact Hugging Face model
-id listed — not other sizes, not other revisions, not other quantizations. Load with:
+**Compatibility depends on the base weights.** A LoRA adapter is a low-rank delta on one
+specific frozen base model. Use the model ID, quantization and immutable release pin in
+[`MANIFEST.json`](MANIFEST.json); do not substitute another size or conversion.
+The training records preserve the model IDs but not the training-time commit hashes.
+The manifest pins verified release downloads, not reconstructed training revisions.
+Matching those pins does not establish compatibility or promotion readiness: validate
+each adapter with its base model and run the required canary before activation. Load with:
 
 ```bash
 pip install mlx-lm

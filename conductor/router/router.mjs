@@ -137,6 +137,10 @@ async function readJsonFiles(directory) {
 export async function observeClaims(machine, statePath, nowMs = Date.now()) {
   if (machine.claims.kind === 'command') return commandJson(machine.claims);
   if (machine.claims.kind !== 'router-state') throw new Error('CLAIMS_KIND_UNSUPPORTED');
+  return observeLocalReceiptClaims(statePath, nowMs);
+}
+
+async function observeLocalReceiptClaims(statePath, nowMs = Date.now()) {
   const receipts = await readJsonFiles(path.join(statePath, 'dispatch-receipts'));
   const terminal = new Set(['PRE_START_FAILED', 'COMPLETED', 'FAILED', 'CANCELLED', 'RECONCILED_NO_START']);
   for (const receipt of receipts) {
@@ -145,6 +149,9 @@ export async function observeClaims(machine, statePath, nowMs = Date.now()) {
     }
     if (ACTIVE_RECEIPT_STATES.has(receipt.state) && (typeof receipt.workId !== 'string' || !receipt.workId.trim())) {
       throw new Error('RECEIPT_WORK_ID_INVALID');
+    }
+    if (ACTIVE_RECEIPT_STATES.has(receipt.state) && (typeof receipt.cwd !== 'string' || !path.isAbsolute(receipt.cwd))) {
+      throw new Error('RECEIPT_CWD_INVALID');
     }
   }
   return {
@@ -431,18 +438,68 @@ function intentDigest(workId, cwd) {
   return sha256(JSON.stringify({ workId, cwd }));
 }
 
-async function createReceipt(config, receipt) {
+// Canonical workspace path: native realpath resolves symlinks and, on
+// case-insensitive volumes, letter case. A missing tail (a claimed workspace
+// that was since deleted) is kept below its deepest existing ancestor.
+async function canonicalWorkspace(value) {
+  let existing = path.resolve(value);
+  const missing = [];
+  while (true) {
+    try {
+      const real = await fs.realpath(existing);
+      return { path: path.join(real, ...missing), existing: real, exists: missing.length === 0 };
+    } catch (error) {
+      const parent = path.dirname(existing);
+      if (!['ENOENT', 'ENOTDIR'].includes(error.code) || parent === existing) throw error;
+      missing.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+// Device/inode of the deepest existing directory and each ancestor also
+// matches spellings realpath keeps distinct, such as firmlinks and bind mounts.
+async function workspaceIdentity(value) {
+  const canonical = await canonicalWorkspace(value);
+  const ancestry = [];
+  for (let current = canonical.existing; ; current = path.dirname(current)) {
+    const stat = await fs.stat(current, { bigint: true });
+    ancestry.push(`${stat.dev}:${stat.ino}`);
+    if (path.dirname(current) === current) break;
+  }
+  return { ...canonical, ancestry };
+}
+
+function isWithin(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative));
+}
+
+// Same directory, ancestor or descendant. Segment-aware, so sibling
+// worktrees such as `repo` and `repo-other` stay independent.
+function workspacesOverlap(left, right) {
+  return isWithin(left.path, right.path) || isWithin(right.path, left.path)
+    || (left.exists && right.ancestry.includes(left.ancestry[0]))
+    || (right.exists && left.ancestry.includes(right.ancestry[0]));
+}
+
+async function createReceipt(config, receipt, lexicalCwd) {
   const directory = path.join(config.statePath, 'dispatch-receipts');
   const intents = path.join(config.statePath, 'intents');
   await ensurePrivateDirectory(directory);
   await ensurePrivateDirectory(intents);
   const receiptPath = path.join(directory, `${receipt.attemptedAt.replace(/[:.]/g, '-')}-${receipt.attemptId}.json`);
   const intentPath = path.join(intents, `${intentDigest(receipt.workId, receipt.cwd)}.json`);
-  try {
-    const existing = JSON.parse(await fs.readFile(intentPath, 'utf8'));
-    throw new Error(`duplicate intent; do not retry: ${existing.receiptPath}`);
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+  // Intents recorded before canonical workspace identity are keyed by the
+  // lexical path and still block replay.
+  for (const cwd of new Set([receipt.cwd, lexicalCwd])) {
+    try {
+      const existing = JSON.parse(await fs.readFile(path.join(intents, `${intentDigest(receipt.workId, cwd)}.json`), 'utf8'));
+      throw new Error(`duplicate intent; do not retry: ${existing.receiptPath}`);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
   }
   await atomicPrivateWrite(receiptPath, receipt, { createOnly: true });
   try {
@@ -482,15 +539,27 @@ export async function rank(configInput, options = {}) {
   });
 }
 
-function assertClaimsAvailable(snapshot, receipt) {
-  for (const admission of Object.values(snapshot.admissions)) {
-    for (const claim of admission.claims?.active ?? []) {
-      if (claim.attemptId === receipt.attemptId) continue;
-      if (claim.workId === receipt.workId) throw new Error('WORK_ID_CLAIM_CONFLICT');
-      if (typeof claim.cwd === 'string' && path.resolve(claim.cwd) === receipt.cwd) {
-        throw new Error('WORKSPACE_CLAIM_CONFLICT');
+// Work IDs are reserved across every claim source and machine. Workspace
+// overlap is checked against every claim naming a workspace, resolved on this
+// router's filesystem, where dispatch validates cwd; paths reported for
+// different machines are never assumed disjoint. A claim without cwd reserves
+// only its work ID; a malformed or unresolvable cwd refuses dispatch.
+async function assertClaimsAvailable(claimSets, receipt, workspace) {
+  const active = claimSets.flatMap((claims) => claims?.active ?? [])
+    .filter((claim) => claim.attemptId !== receipt.attemptId);
+  if (active.some((claim) => claim.workId === receipt.workId)) throw new Error('WORK_ID_CLAIM_CONFLICT');
+  const identities = new Map();
+  for (const claim of active) {
+    if (claim.cwd === undefined || claim.cwd === null) continue;
+    if (typeof claim.cwd !== 'string' || !path.isAbsolute(claim.cwd)) throw new Error('WORKSPACE_CLAIM_UNRESOLVED');
+    if (!identities.has(claim.cwd)) {
+      try {
+        identities.set(claim.cwd, await workspaceIdentity(claim.cwd));
+      } catch {
+        throw new Error('WORKSPACE_CLAIM_UNRESOLVED');
       }
     }
+    if (workspacesOverlap(workspace, identities.get(claim.cwd))) throw new Error('WORKSPACE_CLAIM_CONFLICT');
   }
 }
 
@@ -499,15 +568,22 @@ export async function inspectDispatch(configInput, options = {}) {
   if (typeof options.workId !== 'string' || !options.workId.trim() || !path.isAbsolute(options.cwd ?? '')) {
     throw new Error('workId and absolute cwd are required');
   }
-  const cwd = path.resolve(options.cwd);
-  const intentPath = path.join(config.statePath, 'intents', `${intentDigest(options.workId.trim(), cwd)}.json`);
-  const intent = await readPrivateJsonRecord(intentPath);
+  const workId = options.workId.trim();
+  const lexicalCwd = path.resolve(options.cwd);
+  const { path: cwd } = await canonicalWorkspace(lexicalCwd);
+  let intent = null;
+  for (const candidate of new Set([cwd, lexicalCwd])) {
+    intent = await readPrivateJsonRecord(path.join(config.statePath, 'intents', `${intentDigest(workId, candidate)}.json`));
+    if (intent !== null) break;
+  }
   if (intent === null) return { found: false, state: 'NOT_FOUND', noStartProven: false, completionVerified: false };
   const receiptPath = intent.receiptPath;
   if (typeof receiptPath !== 'string' || path.dirname(receiptPath) !== path.join(config.statePath, 'dispatch-receipts')
       || !path.basename(receiptPath).endsWith('.json')) throw new Error('UNSAFE_RECEIPT_REFERENCE');
   const receipt = await readPrivateJsonRecord(receiptPath);
-  if (!receipt || receipt.workId !== options.workId.trim() || receipt.cwd !== cwd) throw new Error('DISPATCH_RECEIPT_MISMATCH');
+  if (!receipt || receipt.workId !== workId || (receipt.cwd !== cwd && receipt.cwd !== lexicalCwd)) {
+    throw new Error('DISPATCH_RECEIPT_MISMATCH');
+  }
   return { found: true, receipt, receiptPath,
     noStartProven: receipt.state === 'PRE_START_FAILED' && receipt.nativeStartAttempted === false,
     completionVerified: false };
@@ -518,9 +594,13 @@ export async function dispatch(configInput, options = {}) {
   if (typeof options.workId !== 'string' || !options.workId.trim()) throw new Error('workId is required for duplicate-safe dispatch');
   if (typeof options.prompt !== 'string' || !options.prompt.trim()) throw new Error('prompt is required');
   if (!path.isAbsolute(options.cwd ?? '')) throw new Error('absolute cwd is required');
-  const cwd = path.resolve(options.cwd);
-  const stat = await fs.stat(cwd);
+  const lexicalCwd = path.resolve(options.cwd);
+  const stat = await fs.stat(lexicalCwd);
   if (!stat.isDirectory()) throw new Error('cwd must be a directory');
+  // Receipt, intent, claim checks and the native thread share one filesystem
+  // identity, so an alias or nested path is not a new workspace.
+  const workspace = await workspaceIdentity(lexicalCwd);
+  const { path: cwd } = workspace;
   const stageTimeoutMs = options.stageTimeoutMs ?? config.routing.timeoutMs;
   if (!Number.isInteger(stageTimeoutMs) || stageTimeoutMs < 1 || stageTimeoutMs > 60000) throw new Error('STAGE_TIMEOUT_INVALID');
   const release = await acquireLock(config.statePath, config.routing.lockTimeoutMs);
@@ -548,14 +628,19 @@ export async function dispatch(configInput, options = {}) {
       promptSha256: sha256(options.prompt), events: [{ phase: 'PREPARING', at: clock() }],
     };
     // Persist the work intent BEFORE any admission scans or native lifecycle call.
-    paths = await createReceipt(config, receipt);
+    paths = await createReceipt(config, receipt, lexicalCwd);
     await progress('ADMISSION');
     const preliminary = await rank(config, common);
     await progress('RECHECK');
     const final = await rank(config, { ...common, nowMs: options.recheckNowMs ?? options.nowMs ?? Date.now() });
     const selected = final.candidates.find((candidate) => candidate.eligible);
     if (!selected) throw new Error(noEligibleMessage(final));
-    assertClaimsAvailable(final, receipt);
+    // This router's own submitted and uncertain receipts are claims whichever
+    // collector each machine uses; a failed ledger scan refuses dispatch.
+    const localClaims = await observeLocalReceiptClaims(config.statePath);
+    await assertClaimsAvailable([
+      ...Object.values(final.admissions).map((admission) => admission.claims), localClaims,
+    ], receipt, workspace);
     const lane = config.conductors.find((candidate) => candidate.id === selected.laneId);
     await progress('THREAD_START_PENDING', {
       laneId: lane.id, machineId: lane.machineId, nativeStartAttempted: true,

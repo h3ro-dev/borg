@@ -8,7 +8,8 @@ borg-conductor route-status --config /absolute/BORG_HOME/conductors/config.json 
   --cwd /absolute/workspace --work-id stable-work-id
 ```
 
-Use the same canonical workspace and stable work ID supplied to `route`. This is
+Use the workspace (any spelling of it resolves to the same filesystem-canonical
+path) and stable work ID supplied to `route`. This is
 read-only reconciliation: it does not create, resume, cancel or complete a worker.
 The returned receipt contains a bounded phase history, attempt ID, selected lane,
 native thread/turn IDs when proved, and error classification. Prompt text is not
@@ -40,8 +41,33 @@ transport dispatches and uncertain lifecycle states remain active claims until
 explicitly reconciled. A different work ID cannot evade an existing workspace
 claim; a different workspace cannot evade an active work ID.
 
+Under the dispatch lock the router always rescans its own receipt ledger,
+whichever claims collector each machine uses, and checks it together with every
+machine's observed claims; only the current attempt is exempt. A command
+collector therefore cannot hide this router's submitted or uncertain launches,
+and a failed ledger scan refuses dispatch instead of trusting an empty external
+list.
+
+Workspace identity is filesystem-canonical. Native realpath resolves symlinks
+and, on case-insensitive volumes, letter case; device/inode ancestry also matches
+spellings realpath keeps distinct, such as macOS firmlinks and bind mounts.
+Receipts, intents, `route-status` and the native thread use the canonical path.
+Two workspaces conflict when one is the same directory as, or an ancestor of,
+the other. The comparison is segment-aware, so sibling worktrees such as `repo`
+and `repo-other` remain independently admissible.
+
+Claimed paths from every machine are resolved on the router host's filesystem,
+where `route` validates the workspace; paths reported for different machines are
+never assumed disjoint. A claimed workspace that no longer exists still blocks
+its ancestors. A claim without `cwd` reserves only its work ID; a malformed or
+unresolvable claimed `cwd` refuses dispatch (`WORKSPACE_CLAIM_UNRESOLVED`).
+Intents recorded under a lexical path by earlier versions still block replay and
+remain visible to `route-status`. Symlinks inside a workspace that point
+elsewhere are not traced.
+
 A receipt scan is all-or-error. Malformed JSON, unsafe file permissions, symlinks,
-unknown receipt states, oversize files or exceeded bounds never become an empty
+unknown receipt states, active receipts without a work ID or absolute workspace,
+oversize files or exceeded bounds never become an empty
 or partial successful claims list. The fixed read-only reader runs in a separate
 Node process, outside the router's filesystem worker pool. It accepts no shell
 commands and never starts agents or writes state.
@@ -60,8 +86,10 @@ run concurrently. Late thread responses cannot advance to turn creation after
 the caller records an unknown outcome.
 
 These are **stage** deadlines, not an end-to-end service-level guarantee. Workspace
-validation, dispatch-lock I/O and durable state writes can still be delayed by an
-unhealthy filesystem. State writes are not raced against a timeout, since a late
+validation and identity resolution (including claimed paths), dispatch-lock I/O
+and durable state writes can still be delayed by an unhealthy filesystem. The
+final ledger rescan is bounded by the reader limits above, not by
+`--stage-timeout-ms`. State writes are not raced against a timeout, since a late
 write could corrupt the evidence used by a subsequent attempt. Existing lock
 contention controls remain. The router never removes an ownership check or
 claims it cancelled an external lifecycle request just because its wait ended.
@@ -73,7 +101,9 @@ node --test conductor/tests/*.test.mjs conductor/providers/*.test.mjs
 ```
 
 The regression suite covers missing telemetry/usage, active dispatched claims,
-workspace/work-ID conflicts, unsafe/corrupt/oversize receipts, native reader
+workspace/work-ID conflicts, local-ledger enforcement under a command collector,
+workspace alias/case/firmlink/parent/child overlap with a sibling-worktree
+control, unsafe/corrupt/oversize receipts, native reader
 timeout, pre-start diagnostic persistence, lifecycle timeout with late response,
 duplicate suppression, status lookup and the real command-line status path.
 Optional native Codex initialization uses `BORG_TEST_CODEX_BIN` with an isolated
