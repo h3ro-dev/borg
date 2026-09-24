@@ -34,8 +34,8 @@ jobs:
             --root "$RUNNER_TEMP/borg-source" \
             --allowlist "$RUNNER_TEMP/borg-source/RELEASE-ALLOWLIST.json" \
             --inventory "$RUNNER_TEMP/borg-source/RELEASE-INVENTORY.json"
-      - name: Verify release guard and adapter pins
-        run: python3 -B -m unittest installer.test_release_guard installer.test_adapters
+      - name: Verify release, adapter and installer guards
+        run: python3 -B -m unittest installer.test_release_guard installer.test_adapters installer.test_startup_preflight
       - name: Install pinned native Codex runtime
         run: npm ci --prefix installer/npm --ignore-scripts --no-audit --no-fund
       - name: Check conductor syntax

@@ -182,6 +182,7 @@ def login(doc: dict, provider: str) -> int:
 def install(doc: dict, *, system_dependencies: bool = False, start: bool = True) -> int:
     root = Path(doc["home"])
     preflight(doc)
+    services.check_ports(doc)
     config.write_connector_config(doc)
     dependencies.prepare(doc, system_dependencies=system_dependencies)
     # Bootstrap Python intentionally has no application packages. All native
@@ -261,4 +262,8 @@ if __name__ == "__main__":
     parser.add_argument("--no-start", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
-    raise SystemExit(complete_install(config.load(args.home), start=not args.no_start))
+    try:
+        raise SystemExit(complete_install(config.load(args.home), start=not args.no_start))
+    except (ValueError, OSError, RuntimeError) as exc:
+        print("BORG: " + str(exc), file=sys.stderr)
+        raise SystemExit(1)

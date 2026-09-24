@@ -103,6 +103,30 @@ def running(doc: dict, component: str) -> bool:
     return result.returncode == 0
 
 
+def service_ports(doc: dict) -> dict[str, list[int]]:
+    """Loopback ports each selected service binds, from configuration alone."""
+    from installer.blueprint import service_names
+    keys = {"qdrant": ["qdrant", "qdrant_grpc"], "tunnel": ["tunnel_metrics"]}
+    return {name: [doc["ports"][key] for key in keys.get(name, [name])]
+            for name in service_names(doc) if name not in {"brain", "watchdog"}}
+
+
+def occupied(port: int) -> bool:
+    with socket.socket() as sock:
+        sock.settimeout(1)
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+
+
+def check_ports(doc: dict) -> None:
+    """Read-only preflight: refuse selected ports held by anything but this installation's own service."""
+    conflicts = [f"{port} ({name})" for name, ports in service_ports(doc).items()
+                 if not (doc.get("instance_id") and running(doc, name))
+                 for port in ports if occupied(port)]
+    if conflicts:
+        raise RuntimeError("Loopback ports needed by BORG are already in use: " + ", ".join(conflicts)
+                           + ". BORG will not stop another listener; free those ports or choose another --port-base.")
+
+
 def install_definition(doc: dict, name: str, spec: dict) -> Path:
     root = Path(doc["home"])
     logs = root / "logs"
@@ -151,10 +175,10 @@ def start(doc: dict, components: list[str] | None = None) -> dict:
         spec = rows[name]
         if running(doc, name):
             continue
-        if "port" in spec:
-            with socket.socket() as sock:
-                if sock.connect_ex(("127.0.0.1", spec["port"])) == 0:
-                    raise RuntimeError(f"Port {spec['port']} is occupied outside this BORG service: {name}")
+        # Recheck at start: a listener may have appeared since the install preflight.
+        for port in service_ports(doc).get(name, []):
+            if occupied(port):
+                raise RuntimeError(f"Port {port} is occupied outside this BORG service: {name}")
         target = install_definition(doc, name, spec)
         if platform.system() == "Darwin":
             domain = f"gui/{os.getuid()}"
