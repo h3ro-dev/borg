@@ -1,0 +1,47 @@
+name: Verify BORG source
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Source and conductor (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.21.0'
+      - name: Verify exact public distribution
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/borg-source"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/borg-source"
+          python3 -B "$RUNNER_TEMP/borg-source/installer/release_guard.py" \
+            --root "$RUNNER_TEMP/borg-source" \
+            --allowlist "$RUNNER_TEMP/borg-source/RELEASE-ALLOWLIST.json" \
+            --inventory "$RUNNER_TEMP/borg-source/RELEASE-INVENTORY.json"
+      - name: Verify release guard and adapter pins
+        run: python3 -B -m unittest installer.test_release_guard installer.test_adapters
+      - name: Install pinned native Codex runtime
+        run: npm ci --prefix installer/npm --ignore-scripts --no-audit --no-fund
+      - name: Check conductor syntax
+        run: npm run check --prefix conductor
+      - name: Test conductor and isolated native initialization
+        working-directory: conductor
+        env:
+          BORG_TEST_CODEX_BIN: ${{ github.workspace }}/installer/npm/node_modules/.bin/codex
+        run: node --test --test-concurrency=1 tests/*.test.mjs providers/*.test.mjs
