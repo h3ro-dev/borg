@@ -6,6 +6,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { validateInstallConfig } from '../config.mjs';
+import { readPrivateJsonDirectory, readPrivateJsonRecord } from './receipt-reader.mjs';
 
 // Portable extraction of the supplied conductor-usage-router and
 // fleet-placement invariants. Estate-specific roster, SSH shipping, and
@@ -14,6 +15,7 @@ import { validateInstallConfig } from '../config.mjs';
 
 const execFile = promisify(execFileCallback);
 const ACTIVE_RECEIPT_STATES = new Set([
+  'DISPATCHED',
   'ATTEMPTING',
   'THREAD_STARTED',
   'UNKNOWN_DO_NOT_RETRY',
@@ -45,7 +47,7 @@ function timestampMillis(value) {
 }
 
 function finite(value, minimum, maximum) {
-  const number = Number(value);
+  const number = typeof value === 'number' ? value : NaN;
   return Number.isFinite(number) && number >= minimum && number <= maximum ? number : null;
 }
 
@@ -129,36 +131,30 @@ export async function observeMachineCapacity(machine, nowMs = Date.now()) {
 }
 
 async function readJsonFiles(directory) {
-  let entries;
-  try {
-    entries = await fs.readdir(directory, { withFileTypes: true });
-  } catch (error) {
-    if (error.code === 'ENOENT') return [];
-    throw error;
-  }
-  const values = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const target = path.join(directory, entry.name);
-    const stat = await fs.lstat(target);
-    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) {
-      throw new Error(`unsafe private receipt: ${target}`);
-    }
-    values.push(JSON.parse(await fs.readFile(target, 'utf8')));
-  }
-  return values;
+  return readPrivateJsonDirectory(directory);
 }
 
 export async function observeClaims(machine, statePath, nowMs = Date.now()) {
   if (machine.claims.kind === 'command') return commandJson(machine.claims);
   if (machine.claims.kind !== 'router-state') throw new Error('CLAIMS_KIND_UNSUPPORTED');
   const receipts = await readJsonFiles(path.join(statePath, 'dispatch-receipts'));
+  const terminal = new Set(['PRE_START_FAILED', 'COMPLETED', 'FAILED', 'CANCELLED', 'RECONCILED_NO_START']);
+  for (const receipt of receipts) {
+    if (!ACTIVE_RECEIPT_STATES.has(receipt.state) && !terminal.has(receipt.state)) {
+      throw new Error('RECEIPT_STATE_UNKNOWN');
+    }
+    if (ACTIVE_RECEIPT_STATES.has(receipt.state) && (typeof receipt.workId !== 'string' || !receipt.workId.trim())) {
+      throw new Error('RECEIPT_WORK_ID_INVALID');
+    }
+  }
   return {
     schemaVersion: 1,
     observedAt: new Date(nowMs).toISOString(),
     source: 'router-state',
     active: receipts.filter((receipt) => ACTIVE_RECEIPT_STATES.has(receipt.state)).map((receipt) => ({
       workId: receipt.workId,
+      attemptId: receipt.attemptId,
+      cwd: receipt.cwd,
       laneId: receipt.laneId,
       state: receipt.state,
       attemptedAt: receipt.attemptedAt,
@@ -337,17 +333,47 @@ async function probeLane(config, lane, machineAdmission, options) {
   };
 }
 
+function stageDeadline(operation, stage, timeoutMs) {
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) throw new Error('STAGE_TIMEOUT_INVALID');
+  let timer;
+  return Promise.race([
+    Promise.resolve().then(operation),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error(`${stage}_TIMEOUT`);
+        error.code = `${stage}_TIMEOUT`;
+        reject(error);
+      }, timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 async function snapshot(config, options) {
-  const admissions = new Map();
-  for (const machine of config.machines) {
-    let capacity = null;
-    let claims = null;
-    try { capacity = await options.capacityProvider(machine, options.nowMs); } catch { /* fail closed below */ }
-    try { claims = await options.claimsProvider(machine, config.statePath, options.nowMs); } catch { /* fail closed below */ }
-    admissions.set(machine.id, evaluateMachineAdmission(machine, capacity, claims, options.nowMs));
-  }
+  const rows = await Promise.all(config.machines.map(async (machine) => {
+    const errors = [];
+    const read = async (operation, stage) => {
+      try { return await stageDeadline(operation, stage, options.stageTimeoutMs); }
+      catch (error) {
+        errors.push(error.code || `${stage}_PROBE_FAILED`);
+        return null;
+      }
+    };
+    const [capacity, claims] = await Promise.all([
+      read(() => options.capacityProvider(machine, options.nowMs), 'CAPACITY'),
+      read(() => options.claimsProvider(machine, config.statePath, options.nowMs), 'CLAIMS'),
+    ]);
+    const admission = evaluateMachineAdmission(machine, capacity, claims, options.nowMs);
+    admission.issues = [...new Set([...admission.issues, ...errors])];
+    admission.eligible = admission.issues.length === 0;
+    return [machine.id, admission];
+  }));
+  const admissions = new Map(rows);
+  const boundedProvider = (lane, operation) => stageDeadline(
+    () => options.conductorProvider(lane, operation),
+    operation.kind.toUpperCase().replaceAll('-', '_'), options.stageTimeoutMs,
+  );
   const candidates = await Promise.all(config.conductors.map((lane) => probeLane(
-    config, lane, admissions.get(lane.machineId), options,
+    config, lane, admissions.get(lane.machineId), { ...options, conductorProvider: boundedProvider },
   )));
   return {
     schemaVersion: 1,
@@ -445,6 +471,7 @@ export async function rank(configInput, options = {}) {
   return snapshot(config, {
     nowMs,
     usageMaxAgeMs: options.usageMaxAgeMs ?? 15_000,
+    stageTimeoutMs: options.stageTimeoutMs ?? config.routing.timeoutMs,
     capability: options.capability ?? 'tools',
     role: options.role ?? 'leaf',
     model: options.model,
@@ -455,108 +482,128 @@ export async function rank(configInput, options = {}) {
   });
 }
 
+function assertClaimsAvailable(snapshot, receipt) {
+  for (const admission of Object.values(snapshot.admissions)) {
+    for (const claim of admission.claims?.active ?? []) {
+      if (claim.attemptId === receipt.attemptId) continue;
+      if (claim.workId === receipt.workId) throw new Error('WORK_ID_CLAIM_CONFLICT');
+      if (typeof claim.cwd === 'string' && path.resolve(claim.cwd) === receipt.cwd) {
+        throw new Error('WORKSPACE_CLAIM_CONFLICT');
+      }
+    }
+  }
+}
+
+export async function inspectDispatch(configInput, options = {}) {
+  const config = validateInstallConfig(configInput, { expectedBorgHome: configInput.borgHome });
+  if (typeof options.workId !== 'string' || !options.workId.trim() || !path.isAbsolute(options.cwd ?? '')) {
+    throw new Error('workId and absolute cwd are required');
+  }
+  const cwd = path.resolve(options.cwd);
+  const intentPath = path.join(config.statePath, 'intents', `${intentDigest(options.workId.trim(), cwd)}.json`);
+  const intent = await readPrivateJsonRecord(intentPath);
+  if (intent === null) return { found: false, state: 'NOT_FOUND', noStartProven: false, completionVerified: false };
+  const receiptPath = intent.receiptPath;
+  if (typeof receiptPath !== 'string' || path.dirname(receiptPath) !== path.join(config.statePath, 'dispatch-receipts')
+      || !path.basename(receiptPath).endsWith('.json')) throw new Error('UNSAFE_RECEIPT_REFERENCE');
+  const receipt = await readPrivateJsonRecord(receiptPath);
+  if (!receipt || receipt.workId !== options.workId.trim() || receipt.cwd !== cwd) throw new Error('DISPATCH_RECEIPT_MISMATCH');
+  return { found: true, receipt, receiptPath,
+    noStartProven: receipt.state === 'PRE_START_FAILED' && receipt.nativeStartAttempted === false,
+    completionVerified: false };
+}
+
 export async function dispatch(configInput, options = {}) {
   const config = validateInstallConfig(configInput, { expectedBorgHome: configInput.borgHome });
   if (typeof options.workId !== 'string' || !options.workId.trim()) throw new Error('workId is required for duplicate-safe dispatch');
   if (typeof options.prompt !== 'string' || !options.prompt.trim()) throw new Error('prompt is required');
-  const cwd = path.resolve(options.cwd ?? '');
+  if (!path.isAbsolute(options.cwd ?? '')) throw new Error('absolute cwd is required');
+  const cwd = path.resolve(options.cwd);
   const stat = await fs.stat(cwd);
   if (!stat.isDirectory()) throw new Error('cwd must be a directory');
+  const stageTimeoutMs = options.stageTimeoutMs ?? config.routing.timeoutMs;
+  if (!Number.isInteger(stageTimeoutMs) || stageTimeoutMs < 1 || stageTimeoutMs > 60000) throw new Error('STAGE_TIMEOUT_INVALID');
   const release = await acquireLock(config.statePath, config.routing.lockTimeoutMs);
+  let receipt; let paths; let nativeAttempted = false;
+  const clock = () => new Date(options.nowMs ?? Date.now()).toISOString();
+  const progress = async (phase, changes = {}) => {
+    receipt = { ...receipt, ...changes, phase,
+      events: [...receipt.events, { phase, at: clock() }].slice(-16) };
+    await updateReceipt(paths.receiptPath, paths.intentPath, receipt);
+  };
   try {
     const common = {
-      ...options,
-      nowMs: options.nowMs ?? Date.now(),
-      capability: options.capability ?? 'tools',
-      role: options.role ?? 'leaf',
+      ...options, stageTimeoutMs,
+      capability: options.capability ?? 'tools', role: options.role ?? 'leaf',
       capacityProvider: options.capacityProvider ?? observeMachineCapacity,
       claimsProvider: options.claimsProvider ?? observeClaims,
       conductorProvider: options.conductorProvider
         ?? ((lane, operation) => nativeConductorProvider(lane, operation, config.routing.timeoutMs)),
     };
+    receipt = {
+      schemaVersion: 1, attemptId: crypto.randomUUID(), workId: options.workId.trim(), cwd,
+      laneId: null, machineId: null, state: 'ATTEMPTING', phase: 'PREPARING',
+      attemptedAt: clock(), dispatchedAt: null, threadId: null, turnId: null,
+      errorClass: null, nativeStartAttempted: false, stageTimeoutMs,
+      promptSha256: sha256(options.prompt), events: [{ phase: 'PREPARING', at: clock() }],
+    };
+    // Persist the work intent BEFORE any admission scans or native lifecycle call.
+    paths = await createReceipt(config, receipt);
+    await progress('ADMISSION');
     const preliminary = await rank(config, common);
-    const final = await rank(config, { ...common, nowMs: options.recheckNowMs ?? common.nowMs });
+    await progress('RECHECK');
+    const final = await rank(config, { ...common, nowMs: options.recheckNowMs ?? options.nowMs ?? Date.now() });
     const selected = final.candidates.find((candidate) => candidate.eligible);
     if (!selected) throw new Error(noEligibleMessage(final));
+    assertClaimsAvailable(final, receipt);
     const lane = config.conductors.find((candidate) => candidate.id === selected.laneId);
-    let receipt = {
-      schemaVersion: 1,
-      attemptId: crypto.randomUUID(),
-      workId: options.workId.trim(),
-      cwd,
-      laneId: lane.id,
-      machineId: lane.machineId,
-      state: 'ATTEMPTING',
-      phase: 'THREAD_START_PENDING',
-      attemptedAt: new Date(common.nowMs).toISOString(),
-      dispatchedAt: null,
-      remainingPercent: selected.remainingPercent,
-      resetAt: selected.resetAt,
+    await progress('THREAD_START_PENDING', {
+      laneId: lane.id, machineId: lane.machineId, nativeStartAttempted: true,
+      remainingPercent: selected.remainingPercent, resetAt: selected.resetAt,
       preliminaryLeader: preliminary.candidates.find((candidate) => candidate.eligible)?.laneId ?? null,
       finalLeader: selected.laneId,
-      threadId: null,
-      turnId: null,
-      errorClass: null,
-    };
-    const paths = await createReceipt(config, receipt);
+    });
+    nativeAttempted = true;
     let thread;
     try {
-      thread = await common.conductorProvider(lane, {
-        kind: 'thread-start',
-        role: common.role,
-        body: {
-          cwd,
-          role: common.role,
-          approvalPolicy: 'never',
-          sandbox: options.sandbox ?? 'danger-full-access',
+      thread = await stageDeadline(() => common.conductorProvider(lane, {
+        kind: 'thread-start', role: common.role,
+        body: { cwd, role: common.role, approvalPolicy: 'never', sandbox: options.sandbox ?? 'danger-full-access',
           ...(options.model ? { model: options.model } : {}),
-          ...(options.instructions ? { instructions: options.instructions } : {}),
-        },
-      });
+          ...(options.instructions ? { instructions: options.instructions } : {}) },
+      }), 'THREAD_START', stageTimeoutMs);
     } catch (error) {
-      receipt = { ...receipt, state: 'UNKNOWN_DO_NOT_RETRY', phase: 'THREAD_START', errorClass: error.name || 'Error' };
-      await updateReceipt(paths.receiptPath, paths.intentPath, receipt);
+      await progress('THREAD_START', { state: 'UNKNOWN_DO_NOT_RETRY', errorClass: error.code || error.name || 'Error' });
       throw new Error(`thread start outcome unknown; do not retry: ${paths.receiptPath}`);
     }
-    if (!thread?.threadId) {
-      receipt = { ...receipt, state: 'UNKNOWN_DO_NOT_RETRY', phase: 'THREAD_START_RESPONSE', errorClass: 'MISSING_THREAD_ID' };
-      await updateReceipt(paths.receiptPath, paths.intentPath, receipt);
+    if (!thread?.threadId || typeof thread.threadId !== 'string') {
+      await progress('THREAD_START_RESPONSE', { state: 'UNKNOWN_DO_NOT_RETRY', errorClass: 'MISSING_THREAD_ID' });
       throw new Error(`thread start returned no ID; do not retry: ${paths.receiptPath}`);
     }
-    receipt = { ...receipt, state: 'THREAD_STARTED', phase: 'TURN_START_PENDING', threadId: thread.threadId };
-    await updateReceipt(paths.receiptPath, paths.intentPath, receipt);
+    await progress('TURN_START_PENDING', { state: 'THREAD_STARTED', threadId: thread.threadId });
     let turn;
     try {
-      turn = await common.conductorProvider(lane, {
-        kind: 'turn-start',
-        body: {
-          threadId: thread.threadId,
-          text: options.prompt,
+      turn = await stageDeadline(() => common.conductorProvider(lane, {
+        kind: 'turn-start', body: { threadId: thread.threadId, text: options.prompt,
           ...(options.model ? { model: options.model } : {}),
-          ...(options.effort ? { effort: options.effort } : {}),
-        },
-      });
+          ...(options.effort ? { effort: options.effort } : {}) },
+      }), 'TURN_START', stageTimeoutMs);
     } catch (error) {
-      receipt = { ...receipt, state: 'STARTED_TURN_UNKNOWN', phase: 'TURN_START', errorClass: error.name || 'Error' };
-      await updateReceipt(paths.receiptPath, paths.intentPath, receipt);
+      await progress('TURN_START', { state: 'STARTED_TURN_UNKNOWN', errorClass: error.code || error.name || 'Error' });
       throw new Error(`thread exists but turn outcome unknown; do not retry: ${paths.receiptPath}`);
     }
-    if (!turn?.turnId) {
-      receipt = { ...receipt, state: 'STARTED_TURN_UNKNOWN', phase: 'TURN_START_RESPONSE', errorClass: 'MISSING_TURN_ID' };
-      await updateReceipt(paths.receiptPath, paths.intentPath, receipt);
+    if (!turn?.turnId || typeof turn.turnId !== 'string') {
+      await progress('TURN_START_RESPONSE', { state: 'STARTED_TURN_UNKNOWN', errorClass: 'MISSING_TURN_ID' });
       throw new Error(`turn start returned no ID; do not retry: ${paths.receiptPath}`);
     }
-    receipt = {
-      ...receipt,
-      state: 'DISPATCHED',
-      phase: 'TURN_STARTED',
-      dispatchedAt: new Date(options.recheckNowMs ?? common.nowMs).toISOString(),
-      threadId: thread.threadId,
-      turnId: turn.turnId,
-    };
-    await updateReceipt(paths.receiptPath, paths.intentPath, receipt);
+    await progress('TURN_STARTED', { state: 'DISPATCHED', dispatchedAt: clock(), turnId: turn.turnId });
     return { receipt, receiptPath: paths.receiptPath, snapshot: final };
-  } finally {
-    await release();
-  }
+  } catch (error) {
+    if (paths && !nativeAttempted) {
+      await progress(receipt.phase, { state: 'PRE_START_FAILED', nativeStartAttempted: false, errorClass: error.code || error.name || 'Error' });
+      error.receiptPath = paths.receiptPath;
+      error.message += `; receipt: ${paths.receiptPath}`;
+    }
+    throw error;
+  } finally { await release(); }
 }

@@ -57,10 +57,17 @@ remaining usable native allowance; earliest reset is only the tie break.
 Actual provider exhaustion and provider spend controls have separate evidence
 codes. No discretionary reservation or allowance floor is created.
 
-Dispatch holds a private lock, rechecks the whole configured fleet immediately
-before selection, persists an intent and receipt before native lifecycle calls,
-and refuses duplicate `{workId,cwd}` intents across process restarts. An
-ambiguous thread or turn response is recorded as `DO_NOT_RETRY` evidence.
+Dispatch holds a private lock, persists an intent before admission scans,
+rechecks the configured fleet before selection, and refuses duplicate
+`{workId,cwd}` intents across process restarts. Active workspace and work-ID
+claims are checked before native lifecycle calls. An ambiguous thread or turn
+response remains `DO_NOT_RETRY` evidence.
+
+Use `route-status --cwd ABS --work-id ID` to inspect saved phase history and
+native IDs without contacting providers or launching work. Admission/provider
+stages and read-only receipt scans have bounded deadlines; unknown outcomes
+never permit automatic replay. See [launch reliability and recovery](docs/LAUNCH-RELIABILITY.md)
+for states, scan bounds, timeout controls and remaining filesystem/release limits.
 
 Capacity and claims support local OS observation or an explicitly configured
 absolute JSON-producing command. Remote machines therefore require an
