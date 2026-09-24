@@ -1,11 +1,16 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 363,
+  "file_count": 372,
   "files": [
     {
       "bytes": 1914,
       "path": ".github/workflows/site.yml",
       "sha256": "6bfdccbe0a3994dba7c402c2f7a2e0713de367e92476c68f680bc87439e7d1cf"
+    },
+    {
+      "bytes": 1756,
+      "path": ".github/workflows/verify.yml",
+      "sha256": "d97bb88a2b4944ebdaa16b70322c11f1ac568c35d9321cdb9ed133fa4573e38b"
     },
     {
       "bytes": 29,
@@ -38,9 +43,9 @@
       "sha256": "c9b42bdae7f17d1e4f8bb89728cd7c999a0c8cfe0b7b7b7d91501e49bb25b1d8"
     },
     {
-      "bytes": 6840,
+      "bytes": 7171,
       "path": "adapters/README.md",
-      "sha256": "7f0062d67950f84fb35bfa3ac58d12f882ad172cc65ff7e76867a3a1b01699e1"
+      "sha256": "c9ecfef571dff7eef55a1dc30a58cf4e4e032d7dda66c86092140370af5291b9"
     },
     {
       "bytes": 2767,
@@ -128,9 +133,9 @@
       "sha256": "e80f558ee37bbaa1fa62f1cf7a3a3831e0c00d1265c09734e800e6e74a0bce81"
     },
     {
-      "bytes": 4832,
+      "bytes": 5446,
       "path": "conductor/README.md",
-      "sha256": "9f10c8c64e6eda8e3a585eb21146f0e8f496a7d536d08e8ebcb130636d63db3f"
+      "sha256": "851a3a2f15704bd767d5652d5290f4a14067ee54fcc6f4acac5fa84c6132a37e"
     },
     {
       "bytes": 1007,
@@ -138,9 +143,9 @@
       "sha256": "dcac2c44247aea3237cc366a1c97fad7a13dbcdcfe3410957836fe664982fa90"
     },
     {
-      "bytes": 11381,
+      "bytes": 11832,
       "path": "conductor/borg-conductor.mjs",
-      "sha256": "69595a2e02d1ff6b75ae217cf6c976b850313ec6f2213c5a1eb95b07e101d2e9"
+      "sha256": "16bfcbc021204e2086955c420d65b7e384cabaa74f9a032438bcf62467771f9d"
     },
     {
       "bytes": 26418,
@@ -161,6 +166,11 @@
       "bytes": 730,
       "path": "conductor/docs/EVENTS-PAGINATION.md",
       "sha256": "b90a21d7341dbfd3f8279eaedbb0367c2eed019e9eca3906ecb27f339d3d7b04"
+    },
+    {
+      "bytes": 7276,
+      "path": "conductor/docs/LAUNCH-RELIABILITY.md",
+      "sha256": "88e58e20a4817726a851a902193f3700c0c93bcffb471e664c0abb99c156dac8"
     },
     {
       "bytes": 2673,
@@ -198,9 +208,19 @@
       "sha256": "dc2f397239ace8ad8f31375c1c9c064148ec7956396be9408b32df15d0a35a4f"
     },
     {
-      "bytes": 22924,
+      "bytes": 3139,
+      "path": "conductor/router/receipt-reader-worker.mjs",
+      "sha256": "5810e5fbcf95a09c089f74befde10bf691dfad3ebee79c476a2c193cc9dc23a9"
+    },
+    {
+      "bytes": 2740,
+      "path": "conductor/router/receipt-reader.mjs",
+      "sha256": "529a8ddfc636174029dbc45b92f62edc6ce21362ec0c7081ac337ce4f412066d"
+    },
+    {
+      "bytes": 30846,
       "path": "conductor/router/router.mjs",
-      "sha256": "9d6689e9253e89e24351a2c84373b2075593efbed58382f97da18d154702a115"
+      "sha256": "21dae5b306a32828eaa467dbd906d04229bb93d13997b6709c1298464ac12296"
     },
     {
       "bytes": 7600,
@@ -223,9 +243,29 @@
       "sha256": "8e0491bf9e3665e971707d995ed52e0f59d4883d5b03450c57d535178b5b6340"
     },
     {
-      "bytes": 5925,
+      "bytes": 3201,
+      "path": "conductor/tests/receipt-reader.test.mjs",
+      "sha256": "9ee874660a8b68c2138ffe79a00dc004ae5a1046d1eb5faf5ca3faf37dc008be"
+    },
+    {
+      "bytes": 5927,
       "path": "conductor/tests/resume-bookkeeping.test.mjs",
-      "sha256": "6e098f3d598174a764c07abfa105ec816ccbf66f2b098497ea10bb4c4e43ac62"
+      "sha256": "da0d0fdb77326135e7a59805d566788872bec30f54562f793894835ec29228ec"
+    },
+    {
+      "bytes": 19262,
+      "path": "conductor/tests/router-collision-review.test.mjs",
+      "sha256": "887b542efcd87b1ee7fab0eff8f0f2c453d4dd90f531bbe1fff9d2618bd27996"
+    },
+    {
+      "bytes": 11193,
+      "path": "conductor/tests/router-ownership.test.mjs",
+      "sha256": "300c2d5bf9b26ffbe1690c0c3af35325007a1622baf15530053f212b345a39d3"
+    },
+    {
+      "bytes": 12400,
+      "path": "conductor/tests/router-reliability.test.mjs",
+      "sha256": "0d6d76b2af5b57a83a82d8a7584a5a4c1015c8cacc4d2370d0bda327872ebea4"
     },
     {
       "bytes": 10470,
@@ -773,9 +813,9 @@
       "sha256": "c43600f06704928a08381c34d31471dff166b548f0b242247d06fae377b4e00e"
     },
     {
-      "bytes": 6630,
+      "bytes": 7051,
       "path": "docs/INSTALL.md",
-      "sha256": "e862aa605e8f83c677254edd7c1c2559ebc78b1848c5d059f584f12ffb57e0b7"
+      "sha256": "67254a624350f612570ceb0daddac93a1ffbe09533400e5144dbe18cbca24b1e"
     },
     {
       "bytes": 16398,
@@ -908,9 +948,9 @@
       "sha256": "6d600ae548f2a53d9f20104e9780ac9d1a1df5d88b8920f34b7fc8a75576c20e"
     },
     {
-      "bytes": 8772,
+      "bytes": 8905,
       "path": "install.sh",
-      "sha256": "d6e8ac05411b82e78a3125a6919d3441d7e630f8279dbc8da4165db0482eae4e"
+      "sha256": "2b433c18631eecaa352e08fca17beded2433baf0818c6bbb1179e35816218acf"
     },
     {
       "bytes": 65,
@@ -953,9 +993,9 @@
       "sha256": "4a9edbc2d7704f8d88eb4d797c7d50f411533152cfb44da6b6eae45acc43fe9e"
     },
     {
-      "bytes": 8726,
+      "bytes": 9714,
       "path": "installer/cli.py",
-      "sha256": "848873640e9ca365a4b595cb07a873a4918d596ea00387fc982a0275ec8a797b"
+      "sha256": "cebd7eacfcb53efe76b666bef26beda8a789afb80dc1f2e6f3b53d170056743f"
     },
     {
       "bytes": 10302,
@@ -998,9 +1038,9 @@
       "sha256": "561d1c1c2864a6709189b975e116760fa50342e9b266a6ab7522eb512dba4fb0"
     },
     {
-      "bytes": 14199,
+      "bytes": 14377,
       "path": "installer/installation.py",
-      "sha256": "ee9b3ee64dfd870b9775912f2c80693b387855bb3d80194f3fe94ccd25597479"
+      "sha256": "9817bc906501500154933b7f8bdde593aa5ec29aa4830abf3a120093aeff3684"
     },
     {
       "bytes": 479,
@@ -1058,9 +1098,9 @@
       "sha256": "fc04cd7fd80c989480c498a11da93f199db8864e9706d6437014789552ab5f9b"
     },
     {
-      "bytes": 10652,
+      "bytes": 11836,
       "path": "installer/services.py",
-      "sha256": "57221bb53ec2a368bb17491d3a209613539d618914dc27f00e3e4789f0b495c9"
+      "sha256": "54cfbfaa6dfa7a6e72bd7fbfc1c99501e0c66e2ae972db2c13522a1a9e44de49"
     },
     {
       "bytes": 1354,
@@ -1088,9 +1128,9 @@
       "sha256": "3e3c6f2e760d213b9e4405b159b69c60d2ac5bf3a7d51ab8d80fbcb392b0d591"
     },
     {
-      "bytes": 14901,
+      "bytes": 15133,
       "path": "installer/test_fleet_installation.py",
-      "sha256": "afd694d9d4f8240575f6e5bc633b044a05be0d0782f63c62746def167b926c96"
+      "sha256": "4148a149631941d2faa59db44672c06638b931221381e9f9f70229bdcd52a942"
     },
     {
       "bytes": 7977,
@@ -1111,6 +1151,11 @@
       "bytes": 1547,
       "path": "installer/test_service_limits.py",
       "sha256": "387ae7d5523e977c9af1e3ae56936c194887661b0df4ad9e377dcf5337bcfeef"
+    },
+    {
+      "bytes": 7769,
+      "path": "installer/test_startup_preflight.py",
+      "sha256": "98a00d31d2dc217a515dca492c82aea9e746acdf7aabe2f1dfd034624ce73709"
     },
     {
       "bytes": 3605,
@@ -1818,7 +1863,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "c7c9d2f6152074f32aa6ab42f474eae1dac852c0c86f652dec91bc281dda232b",
+  "inventory_sha256": "787241ae9bf10d37224ad69423f5b37cbc3d8110df4c4e7d9461320adf1afbe6",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 87653251
+  "total_bytes": 87734443
 }

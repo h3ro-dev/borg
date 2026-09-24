@@ -45,6 +45,11 @@ The home must be an absolute canonical path without symlinks, owned by you and m
 consecutive numbers starting at `--port-base`. Another installation needs a different
 home and a non-overlapping port range.
 
+Setup checks the selected service ports before provisioning dependencies. If a
+host Python is available, `install.sh` checks before bootstrap downloads too.
+An occupied port produces an error naming the service and port; setup does not
+stop its current listener.
+
 `--no-start` installs source, dependencies and native configuration without launching
 services. Run the same installer again without that flag to pull the models,
 initialize the empty stores and complete setup.
@@ -95,6 +100,9 @@ storage/model identity, trusted hooks and a pinned provider login. A local setup
 finish with `provider_sign_in_required`. Optional public OAuth still needs a real
 client sign-in test. A healthy service process alone does not prove an extraction or
 remote action succeeded.
+
+`start` reports `started_not_verified` with each service's process state. Run
+`doctor` to verify readiness after the services and first brain cycle finish.
 
 ## Reruns, recovery and removal
 

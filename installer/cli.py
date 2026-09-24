@@ -94,6 +94,11 @@ def main(argv: list[str] | None = None) -> int:
             if existing:
                 from installer.installation import preflight
                 preflight(existing)
+            # Occupied ports refuse before credentials, downloads or services are created.
+            from installer import services
+            services.check_ports(existing or {
+                "ports": {name: args.port_base + offset for name, offset in config.PORT_OFFSETS.items()},
+                "external_access": {"enabled": False}, **({"blueprint": selection} if selection else {})})
             if args.validate_only:
                 return 0
         if args.command in {"init", "install"}:
@@ -119,10 +124,19 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "fleet":
             from installer.fleet import manage
             print(json.dumps(manage(doc, args), indent=2))
-        elif args.command in {"start", "stop"}:
+        elif args.command == "start":
             from installer import services
-            result = getattr(services, args.command)(doc, args.components or None)
-            print(json.dumps(result or {"state": "stopped"}, indent=2))
+            result = services.start(doc, args.components or None)
+            # A live PID is not readiness; only doctor verifies the services.
+            print(json.dumps({"state": "started_not_verified",
+                              "processes": {name: "process_running" if value == "running" else "process_starting"
+                                            for name, value in result.items()},
+                              "readiness": "not_verified",
+                              "verify": str(Path(doc["home"]) / "bin/borg") + " doctor"}, indent=2))
+        elif args.command == "stop":
+            from installer import services
+            services.stop(doc, args.components or None)
+            print(json.dumps({"state": "stopped"}, indent=2))
         elif args.command == "install":
             from installer.installation import install
             return install(doc, system_dependencies=args.system_dependencies, start=not args.no_start)

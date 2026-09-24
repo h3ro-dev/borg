@@ -12,7 +12,7 @@ import {
   validateInstallConfig,
 } from './config.mjs';
 import { startConductor } from './conductor.mjs';
-import { accountIdentityDigest, dispatch, nativeConductorProvider, rank } from './router/router.mjs';
+import { accountIdentityDigest, dispatch, inspectDispatch, nativeConductorProvider, rank } from './router/router.mjs';
 
 const SEAT_POLICY = `# New owner seat policy
 
@@ -171,7 +171,8 @@ function usage() {
   borg-conductor status [--config ABS|conductors/config.json]
   borg-conductor auth status|pin|login [--config ABS|conductors/config.json] [--lane ID]
   borg-conductor rank [--config ABS|conductors/config.json] [--capability tools|reasoning] [--model MODEL]
-  borg-conductor route --config ABS|conductors/config.json --cwd ABS --prompt-file ABS --work-id ID [--role leaf|lead] [--model MODEL] [--effort EFFORT]
+  borg-conductor route-status --config ABS|conductors/config.json --cwd ABS --work-id ID
+  borg-conductor route --config ABS|conductors/config.json --cwd ABS --prompt-file ABS --work-id ID [--role leaf|lead] [--model MODEL] [--effort EFFORT] [--stage-timeout-ms N]
 `;
 }
 
@@ -281,6 +282,12 @@ export async function main(argv = process.argv.slice(2)) {
     }), null, 2)}\n`);
     return;
   }
+  if (args.command === 'route-status') {
+    process.stdout.write(`${JSON.stringify(await inspectDispatch(config, {
+      cwd: canonicalAbsolute(args.cwd, 'cwd'), workId: args.workId,
+    }), null, 2)}\n`);
+    return;
+  }
   if (args.command === 'route') {
     const promptPath = canonicalAbsolute(args.promptFile, 'prompt-file');
     const prompt = fs.readFileSync(promptPath, 'utf8');
@@ -292,6 +299,7 @@ export async function main(argv = process.argv.slice(2)) {
       capability: args.capability,
       model: args.model,
       effort: args.effort,
+      stageTimeoutMs: args.stageTimeoutMs === undefined ? undefined : Number(args.stageTimeoutMs),
     });
     process.stdout.write(`${JSON.stringify({ ...result.receipt, receiptPath: result.receiptPath }, null, 2)}\n`);
     return;

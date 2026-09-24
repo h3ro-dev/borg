@@ -66,13 +66,15 @@ while IFS= read -r borg_relative; do
   fi
 done < "$borg_script_dir/installer/managed-directories.txt"
 if [ -L "$borg_home/config.json" ]; then echo "BORG config cannot be a symlink" >&2; exit 2; fi
-# Blueprint imports must fail before bootstrap creates a home or downloads files.
-# A host Python is used only for stdlib validation, never as the installed runtime.
-if "$borg_has_blueprint"; then
-  if ! command -v python3 >/dev/null 2>&1; then
+# Use an available host Python for read-only validation before bootstrap writes or
+# downloads. Hosts without Python still validate after the minimal bootstrap;
+# blueprint imports require validation before any bootstrap work.
+if "$borg_has_blueprint" || [ ! -f "$borg_home/config.json" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHONPATH= PYTHONHOME= python3 -B "$borg_script_dir/borg.py" install --validate-only --home "$borg_home" "$@"
+  elif "$borg_has_blueprint"; then
     echo "Blueprint validation requires Python 3 on PATH before bootstrap" >&2; exit 2
   fi
-  PYTHONPATH= PYTHONHOME= python3 -B "$borg_script_dir/borg.py" install --validate-only --home "$borg_home" "$@"
 fi
 # An established installation reaches read-only source preflight before downloads.
 if [ -f "$borg_home/config.json" ] && [ -x "$borg_home/mem0/venv/bin/python" ]; then
