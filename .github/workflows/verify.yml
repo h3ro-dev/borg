@@ -48,7 +48,7 @@ jobs:
         shell: bash
         run: |
           "$RUNNER_TEMP/borg-connector-tests/bin/python" -B -m unittest -v \
-            test_recall_policy test_operation_diagnostics test_fleet \
+            test_recall_policy test_operation_diagnostics test_job_portability test_fleet \
             test_connector.ConnectorTests test_capabilities test_concurrency \
             test_resilience.ReceiptTests test_resilience.MiddlewareReceiptTests \
             test_resilience.LaneTests

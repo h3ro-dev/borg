@@ -130,3 +130,8 @@ an external business outcome. Finalized receipts cannot regress after cancellati
 
 The connector trust and compatibility suites run on both CI operating systems
 using `requirements-test.lock`, hash-pinned against the accepted runtime versions.
+
+Durable jobs preserve `/bin/zsh -lc` where that executable exists. On POSIX
+hosts without executable zsh they use `/bin/sh -c`. If neither shell is
+available, launch is refused before creating job artifacts. The fallback and
+its durable stdout/exit-status behavior are covered by cross-platform CI.

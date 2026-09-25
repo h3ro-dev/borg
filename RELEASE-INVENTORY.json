@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 378,
+  "file_count": 379,
   "files": [
     {
       "bytes": 1914,
@@ -8,9 +8,9 @@
       "sha256": "6bfdccbe0a3994dba7c402c2f7a2e0713de367e92476c68f680bc87439e7d1cf"
     },
     {
-      "bytes": 2665,
+      "bytes": 2686,
       "path": ".github/workflows/verify.yml",
-      "sha256": "3c1cae3a80e58511241ce92c3151900c6a58af0e7a092bf0a6a50fa2eff509f6"
+      "sha256": "155639c36e00251bd6979c6a86d969078e44bc65bbb3be6001b36c51a9c43535"
     },
     {
       "bytes": 29,
@@ -273,9 +273,9 @@
       "sha256": "1600e1b9bb2eda4fad5790d5ef17bb17d2e868439b58fceebcad09e1af3c071d"
     },
     {
-      "bytes": 8908,
+      "bytes": 9208,
       "path": "connector/README.md",
-      "sha256": "d0d7288e9eaab4952d6a9dab7d33fd6f1ad40cb0f584dc8413415d299425ee28"
+      "sha256": "c6bb52f9a9ff4d28589266034140fe56a41570b679f50ec773f8569c07fa16ec"
     },
     {
       "bytes": 791,
@@ -338,9 +338,9 @@
       "sha256": "c900c72a65a08367aa01e07d4b7fda08529b7384ba4b933151dcf65ce42c44f6"
     },
     {
-      "bytes": 16169,
+      "bytes": 16583,
       "path": "connector/job_tools.py",
-      "sha256": "862d0c1398d88cf0219c33c1650a006d8309c16daff984d0de2bc3320ab4e137"
+      "sha256": "7c6995becd1557ef39a0746bf8667133dab33a2e4c2dc89f3195ea75a1066642"
     },
     {
       "bytes": 18999,
@@ -476,6 +476,11 @@
       "bytes": 8499,
       "path": "connector/test_independent_settings.py",
       "sha256": "9dfe7b26bec7360fe0305dc9708e7ada6ce3109964a040f05e3a914d9be73948"
+    },
+    {
+      "bytes": 2828,
+      "path": "connector/test_job_portability.py",
+      "sha256": "b3f8a1e0d83367329319ee3e2b0dde4b32fbdab2bca8580dc56d17d681f1aca8"
     },
     {
       "bytes": 15122,
@@ -1893,7 +1898,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "7292a0b0730169a1c5bf59e129bbb46ce36ff38313c6ea61a82bf1083465a23c",
+  "inventory_sha256": "bce18761a71370ae9857c007c89f678d411385d75b3f2f62a6623ec528882689",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 87854283
+  "total_bytes": 87857846
 }
