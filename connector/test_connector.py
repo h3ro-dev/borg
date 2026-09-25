@@ -187,23 +187,29 @@ class ConnectorTests(unittest.TestCase):
     def test_slow_repository_does_not_block_independent_computer_request(self):
         import concurrent.futures
         import threading
-        import time
-        entered = threading.Event()
+        entered, release = threading.Event(), threading.Event()
 
         def slow(*args):
             entered.set()
-            time.sleep(0.6)
+            if not release.wait(10):
+                raise TimeoutError("repository fixture was not released")
             return []
 
         self.server.tool(name="computer_probe")(lambda: "probe completed")
         with patch("borg_context_server._repos_matching", slow), concurrent.futures.ThreadPoolExecutor() as pool:
             pending = pool.submit(self.call, "borg_projects", {})
-            self.assertTrue(entered.wait(2))
-            started = time.monotonic()
-            result = self.call("computer_probe", {})
-            self.assertFalse(result.get("isError", False))
-            self.assertLess(time.monotonic() - started, 0.35)
-            self.assertFalse(pending.result().get("isError", False))
+            try:
+                self.assertTrue(entered.wait(3))
+                probe = pool.submit(self.call, "computer_probe", {})
+                result = probe.result(timeout=3)
+                self.assertFalse(result.get("isError", False))
+                # Prove causal independence, not a wall-clock race against a
+                # sleeping fixture on a contended developer or CI machine.
+                self.assertFalse(release.is_set())
+                self.assertFalse(pending.done())
+            finally:
+                release.set()
+            self.assertFalse(pending.result(timeout=3).get("isError", False))
 
     def test_repository_inspection_honors_total_budget(self):
         import time

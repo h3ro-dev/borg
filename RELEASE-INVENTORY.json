@@ -443,9 +443,9 @@
       "sha256": "0894b284dd34af6495190116a4b7670bede640225b81155278061eabccedaf7b"
     },
     {
-      "bytes": 15833,
+      "bytes": 16225,
       "path": "connector/test_connector.py",
-      "sha256": "c4e1e2b7328304647817f2f44a2a174a98f05e48ad14ee85d0587c755551a30f"
+      "sha256": "ad52ce4b14301a57bde1f248011fd04388c1f9108ca589078d978613e0089674"
     },
     {
       "bytes": 5688,
@@ -1898,7 +1898,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "4319ebdb19e9c2afcd536043573467bac4a029ee547d05f5bbbd95854fd637c0",
+  "inventory_sha256": "1233b085a870bd6a7e9ada3a9df14bb73f9cb20ecb70f4769cf0b876a331c405",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 87858390
+  "total_bytes": 87858782
 }
