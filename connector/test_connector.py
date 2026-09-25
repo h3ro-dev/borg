@@ -231,7 +231,9 @@ class ConnectorTests(unittest.TestCase):
         config = self.root / "config.json"
         doc = {"version": 1, "access_mode": "owner_all", "mem0_principal": PRINCIPAL,
                "allowed_scopes": ["*"], "inbound_authorization_file": str(self.inbound),
-               "mem0_token_file": str(self.upstream), "project_roots": [str(self.project_root)]}
+               "mem0_token_file": str(self.upstream), "project_roots": [str(self.project_root)],
+               "mem0_url": "http://127.0.0.1:8765/mcp", "default_scope": "personal:example",
+               "state_root": str(self.root)}
         config.write_text(json.dumps(doc))
         config.chmod(0o644)
         with self.assertRaises(ValueError):

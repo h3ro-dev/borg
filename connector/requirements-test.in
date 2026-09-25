@@ -1,0 +1,4 @@
+# Connector-only CI dependencies, constrained by the accepted runtime lock.
+fastmcp==3.4.7
+httpx==0.28.1
+starlette==1.6.0

@@ -27,6 +27,15 @@ READ = {"readOnlyHint": True, "destructiveHint": False,
         "idempotentHint": True, "openWorldHint": True}
 
 
+class FleetPreflightError(ToolError):
+    """A local refusal before dispatch, not an interpretation of target text."""
+    def __init__(self, code: str):
+        if code not in {"bad_request", "identity_mismatch", "capability_unavailable"}:
+            raise ValueError("invalid fleet preflight code")
+        self.code = code
+        super().__init__(f"BORG_{code.upper()}: fleet preflight refused; no operation was started")
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -121,7 +130,7 @@ class Fleet:
         rows = read_registry(self.registry)["hosts"]
         row = next((r for r in rows if r["id"] == host), None)
         if row is None or not row["enabled"]:
-            raise ToolError("Fleet host is unknown or disabled; no operation was started")
+            raise FleetPreflightError("capability_unavailable")
         return row
 
     @asynccontextmanager
@@ -152,9 +161,9 @@ class Fleet:
         result = await client.call_tool("borg_identity", {}, timeout=15)
         identity = result.structured_content
         if not isinstance(identity, dict):
-            raise ToolError("Fleet target identity is unavailable; no operation was started")
+            raise FleetPreflightError("capability_unavailable")
         if any(identity.get(k) != row[k] for k in ("instance_id", "owner", "home")):
-            raise ToolError("Fleet target identity mismatch; no operation was started")
+            raise FleetPreflightError("identity_mismatch")
         return identity
 
     @staticmethod
@@ -224,10 +233,16 @@ class Fleet:
         that machine. No automatic retry: after an unknown result inspect native
         state and target borg_operations_recent before repeating a change.
         """
-        if (not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", tool) or tool.startswith("fleet_")
-                or not 1000 <= timeout_ms <= 90000
-                or len(json.dumps(arguments, allow_nan=False).encode()) > 262144):
-            raise ToolError("Invalid fleet call; no operation was started")
+        from computer_tools import classify_failure
+        try:
+            valid = (isinstance(tool, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", tool)
+                     and not tool.startswith("fleet_") and type(timeout_ms) is int
+                     and 1000 <= timeout_ms <= 90000 and isinstance(arguments, dict)
+                     and len(json.dumps(arguments, allow_nan=False).encode()) <= 262144)
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise FleetPreflightError("bad_request")
         row = self.host(host)
         dispatched = False
         identity = None
@@ -237,7 +252,7 @@ class Fleet:
                     identity = await self.verify(client, row)
                     schemas = await self.schemas(client)
                     if tool not in {s["name"] for s in schemas}:
-                        raise ToolError("Target tool is unavailable; no operation was started")
+                        raise FleetPreflightError("capability_unavailable")
                 dispatched = True
                 async with asyncio.timeout(timeout_ms / 1000):
                     result = await client.call_tool_mcp(tool, arguments, timeout=timeout_ms / 1000,
@@ -248,16 +263,22 @@ class Fleet:
                 return ToolResult(content=result.content, structured_content=result.structuredContent,
                                   is_error=result.isError,
                                   meta={**(result.meta or {}), "borg_fleet": {
-                                      "host": host, "identity": identity, "observed_at": now(),
+                                      "host": host, "tool": tool, "identity": identity, "observed_at": now(),
+                                      "state": "outcome_unknown" if result.isError else "succeeded",
+                                      "phase": "result",
+                                      "failure_code": classify_failure(result.model_dump()) if result.isError else None,
                                       "target_receipt": (result.meta or {}).get("borg_operation_receipt")}})
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             state = "outcome_unknown" if dispatched else "not_started"
+            code = exc.code if isinstance(exc, FleetPreflightError) else classify_failure(exc)
             return ToolResult(content=f"Fleet call {state}. " + (
                 "The target may still be working. Inspect its native state and borg_operations_recent before retrying."
                 if dispatched else "Verify the enrolled identity, SSH route and target tool before retrying."),
-                is_error=True, meta={"borg_fleet": {"host": host, "identity": identity, "state": state}})
+                is_error=True, meta={"borg_fleet": {
+                    "host": host, "tool": tool, "identity": identity, "state": state,
+                    "phase": "dispatch" if dispatched else "preflight", "failure_code": code}})
 
 
 def mount_fleet(server, fleet: Fleet):
