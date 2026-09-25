@@ -373,9 +373,9 @@
       "sha256": "fc5589a3692aa250ef6d6690746579f009f98b62ac040b546829b2b85f67e58d"
     },
     {
-      "bytes": 4643,
+      "bytes": 4756,
       "path": "connector/recall_policy.py",
-      "sha256": "0de367574344983590ba30797d75280022fc7079bfd1978fb57f6f0f8b57e956"
+      "sha256": "93b93096adc1b34ec8992c8a2e28f43976a81a51b68f15d3fba7d4b13b3563da"
     },
     {
       "bytes": 7218,
@@ -503,9 +503,9 @@
       "sha256": "ef9908cf64b3729c7ea3653f50ac19ba555567c9997a5ac1bdb01803a6739283"
     },
     {
-      "bytes": 9209,
+      "bytes": 9640,
       "path": "connector/test_recall_policy.py",
-      "sha256": "518dd57d5ba03cb1038bc0a18775e756d706b94112532f80bcc27e0654932431"
+      "sha256": "5c8cdc792a06b08c6e888004f8bc07d472ace2ba32b330d8395354dda3dd9b3f"
     },
     {
       "bytes": 8418,
@@ -1898,7 +1898,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "bce18761a71370ae9857c007c89f678d411385d75b3f2f62a6623ec528882689",
+  "inventory_sha256": "4319ebdb19e9c2afcd536043573467bac4a029ee547d05f5bbbd95854fd637c0",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 87857846
+  "total_bytes": 87858390
 }

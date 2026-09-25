@@ -45,6 +45,14 @@ class SelectionTests(unittest.TestCase):
         kept, _ = select_memories(identifier, values, 6)
         self.assertEqual(kept, values[-1:])
 
+    def test_opaque_id_allows_sentence_punctuation_but_not_suffixes(self):
+        identifier = "0123456789abcdef"
+        values = [row("The commit is " + identifier + "."),
+                  row("The commit is (" + identifier + "), confirmed."),
+                  row(identifier + ".different"), row(identifier + "-different")]
+        kept, _ = select_memories(identifier, values, 6)
+        self.assertEqual(kept, values[:2])
+
     def test_oversized_numeric_score_is_filtered_without_overflow(self):
         kept, result = select_memories("general", [row("invalid score", 10 ** 1000)], 6)
         self.assertEqual(kept, [])

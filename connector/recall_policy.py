@@ -48,8 +48,10 @@ def exact_terms(query: str) -> list[str]:
 def _contains(text: str, term: str) -> bool:
     # Literal term with token boundaries: an ID prefix is not that ID, and a
     # surname prefix is not a full surname. No fuzzy identity assertion.
-    boundary = r"[\w.:-]" if _opaque(term) else r"\w"
-    return re.search(r"(?<!" + boundary + ")" + re.escape(term) + "(?!" + boundary + ")", text) is not None
+    if _opaque(term):
+        # Token equality rejects ID suffixes while allowing sentence punctuation.
+        return any(match.group().rstrip(".:") == term for match in _TOKEN.finditer(text))
+    return re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text) is not None
 
 
 def select_memories(query: str, rows: Any, limit: int) -> tuple[list[dict], dict]:
