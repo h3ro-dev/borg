@@ -84,3 +84,54 @@ a bounded migration mechanism, not indefinite process-history storage.
 Configuration and service commands are described in [INSTALL.md](../docs/INSTALL.md).
 For an owner's Cloudflare/ChatGPT connection, follow [WEB.md](../docs/WEB.md). Optional
 SSH and credential registries start empty and must be configured for that owner.
+
+## Recall result selection
+
+`borg_search` and `borg_project_context` share a read-only selection policy. The
+existing response fields and call arguments are retained. Both now report
+`result_floor` (`populated`, `sparse`, or, for degraded project context,
+`unavailable`) and a versioned `retrieval` object with candidate/returned counts,
+omission reasons, and the policy used. An upstream outage is not a successful
+empty search. All returned memories remain **candidate context**, not authority.
+
+Semantic queries preserve upstream ordering and valid low-scoring candidates:
+a similarity score is not a confidence probability. Double-quoted names or
+phrases require literal, whitespace-normalized matches. Opaque identifiers require
+matching record text or the exact native row ID. For example, `"Ada Example" role`
+does not fill the result with other people sharing only one name. Unquoted names
+remain semantic searches; this is not a replacement for entity resolution.
+Literal matches do not prove a claim is true, current, or about a unique entity.
+
+Only a bounded upstream pool is inspected (at most 25 candidates). A sparse
+response therefore means no additional eligible candidates in that pool, not
+proof that the entire corpus lacks the requested fact. A small, whole-record
+vacuity rule withholds tautological tool statements; discussion of those strings
+is retained. Nothing is deleted, quarantined in storage, or promoted to a higher
+trust tier. The policy performs no additional model calls or memory writes.
+
+## Durable effect and failure diagnostics
+
+New operation receipts use version 2 and retain existing fields. Their bounded
+`diagnostics` object records execution phase, effect state, typed cause, and,
+for fleet calls, target host/tool, verified instance/generation and target receipt
+when available. Credential values, home paths, arguments, error text and result
+payloads are not stored in this object. Existing version-1 receipts remain readable.
+`borg_operation_status` returns the same durable evidence after the request ends.
+
+A post-dispatch error, including a permission or rate-limit error, is
+`outcome_unknown` unless absence of execution is established by local preflight.
+A timeout before dispatch is `not_started`; a lost response after dispatch is not.
+`retryable` is true only for a known transient failure with `not_started` effects;
+it is advice to recheck the target and admission, never an automatic retry.
+`retry_without_change` remains false. Running receipts are provisional, and
+interrupted receipts recover to unknown rather than authorizing a repeat.
+Successful receipts prove completion of the native tool call, not deployment or
+an external business outcome. Finalized receipts cannot regress after cancellation.
+
+The connector trust and compatibility suites run on both CI operating systems
+using `requirements-test.lock`, hash-pinned against the accepted runtime versions.
+
+Durable jobs preserve `/bin/zsh -lc` where that executable exists. On POSIX
+hosts without executable zsh they use `/bin/sh -c`. If neither shell is
+available, launch is refused before creating job artifacts. The fallback and
+its durable stdout/exit-status behavior are covered by cross-platform CI.

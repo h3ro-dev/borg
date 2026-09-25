@@ -271,10 +271,10 @@ class MiddlewareReceiptTests(unittest.IsolatedAsyncioTestCase):
                         raise RuntimeError("test finalizer was not released")
                 original_write(row)
 
-            def finish(receipt_id, state, failure_code=None):
+            def finish(receipt_id, state, failure_code=None, diagnostics=None):
                 if state == "outcome_unknown":
                     cancelled_finalizer.set()
-                return original_finish(receipt_id, state, failure_code)
+                return original_finish(receipt_id, state, failure_code, diagnostics)
 
             result = SimpleNamespace(is_error=False, meta=None, model_dump=lambda: {"output": "ok"})
             with patch.object(ledger, "_write", side_effect=blocked_write), patch.object(ledger, "finish", side_effect=finish):

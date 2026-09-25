@@ -224,6 +224,7 @@ async def mem0_call(client: Client, tool: str, args: dict[str, Any]) -> Any:
 
 
 from repository_inspection import _repos_matching, _repo_snapshot, _needles
+from recall_policy import select_memories, unavailable_retrieval
 
 
 def _memory_summary(rows: Any) -> list[dict[str, Any]]:
@@ -360,7 +361,7 @@ class BorgContext:
                              "ui_tools_configured": bool(ui),
                              "credential_handles_configured": bool(credentials),
                              "inbox_controller_configured": bool(computer.get("inbox_client_config")),
-                             "failure_diagnostics_version": 2,
+                             "failure_diagnostics_version": 3,
                              "readiness_notice": "Connector liveness, dependency readiness, freshness and completed-operation evidence are separate signals."},
             "caller_boundary": "Dedicated local Bearer; the public gateway requires BORG owner OAuth independently of the ChatGPT account.",
             "graph": graph, "source_notice": NOTICE, "activity": _activity("", 0),
@@ -380,13 +381,19 @@ class BorgContext:
         return build_manifest(self.settings, schemas)
 
     async def borg_search(self, query: str, limit: int = 6, include_graph: bool = True) -> dict[str, Any]:
-        """Search across the owner's entire BORG memory collection. Results are candidate context."""
+        """Search owner memory as candidates, not proof. Quote names/phrases for literal matching.
+        Opaque identifiers also require an exact match. Sparse describes the candidate pool,
+        not corpus-wide absence; upstream failures remain errors.
+        """
         if not query.strip() or len(query) > 2000:
             raise ToolError("Supply a nonempty query of at most 2000 characters")
+        requested = max(1, min(int(limit), 12))
         async with self.upstream() as (client, _):
             rows = await mem0_call(client, "memory_search", {
-                "query": query, "limit": max(1, min(int(limit), 12)), "include_graph": include_graph})
-        return {"query": query, "results": _memory_summary(rows), "source_notice": NOTICE}
+                "query": query, "limit": min(requested * 4, 25), "include_graph": include_graph})
+        selected, selection = select_memories(query, rows, requested)
+        return {"query": query, "results": _memory_summary(selected), "source_notice": NOTICE,
+                **selection}
 
     async def borg_projects(self, query: str = "", limit: int = 12) -> dict[str, Any]:
         """Find repositories locally; tolerate outage but fail closed on identity mismatch."""
@@ -409,12 +416,16 @@ class BorgContext:
         authorize()
         memories = []
         memory_status = "UNAVAILABLE"
+        selection = unavailable_retrieval()
+        query = " ".join((project, task)).strip()
+        requested = max(1, min(int(limit), 12))
         try:
             async with self.upstream() as (client, _):
                 rows = await mem0_call(client, "memory_search", {
-                    "query": " ".join((project, task)).strip(), "limit": max(1, min(int(limit), 12)),
+                    "query": query, "limit": min(requested * 4, 25),
                     "include_graph": True})
-                memories = _memory_summary(rows)
+                selected, selection = select_memories(query, rows, requested)
+                memories = _memory_summary(selected)
                 memory_status = "PASS"
         except ToolError as exc:
             if "identity or scope differs" in str(exc):
@@ -424,7 +435,7 @@ class BorgContext:
         repos = await asyncio.to_thread(_repos_matching, project, self.settings.project_roots, 6)
         return {"project": project, "task": task, "observed_at": _now(), "memory_notice": NOTICE,
                 "memory_status": memory_status, "recalled_context": memories, "live_repositories": repos,
-                "activity": _activity(project, max(1, min(int(limit), 12)))}
+                "activity": _activity(project, requested), **selection}
 
     async def borg_remember(self, text: str, scope: str | None = None) -> dict[str, Any]:
         """Save one owner-requested durable fact in BORG. Never store secrets, client personal data or dollar amounts.

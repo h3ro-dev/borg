@@ -31,6 +31,14 @@ TOOL_NAMES = ["job_start", "job_status", "job_read_output", "job_cancel", "job_l
               "artifact_put", "artifact_read", "artifact_list"]
 
 
+def _job_command(command: str) -> list[str]:
+    """Preserve the macOS login shell; support POSIX hosts without zsh."""
+    for shell, option in (("/bin/zsh", "-lc"), ("/bin/sh", "-c")):
+        if os.path.isfile(shell) and os.access(shell, os.X_OK):
+            return [shell, option, command]
+    raise ToolError("BORG capability unavailable: no supported executable job shell")
+
+
 def _now() -> float:
     return time.time()
 
@@ -166,6 +174,7 @@ class JobStore:
         working = _path(cwd) if cwd else Path.home()
         if not working.is_dir():
             raise ToolError("BORG job working directory is unavailable")
+        shell_command = _job_command(command)
         job_id = str(uuid.uuid4())
         job_dir = self.jobs / job_id
         job_dir.mkdir(mode=0o700)
@@ -175,7 +184,7 @@ class JobStore:
         stdout = stdout_path.open("ab", buffering=0)
         stderr = stderr_path.open("ab", buffering=0)
         try:
-            proc = subprocess.Popen(["/bin/zsh", "-lc", command], cwd=str(working),
+            proc = subprocess.Popen(shell_command, cwd=str(working),
                                     stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                                     start_new_session=True)
         except Exception:

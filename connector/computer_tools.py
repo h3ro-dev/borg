@@ -26,6 +26,7 @@ from typing import Literal
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
 from mcp.types import ToolAnnotations
+from operation_diagnostics import for_call
 
 LOG = logging.getLogger("borg.audit")
 DESCRIPTIONS = {
@@ -66,6 +67,8 @@ def contains_secret(value: str) -> bool:
 
 
 FAILURE_MESSAGES = {
+    "bad_request": "The request is invalid. Correct it before retrying.",
+    "identity_mismatch": "The selected target identity does not match its enrollment. Verify the target; do not bypass identity checks.",
     "credential_withheld": "Credential material was withheld. Verify any preceding change before retrying.",
     "authentication_required": "Authentication or a user-owned sign-in step is required.",
     "busy": "BORG host capacity or the selected resource is busy. Check concurrency in borg_status; reconcile any uncertain write before retrying.",
@@ -89,6 +92,16 @@ def classify_failure(value) -> str:
         text = type(value).__name__.casefold()
     if contains_secret(text) or "credential" in text or "secret" in text or "token material" in text:
         return "credential_withheld"
+    if isinstance(value, TimeoutError):
+        return "timeout"
+    if isinstance(value, ConnectionError):
+        return "provider_unavailable"
+    if isinstance(value, PermissionError):
+        return "permission_denied"
+    if "borg_bad_request" in text:
+        return "bad_request"
+    if "borg_identity_mismatch" in text:
+        return "identity_mismatch"
     if any(term in text for term in ("too many open files", "borg_resource_exhausted")):
         return "resource_exhausted"
     if "borg_busy" in text or "capability is busy" in text or "queue is full" in text:
@@ -114,7 +127,7 @@ def classify_failure(value) -> str:
 
 def failure_meta(code: str) -> dict:
     return {
-        "version": 2,
+        "version": 3,
         "code": code,
         "message": FAILURE_MESSAGES.get(code, FAILURE_MESSAGES["downstream_error"]),
         "retry_without_change": False,
@@ -250,60 +263,87 @@ class BoundaryMiddleware(Middleware):
         started = time.monotonic()
         outcome = "error:downstream_error"
         receipt = None
-        final_receipt_state = None
-        receipt_failure = None
+        invoked = False
+        phase = "admission"
+        fleet = None
+
+        async def execute():
+            nonlocal invoked, phase
+            invoked = True
+            phase = "dispatch"
+            return await call_next(context)
+
+        def evidence(code=None, effect=None):
+            return for_call(name, arguments, phase=phase,
+                effect_state=effect or ("outcome_unknown" if invoked else "not_started"),
+                cause=code, fleet=fleet)
+
+        async def finish(state, code, detail):
+            if receipt is not None:
+                await asyncio.to_thread(self.ledger.finish, receipt["receipt_id"], state, code, detail)
+
         try:
             await asyncio.to_thread(self._check, arguments)
             if self.ledger is not None and self._receipt_worthy(name):
-                receipt = await asyncio.to_thread(self.ledger.start, name, self._fingerprint(name, arguments))
-            lane_name = self._lane_name(name)
-            if lane_name:
-                result = await self.scheduler.run(name, arguments, lambda: call_next(context))
+                pending = asyncio.create_task(asyncio.to_thread(
+                    self.ledger.start, name, self._fingerprint(name, arguments), evidence()))
+                try:
+                    receipt = await asyncio.shield(pending)
+                except asyncio.CancelledError:
+                    # A cancelled to_thread wait can still write a starting
+                    # receipt. Recover its ID before finalizing not_started.
+                    receipt = await pending
+                    raise
+            if self._lane_name(name):
+                result = await self.scheduler.run(name, arguments, execute)
             else:
-                result = await call_next(context)
+                result = await execute()
+            if name == "fleet_call" and isinstance(result.meta, dict):
+                candidate = result.meta.get("borg_fleet")
+                fleet = candidate if isinstance(candidate, dict) else None
+            phase = "output_check"
             dumped = result.model_dump()
             await asyncio.to_thread(self._check, dumped)
             if result.is_error:
-                code = classify_failure(dumped)
-                result.meta = {**(result.meta or {}), "borg_failure": failure_meta(code)}
-                final_receipt_state = "failed" if code in {
-                    "authentication_required", "busy", "permission_denied", "policy_refused",
-                    "admission_required", "capability_unavailable", "rate_limited"
-                } else "outcome_unknown"
-                if (result.meta or {}).get("borg_fleet", {}).get("state") == "not_started":
-                    final_receipt_state = "failed"
-                receipt_failure = code
+                code = fleet.get("failure_code") if fleet else None
+                if not isinstance(code, str) or code not in FAILURE_MESSAGES:
+                    code = classify_failure(dumped)
+                effect = "not_started" if fleet and fleet.get("state") == "not_started" else "outcome_unknown"
+                phase = "preflight" if effect == "not_started" else (
+                    "dispatch" if fleet and fleet.get("phase") == "dispatch" else "result")
+                detail = evidence(code, effect)
+                result.meta = {**(result.meta or {}), "borg_failure": {**failure_meta(code), **detail}}
+                await finish("failed" if effect == "not_started" else "outcome_unknown", code, detail)
                 outcome = f"error:{code}"
             else:
-                final_receipt_state = "succeeded"
+                phase = "complete"
+                await finish("succeeded", None, evidence(effect="completed"))
                 outcome = "ok"
             if receipt is not None:
-                await asyncio.to_thread(self.ledger.finish, receipt["receipt_id"], final_receipt_state, receipt_failure)
                 result.meta = {**(result.meta or {}), "borg_operation_receipt": receipt["receipt_id"]}
             return result
         except asyncio.CancelledError:
             outcome = "error:request_cancelled"
-            if receipt is not None:
-                await asyncio.to_thread(self.ledger.finish, receipt["receipt_id"], "outcome_unknown", "request_cancelled")
+            detail = evidence("request_cancelled")
+            await finish("outcome_unknown" if invoked else "failed", "request_cancelled", detail)
             raise
         except ToolError as exc:
-            code = classify_failure(str(exc))
+            from fleet_tools import FleetPreflightError
+            preflight = name == "fleet_call" and isinstance(exc, FleetPreflightError)
+            code = exc.code if preflight else classify_failure(exc)
+            if preflight:
+                phase = "preflight"
+            effect = "not_started" if not invoked or preflight else "outcome_unknown"
             outcome = f"error:{code}"
-            if receipt is not None:
-                state = "failed" if code in {
-                    "authentication_required", "busy", "permission_denied", "policy_refused",
-                    "admission_required", "capability_unavailable", "rate_limited"
-                } else "outcome_unknown"
-                await asyncio.to_thread(self.ledger.finish, receipt["receipt_id"], state, code)
+            await finish("failed" if effect == "not_started" else "outcome_unknown", code, evidence(code, effect))
             if code == "credential_withheld" or isinstance(exc, ProcessOutputOffsetError):
                 raise
             suffix = f" receipt={receipt['receipt_id']}" if receipt is not None else ""
             raise ToolError(f"BORG_{code.upper()}: {FAILURE_MESSAGES[code]}{suffix}") from None
         except Exception as exc:
-            code = classify_failure(str(exc))
+            code = classify_failure(exc)
             outcome = f"error:{code}"
-            if receipt is not None:
-                await asyncio.to_thread(self.ledger.finish, receipt["receipt_id"], "outcome_unknown", code)
+            await finish("outcome_unknown" if invoked else "failed", code, evidence(code))
             suffix = f" receipt={receipt['receipt_id']}" if receipt is not None else ""
             raise ToolError(f"BORG_{code.upper()}: {FAILURE_MESSAGES[code]}{suffix}") from None
         finally:

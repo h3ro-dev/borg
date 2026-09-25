@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp.exceptions import ToolError
+from operation_diagnostics import sanitize
 
 FINAL = frozenset({"succeeded", "failed", "outcome_unknown"})
 
@@ -83,10 +84,11 @@ class OperationLedger:
             except FileNotFoundError:
                 pass
 
-    def start(self, tool: str, request_sha256: str) -> dict[str, Any]:
+    def start(self, tool: str, request_sha256: str, diagnostics: dict | None = None) -> dict[str, Any]:
         receipt_id = str(uuid.uuid4())
         row = {
-            "version": 1,
+            "version": 2,
+            "diagnostics": sanitize(diagnostics),
             "receipt_id": receipt_id,
             "tool": tool,
             "request_sha256": request_sha256,
@@ -101,7 +103,8 @@ class OperationLedger:
         self._write(row)
         return row
 
-    def finish(self, receipt_id: str, state: str, failure_code: str | None = None) -> dict[str, Any]:
+    def finish(self, receipt_id: str, state: str, failure_code: str | None = None,
+               diagnostics: dict | None = None) -> dict[str, Any]:
         if state not in FINAL:
             raise ValueError("invalid final operation state")
         receipt_id = _uuid(receipt_id)
@@ -112,6 +115,16 @@ class OperationLedger:
             row["state"] = state
             row["finished_at"] = _now()
             row["failure_code"] = failure_code
+            detail = sanitize(diagnostics if diagnostics is not None else row.get("diagnostics"))
+            detail["cause"] = failure_code
+            if state == "outcome_unknown":
+                detail["effect_state"] = "outcome_unknown"
+                if diagnostics is None:
+                    detail["phase"] = "unknown"
+            elif state == "succeeded":
+                detail["effect_state"] = "completed"
+                detail["phase"] = "complete"
+            row["diagnostics"] = sanitize(detail)
             self._write(row)
             return row
 

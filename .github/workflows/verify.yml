@@ -34,6 +34,24 @@ jobs:
             --root "$RUNNER_TEMP/borg-source" \
             --allowlist "$RUNNER_TEMP/borg-source/RELEASE-ALLOWLIST.json" \
             --inventory "$RUNNER_TEMP/borg-source/RELEASE-INVENTORY.json"
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Install hash-pinned connector test dependencies
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/borg-connector-tests"
+          "$RUNNER_TEMP/borg-connector-tests/bin/python" -m pip install \
+            --require-hashes -r connector/requirements-test.lock
+      - name: Test connector trust boundaries and compatibility
+        working-directory: connector
+        shell: bash
+        run: |
+          "$RUNNER_TEMP/borg-connector-tests/bin/python" -B -m unittest -v \
+            test_recall_policy test_operation_diagnostics test_job_portability test_fleet \
+            test_connector.ConnectorTests test_capabilities test_concurrency \
+            test_resilience.ReceiptTests test_resilience.MiddlewareReceiptTests \
+            test_resilience.LaneTests
       - name: Verify release, adapter and installer guards
         run: python3 -B -m unittest installer.test_release_guard installer.test_adapters installer.test_startup_preflight
       - name: Install pinned native Codex runtime
