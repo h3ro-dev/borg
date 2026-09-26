@@ -27,6 +27,9 @@ def access_token(name, scopes):
 
 
 class LegacyGraphScopeGuardTests(unittest.TestCase):
+    def legacy_config(self):
+        return SimpleNamespace(portable=False, values=SERVER.CONFIG.values)
+
     def test_legacy_8767_denies_restricted_principal_before_query(self):
         query_calls = []
 
@@ -39,9 +42,11 @@ class LegacyGraphScopeGuardTests(unittest.TestCase):
             raise AssertionError("restricted principal reached FalkorDB")
 
         restricted = access_token("synthetic-restricted", ["team:project"])
-        with mock.patch.object(SERVER, "get_access_token", return_value=restricted), mock.patch.object(
-            SERVER, "graphiti", side_effect=graphiti_called
-        ), mock.patch.object(SERVER, "falkor_graph", side_effect=falkor_called):
+        with mock.patch.object(SERVER, "CONFIG", self.legacy_config()), mock.patch.object(
+            SERVER, "get_access_token", return_value=restricted
+        ), mock.patch.object(SERVER, "graphiti", side_effect=graphiti_called), mock.patch.object(
+            SERVER, "falkor_graph", side_effect=falkor_called
+        ):
             with self.assertRaises(SERVER.ToolError):
                 asyncio.run(SERVER.graph_search("legacy canary"))
             with self.assertRaises(SERVER.ToolError):
@@ -67,7 +72,9 @@ class LegacyGraphScopeGuardTests(unittest.TestCase):
                 ]
 
         full_access = access_token("synthetic-full", ["*"])
-        with mock.patch.object(SERVER, "get_access_token", return_value=full_access), mock.patch.object(
+        with mock.patch.object(SERVER, "CONFIG", self.legacy_config()), mock.patch.object(
+            SERVER, "GRAPH_KEY", "backfill-v1"
+        ), mock.patch.object(SERVER, "get_access_token", return_value=full_access), mock.patch.object(
             SERVER, "graphiti", return_value=FakeGraphiti()
         ), mock.patch.object(SERVER, "_log"):
             payload = json.loads(asyncio.run(SERVER.graph_search("legacy canary")))

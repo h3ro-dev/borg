@@ -5,6 +5,7 @@ import path from 'node:path';
 const MAX_ENTRIES = 10000;
 const MAX_FILE_BYTES = 65536;
 const MAX_TOTAL_BYTES = 4 * 1024 * 1024;
+const WARNING_FRACTION = 0.8;
 function reject(code) { const error = new Error(code); error.code = code; throw error; }
 function privateStat(target, directory = false) {
   const stat = fs.lstatSync(target);
@@ -33,10 +34,27 @@ function record(target) {
     return { value, bytes };
   } finally { fs.closeSync(fd); }
 }
-function directory(target) {
+function scanWarnings(entries, totalBytes) {
+  const warnings = [];
+  if (entries >= Math.ceil(MAX_ENTRIES * WARNING_FRACTION)) warnings.push({
+    code: 'RECEIPT_ENTRY_LIMIT_WARNING',
+    message: `receipt scan has ${entries} entries; hard cap is ${MAX_ENTRIES}`,
+    entries,
+    limit: MAX_ENTRIES,
+  });
+  if (totalBytes >= Math.ceil(MAX_TOTAL_BYTES * WARNING_FRACTION)) warnings.push({
+    code: 'RECEIPT_TOTAL_LIMIT_WARNING',
+    message: `receipt scan has ${totalBytes} JSON bytes; hard cap is ${MAX_TOTAL_BYTES}`,
+    totalBytes,
+    limit: MAX_TOTAL_BYTES,
+  });
+  return warnings;
+}
+function directory(target, includeEntries = false) {
   privateStat(target, true);
   const handle = fs.opendirSync(target);
   const values = [];
+  const entries = [];
   let seen = 0; let total = 0;
   try {
     let entry;
@@ -48,24 +66,30 @@ function directory(target) {
       total += read.bytes;
       if (total > MAX_TOTAL_BYTES) reject('RECEIPT_TOTAL_LIMIT');
       values.push(read.value);
+      if (includeEntries) entries.push({ name: entry.name, value: read.value, bytes: read.bytes });
     }
   } finally { handle.closeSync(); }
-  return values;
+  return { value: includeEntries ? entries : values, warnings: scanWarnings(seen, total) };
 }
 const [mode, target] = process.argv.slice(2);
 try {
-  if (!['record','directory'].includes(mode) || !path.isAbsolute(target ?? '')) reject('RECEIPT_REQUEST_INVALID');
+  if (!['record','directory','entries'].includes(mode) || !path.isAbsolute(target ?? '')) reject('RECEIPT_REQUEST_INVALID');
   let value;
   // Only a missing requested root is empty/not-found. A receipt disappearing
   // during enumeration makes the WHOLE scan unknown, not partially successful.
   try { fs.lstatSync(target); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    process.stdout.write(JSON.stringify({ ok: true, value: mode === 'directory' ? [] : null }));
+    process.stdout.write(JSON.stringify({ ok: true, value: mode === 'record' ? null : [], warnings: [] }));
     process.exit(0);
   }
-  value = mode === 'directory' ? directory(target) : record(target).value;
-  process.stdout.write(JSON.stringify({ ok: true, value }));
+  if (mode === 'record') {
+    value = record(target).value;
+    process.stdout.write(JSON.stringify({ ok: true, value }));
+  } else {
+    const result = directory(target, mode === 'entries');
+    process.stdout.write(JSON.stringify({ ok: true, value: result.value, warnings: result.warnings }));
+  }
 } catch (error) {
   process.stdout.write(JSON.stringify({ ok: false, code: /^[A-Z_]+$/.test(error.code ?? '') ? error.code : 'RECEIPT_READ_FAILED' }));
   process.exitCode = 1;

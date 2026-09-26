@@ -54,3 +54,21 @@ test('invalid timeout configuration is rejected without starting a reader', asyn
     await assert.rejects(readPrivateJsonDirectory(root, { timeoutMs }), /RECEIPT_READ_TIMEOUT_INVALID/);
   }
 });
+
+test('directory reader warns at eighty percent of both scan caps', async (t) => {
+  const entriesRoot = fixture(t);
+  for (let index = 0; index < 8000; index += 1) {
+    fs.writeFileSync(path.join(entriesRoot, `entry-${index}.txt`), '', { mode: 0o600 });
+  }
+  const entryWarnings = [];
+  await readPrivateJsonDirectory(entriesRoot, { onWarning: (warning) => entryWarnings.push(warning) });
+  assert.ok(entryWarnings.some((warning) => warning.code === 'RECEIPT_ENTRY_LIMIT_WARNING'));
+
+  const bytesRoot = fixture(t);
+  for (let index = 0; index < 54; index += 1) {
+    fs.writeFileSync(path.join(bytesRoot, `receipt-${index}.json`), JSON.stringify({ text: 'x'.repeat(62_900) }), { mode: 0o600 });
+  }
+  const byteWarnings = [];
+  await readPrivateJsonDirectory(bytesRoot, { onWarning: (warning) => byteWarnings.push(warning) });
+  assert.ok(byteWarnings.some((warning) => warning.code === 'RECEIPT_TOTAL_LIMIT_WARNING'));
+});

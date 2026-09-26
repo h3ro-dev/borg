@@ -24,13 +24,15 @@ async function unusedLoopbackPort() {
   return port;
 }
 
-async function awaitNativeStatus(port, child, diagnostics, deadlineMs = Date.now() + 20_000) {
+async function awaitNativeStatus(port, child, diagnostics, tokenPath, deadlineMs = Date.now() + 20_000) {
   while (Date.now() < deadlineMs) {
     if (child.exitCode !== null) {
       throw new Error(`conductor exited ${child.exitCode}: ${diagnostics.join('')}`);
     }
     try {
+      const token = fs.existsSync(tokenPath) ? fs.readFileSync(tokenPath, 'utf8').trim() : null;
       const response = await fetch(`http://127.0.0.1:${port}/status`, {
+        headers: token ? { authorization: `Bearer ${token}` } : {},
         signal: AbortSignal.timeout(1_000),
       });
       if (response.ok) return response.json();
@@ -59,6 +61,7 @@ test('real Codex app-server initializes with a separate unauthenticated profile'
     codexBin: path.resolve(CODEX_BIN),
   });
   const profile = path.join(borgHome, 'conductors/primary/profile');
+  const tokenPath = path.join(profile, '.conductor/http-token');
   assert.equal(fs.existsSync(path.join(profile, 'auth.json')), false);
 
   const child = spawn(process.execPath, [cliPath, 'start', '--config', 'conductors/config.json', '--lane', 'primary'], {
@@ -77,7 +80,7 @@ test('real Codex app-server initializes with a separate unauthenticated profile'
     fs.rmSync(parent, { recursive: true, force: true });
   });
 
-  const status = await awaitNativeStatus(port, child, diagnostics);
+  const status = await awaitNativeStatus(port, child, diagnostics, tokenPath);
   assert.equal(status.ok, true);
   assert.equal(status.port, port);
   assert.equal(status.codexHome, profile);

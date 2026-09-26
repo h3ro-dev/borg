@@ -34,6 +34,13 @@ function positiveInteger(value, label, low, high) {
   return number;
 }
 
+function strictInteger(value, label, low, high) {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < low || value > high) {
+    throw new Error(`${label} must be an integer from ${low} to ${high}`);
+  }
+  return value;
+}
+
 function assertNoCredentialKeys(value, label = 'config') {
   if (!value || typeof value !== 'object') return;
   for (const [key, child] of Object.entries(value)) {
@@ -199,6 +206,8 @@ export function validateInstallConfig(raw, options = {}) {
     routing: {
       timeoutMs: positiveInteger(raw.routing?.timeoutMs ?? 5_000, 'routing.timeoutMs', 500, 60_000),
       lockTimeoutMs: positiveInteger(raw.routing?.lockTimeoutMs ?? 30_000, 'routing.lockTimeoutMs', 1_000, 60_000),
+      archiveAfterMs: strictInteger(raw.routing?.archiveAfterMs ?? 7 * 24 * 60 * 60 * 1000,
+        'routing.archiveAfterMs', 1_000, 365 * 24 * 60 * 60 * 1000),
       defaultLimitId: requireString(raw.routing?.defaultLimitId ?? 'codex', 'routing.defaultLimitId'),
       modelLimitIds: { ...(raw.routing?.modelLimitIds ?? {}) },
     },
@@ -232,6 +241,7 @@ export function buildDefaultConfig(borgHomeInput, codexBinInput, options = {}) {
     routing: {
       timeoutMs: 5_000,
       lockTimeoutMs: 30_000,
+      archiveAfterMs: 7 * 24 * 60 * 60 * 1000,
       defaultLimitId: 'codex',
       modelLimitIds: {},
     },
