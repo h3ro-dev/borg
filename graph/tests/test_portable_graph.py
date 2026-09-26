@@ -14,7 +14,6 @@ ROOT = Path(__file__).resolve().parents[1]
 def install_fixture(home, owner='fixture-owner', port=26383):
     shutil.copytree(ROOT, home / 'graphiti', ignore=shutil.ignore_patterns('__pycache__'))
     shutil.copytree(ROOT.parent / 'memory' / 'bin', home / 'mem0' / 'bin', ignore=shutil.ignore_patterns('__pycache__'))
-    (home / 'config.json').write_text(json.dumps({'schema': 'borg-install/v1'}))
     settings = dict(BORG_HOME=str(home), BORG_OWNER_ID=owner, BORG_MEMORY_SCOPE='personal:'+owner,
         BORG_QDRANT_URL='http://127.0.0.1:26333', BORG_QDRANT_COLLECTION='fixture',
         BORG_HISTORY_DB=str(home/'mem0/data/history.db'), BORG_OLLAMA_URL='http://127.0.0.1:21434',
@@ -23,6 +22,7 @@ def install_fixture(home, owner='fixture-owner', port=26383):
         BORG_EMBED_DIMS='16', BORG_FALKORDB_HOST='127.0.0.1', BORG_FALKORDB_PORT=str(port),
         BORG_FALKORDB_GRAPH='fixture_legacy', BORG_GRAPH_LLM_URL='http://127.0.0.1:21460/v1',
         BORG_GRAPH_MODEL='fixture-graph')
+    (home / 'config.json').write_text(json.dumps({'schema': 'borg-install/v1', **settings}))
     env = {k:v for k,v in os.environ.items() if not k.startswith(('BORG_', 'MEM0_', 'GRAPH_', 'OLLAMA_', 'SHIM_'))}
     env.update(settings, PYTHONDONTWRITEBYTECODE='1')
     return env
@@ -34,6 +34,36 @@ def run_code(home, env, code):
 
 
 class PortableGraphTests(unittest.TestCase):
+    def test_fixture_config_is_self_sufficient_with_only_borg_home(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / 'one'
+            clean_home = root / 'clean-home'
+            clean_home.mkdir()
+            install_fixture(home)
+            env = {
+                'PATH': os.environ.get('PATH', ''),
+                'HOME': str(clean_home),
+                'BORG_HOME': str(home),
+                'PYTHONDONTWRITEBYTECODE': '1',
+            }
+            result = run_code(home, env, '''
+import sys
+sys.path.insert(0, 'graphiti/bin')
+import borg_config as config
+required = {
+    'BORG_OWNER_ID', 'BORG_MEMORY_SCOPE', 'BORG_QDRANT_URL',
+    'BORG_QDRANT_COLLECTION', 'BORG_HISTORY_DB', 'BORG_OLLAMA_URL',
+    'BORG_EXTRACTION_MODEL', 'BORG_EXTRACTION_MODEL_ID', 'BORG_EMBED_MODEL',
+    'BORG_EMBED_MODEL_ID', 'BORG_EMBED_DIMS', 'BORG_FALKORDB_HOST',
+    'BORG_FALKORDB_PORT', 'BORG_FALKORDB_GRAPH', 'BORG_GRAPH_LLM_URL',
+    'BORG_GRAPH_MODEL',
+}
+assert required <= set(config.CONFIG.values)
+assert config.CONFIG.owner_id == 'fixture-owner'
+''')
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_adapter_uses_explicit_installer_config(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)/'one'

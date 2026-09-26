@@ -48,7 +48,7 @@ jobs:
 
   python-tests:
     name: Python tests (${{ matrix.suite }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
       PYTHONDONTWRITEBYTECODE: '1'
@@ -57,16 +57,22 @@ jobs:
       matrix:
         include:
           - suite: connector
+            os: macos-14
             requirements: installer/requirements.lock
           - suite: coordination
+            os: ubuntu-24.04
             requirements: coordination/requirements-core.lock
           - suite: installer
+            os: macos-14
             requirements: installer/requirements.lock
           - suite: memory
+            os: ubuntu-24.04
             requirements: memory/requirements.txt
           - suite: graph
+            os: ubuntu-24.04
             requirements: graph/requirements.txt
           - suite: training
+            os: ubuntu-24.04
             requirements: training/requirements.txt
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
