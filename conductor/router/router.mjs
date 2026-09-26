@@ -6,7 +6,12 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { validateInstallConfig } from '../config.mjs';
-import { readPrivateJsonDirectory, readPrivateJsonRecord } from './receipt-reader.mjs';
+import { readHttpToken } from '../http-auth.mjs';
+import {
+  readPrivateJsonDirectory,
+  readPrivateJsonDirectoryEntries,
+  readPrivateJsonRecord,
+} from './receipt-reader.mjs';
 
 // Portable extraction of the supplied conductor-usage-router and
 // fleet-placement invariants. Estate-specific roster, SSH shipping, and
@@ -21,6 +26,14 @@ const ACTIVE_RECEIPT_STATES = new Set([
   'UNKNOWN_DO_NOT_RETRY',
   'STARTED_TURN_UNKNOWN',
 ]);
+const TERMINAL_RECEIPT_STATES = new Set([
+  'PRE_START_FAILED',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+  'RECONCILED_NO_START',
+]);
+const STALE_LOCK_AGE_MS = 10 * 60 * 1000;
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -142,9 +155,8 @@ export async function observeClaims(machine, statePath, nowMs = Date.now()) {
 
 async function observeLocalReceiptClaims(statePath, nowMs = Date.now()) {
   const receipts = await readJsonFiles(path.join(statePath, 'dispatch-receipts'));
-  const terminal = new Set(['PRE_START_FAILED', 'COMPLETED', 'FAILED', 'CANCELLED', 'RECONCILED_NO_START']);
   for (const receipt of receipts) {
-    if (!ACTIVE_RECEIPT_STATES.has(receipt.state) && !terminal.has(receipt.state)) {
+    if (!ACTIVE_RECEIPT_STATES.has(receipt.state) && !TERMINAL_RECEIPT_STATES.has(receipt.state)) {
       throw new Error('RECEIPT_STATE_UNKNOWN');
     }
     if (ACTIVE_RECEIPT_STATES.has(receipt.state) && (typeof receipt.workId !== 'string' || !receipt.workId.trim())) {
@@ -169,8 +181,8 @@ async function observeLocalReceiptClaims(statePath, nowMs = Date.now()) {
   };
 }
 
-async function fetchJson(url, init, timeoutMs) {
-  const response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+async function fetchJson(url, init, timeoutMs, fetchImpl = globalThis.fetch) {
+  const response = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
   if (!response.ok) throw new Error(`HTTP_${response.status}`);
   try {
     return await response.json();
@@ -179,34 +191,36 @@ async function fetchJson(url, init, timeoutMs) {
   }
 }
 
-export async function nativeConductorProvider(lane, operation, timeoutMs = 5_000) {
+export async function nativeConductorProvider(lane, operation, timeoutMs = 5_000, fetchImpl = globalThis.fetch) {
   const base = `http://${lane.host}:${lane.port}`;
+  const token = readHttpToken(lane.codexHome, { allowMissing: true });
+  const headers = token ? { authorization: `Bearer ${token}` } : {};
   if (operation.kind === 'status') {
-    const status = await fetchJson(`${base}/status`, { method: 'GET' }, timeoutMs);
-    const nativeThreads = await fetchJson(`${base}/threads?limit=100`, { method: 'GET' }, timeoutMs);
+    const status = await fetchJson(`${base}/status`, { method: 'GET', headers }, timeoutMs, fetchImpl);
+    const nativeThreads = await fetchJson(`${base}/threads?limit=100`, { method: 'GET', headers }, timeoutMs, fetchImpl);
     return { ...status, nativeThreads };
   }
   if (operation.kind === 'rpc') {
     return fetchJson(`${base}/rpc`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify({ method: operation.method, params: operation.params ?? {}, timeoutMs }),
-    }, timeoutMs);
+    }, timeoutMs, fetchImpl);
   }
   if (operation.kind === 'thread-start') {
     const endpoint = operation.role === 'lead' ? '/lead/thread/start' : '/thread/start';
     return fetchJson(`${base}${endpoint}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify(operation.body),
-    }, 60_000);
+    }, 60_000, fetchImpl);
   }
   if (operation.kind === 'turn-start') {
     return fetchJson(`${base}/turn/start`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...headers, 'content-type': 'application/json' },
       body: JSON.stringify(operation.body),
-    }, 60_000);
+    }, 60_000, fetchImpl);
   }
   throw new Error(`unknown conductor operation: ${operation.kind}`);
 }
@@ -416,18 +430,94 @@ async function atomicPrivateWrite(target, value, options = {}) {
   await fs.rename(temporary, target);
 }
 
-async function acquireLock(statePath, timeoutMs) {
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    // EPERM proves that a process exists even when this user cannot signal it.
+    return true;
+  }
+}
+
+function lockPid(body) {
+  const trimmed = body.trim();
+  if (!trimmed) return null;
+  if (/^[1-9][0-9]*$/.test(trimmed)) return Number(trimmed);
+  try {
+    const value = JSON.parse(trimmed);
+    return Number.isInteger(value?.pid) && value.pid > 0 ? value.pid : null;
+  } catch {
+    return null;
+  }
+}
+
+async function recoverStaleLock(lockPath, options = {}) {
+  let stat;
+  let body;
+  try {
+    stat = await fs.lstat(lockPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0
+        || stat.size > 4096) return false;
+    body = await fs.readFile(lockPath, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return true;
+    throw error;
+  }
+  const pid = lockPid(body);
+  const alive = pid === null ? false : (options.processAlive ?? processIsAlive)(pid);
+  if (alive) return false;
+  const nowMs = options.nowMs ?? Date.now();
+  const stale = body.length === 0 || pid !== null || nowMs - stat.mtimeMs > STALE_LOCK_AGE_MS;
+  if (!stale) return false;
+  const base = `${lockPath}.stale-${new Date(nowMs).toISOString()}`;
+  let stalePath = base;
+  for (let suffix = 1; ; suffix += 1) {
+    try {
+      await fs.access(stalePath);
+      stalePath = `${base}-${suffix}`;
+    } catch (error) {
+      if (error.code === 'ENOENT') break;
+      throw error;
+    }
+  }
+  await fs.rename(lockPath, stalePath);
+  return true;
+}
+
+export async function acquireDispatchLock(statePath, timeoutMs, options = {}) {
   await ensurePrivateDirectory(statePath);
   const lockPath = path.join(statePath, 'dispatch.lock');
+  const lockId = crypto.randomUUID();
   const deadline = Date.now() + timeoutMs;
+  let recoveryAttempted = false;
   while (true) {
     try {
       const handle = await fs.open(lockPath, 'wx', 0o600);
-      await handle.writeFile(`${process.pid}\n`);
-      await handle.close();
-      return () => fs.unlink(lockPath);
+      try {
+        await handle.writeFile(`${JSON.stringify({
+          schemaVersion: 1,
+          lockId,
+          pid: process.pid,
+          acquiredAt: new Date(options.nowMs ?? Date.now()).toISOString(),
+        }, null, 2)}\n`);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      return async () => {
+        const current = JSON.parse(await fs.readFile(lockPath, 'utf8'));
+        if (current?.lockId !== lockId) throw new Error('dispatch lock ownership changed');
+        await fs.unlink(lockPath);
+      };
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
+      if (!recoveryAttempted && await recoverStaleLock(lockPath, options)) {
+        recoveryAttempted = true;
+        continue;
+      }
       if (Date.now() >= deadline) throw new Error(`dispatch lock busy; inspect ${lockPath}`);
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
@@ -517,6 +607,179 @@ async function updateReceipt(receiptPath, intentPath, receipt) {
   await atomicPrivateWrite(intentPath, { schemaVersion: 1, receiptPath, state: receipt.state });
 }
 
+function statusWords(value) {
+  const values = [];
+  if (typeof value === 'string') values.push(value);
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const key of ['type', 'status', 'state']) {
+      if (typeof value[key] === 'string') values.push(value[key]);
+    }
+  }
+  return values.map((item) => item.toLowerCase().replace(/[^a-z]+/g, '_'));
+}
+
+function terminalStateFromTurn(turn) {
+  const words = new Set(statusWords(turn?.status));
+  if (['interrupted', 'cancelled', 'canceled', 'aborted'].some((word) => words.has(word))) {
+    return 'CANCELLED';
+  }
+  if (['failed', 'failure', 'error', 'errored'].some((word) => words.has(word))) return 'FAILED';
+  if (['completed', 'complete', 'succeeded', 'success', 'done'].some((word) => words.has(word))) {
+    return 'COMPLETED';
+  }
+  return null;
+}
+
+function normalizedNativeTime(value, fallback) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const milliseconds = value < 10_000_000_000 ? value * 1000 : value;
+    if (Number.isFinite(milliseconds)) return new Date(milliseconds).toISOString();
+  }
+  if (typeof value === 'string' && Number.isFinite(Date.parse(value))) {
+    return new Date(value).toISOString();
+  }
+  return fallback;
+}
+
+async function updateIntentState(config, receiptPath, receipt) {
+  if (typeof receipt.workId !== 'string' || typeof receipt.cwd !== 'string') return;
+  const intentPath = path.join(config.statePath, 'intents', `${intentDigest(receipt.workId, receipt.cwd)}.json`);
+  const intent = await readPrivateJsonRecord(intentPath);
+  if (intent === null || intent.receiptPath !== receiptPath) return;
+  await atomicPrivateWrite(intentPath, { schemaVersion: 1, receiptPath, state: receipt.state });
+}
+
+async function reconcileReceipt(config, entry, options) {
+  const receipt = entry.value;
+  if (!ACTIVE_RECEIPT_STATES.has(receipt.state)
+      || typeof receipt.threadId !== 'string' || !receipt.threadId
+      || typeof receipt.laneId !== 'string') return { receipt, changed: false };
+  const lane = config.conductors.find((candidate) => candidate.id === receipt.laneId);
+  if (!lane) return { receipt, changed: false, error: 'LANE_NOT_FOUND' };
+  let readback;
+  try {
+    readback = await stageDeadline(() => options.conductorProvider(lane, {
+      kind: 'rpc',
+      method: 'thread/read',
+      params: { threadId: receipt.threadId, includeTurns: true },
+    }), 'RECONCILE_READ', options.stageTimeoutMs);
+  } catch (error) {
+    return { receipt, changed: false, error: error.code || error.name || 'READ_FAILED' };
+  }
+  const thread = readback?.thread;
+  if (!thread || thread.id !== receipt.threadId || !Array.isArray(thread.turns)) {
+    return { receipt, changed: false, error: 'THREAD_READ_INVALID' };
+  }
+  const turn = receipt.turnId
+    ? thread.turns.find((candidate) => candidate?.id === receipt.turnId)
+    : thread.turns.at(-1);
+  if (!turn || typeof turn.id !== 'string' || !turn.id) {
+    return { receipt, changed: false, error: 'TURN_NOT_FOUND' };
+  }
+  const state = terminalStateFromTurn(turn);
+  if (!state) return { receipt, changed: false };
+  const reconciledAt = new Date(options.nowMs).toISOString();
+  const updated = {
+    ...receipt,
+    state,
+    phase: 'RECONCILED',
+    turnId: turn.id,
+    reconciledAt,
+    terminalAt: normalizedNativeTime(turn.completedAt, reconciledAt),
+    nativeEvidence: {
+      method: 'thread/read',
+      threadId: thread.id,
+      turnId: turn.id,
+      status: statusWords(turn.status)[0] ?? null,
+      observedAt: reconciledAt,
+    },
+    events: [...(Array.isArray(receipt.events) ? receipt.events : []), {
+      phase: 'RECONCILED', at: reconciledAt, state,
+    }].slice(-16),
+  };
+  const receiptPath = path.join(config.statePath, 'dispatch-receipts', entry.name);
+  await atomicPrivateWrite(receiptPath, updated);
+  await updateIntentState(config, receiptPath, updated);
+  return { receipt: updated, changed: true };
+}
+
+function terminalTimestamp(receipt) {
+  for (const value of [receipt.terminalAt, receipt.reconciledAt, receipt.dispatchedAt, receipt.attemptedAt]) {
+    const timestamp = timestampMillis(value);
+    if (timestamp !== null) return timestamp;
+  }
+  return null;
+}
+
+async function archiveReceipt(config, entry, receipt) {
+  const receiptsDirectory = path.join(config.statePath, 'dispatch-receipts');
+  const archiveDirectory = path.join(receiptsDirectory, 'archive');
+  await ensurePrivateDirectory(archiveDirectory);
+  const receiptPath = path.join(receiptsDirectory, entry.name);
+  const archivePath = path.join(archiveDirectory, entry.name);
+  try {
+    await fs.access(archivePath);
+    throw new Error('ARCHIVE_RECEIPT_EXISTS');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  await fs.rename(receiptPath, archivePath);
+  if (typeof receipt.workId === 'string' && typeof receipt.cwd === 'string') {
+    const intentPath = path.join(config.statePath, 'intents', `${intentDigest(receipt.workId, receipt.cwd)}.json`);
+    const intent = await readPrivateJsonRecord(intentPath);
+    if (intent?.receiptPath === receiptPath) {
+      await atomicPrivateWrite(intentPath, { schemaVersion: 1, receiptPath: archivePath, state: receipt.state });
+    }
+  }
+}
+
+async function reconcileReceiptsLocked(config, options) {
+  const directory = path.join(config.statePath, 'dispatch-receipts');
+  const entries = await readPrivateJsonDirectoryEntries(directory, { onWarning: options.onWarning });
+  const errors = [];
+  let reconciled = 0;
+  let archived = 0;
+  const observed = new Map();
+  for (const entry of entries) {
+    const result = await reconcileReceipt(config, entry, options);
+    observed.set(entry.name, result.receipt);
+    if (result.changed) reconciled += 1;
+    if (result.error) errors.push({ attemptId: entry.value.attemptId ?? null, code: result.error });
+  }
+  for (const entry of entries) {
+    const receipt = observed.get(entry.name) ?? entry.value;
+    const timestamp = terminalTimestamp(receipt);
+    if (!TERMINAL_RECEIPT_STATES.has(receipt.state) || timestamp === null
+        || options.nowMs - timestamp < options.archiveAfterMs) continue;
+    await archiveReceipt(config, entry, receipt);
+    archived += 1;
+  }
+  return { scanned: entries.length, reconciled, archived, errors };
+}
+
+export async function reconcileReceipts(configInput, options = {}) {
+  const config = validateInstallConfig(configInput, { expectedBorgHome: configInput.borgHome });
+  const nowMs = options.nowMs ?? Date.now();
+  if (!Number.isFinite(nowMs)) throw new Error('RECONCILE_TIME_INVALID');
+  const archiveAfterMs = options.archiveAfterMs ?? config.routing.archiveAfterMs;
+  if (!Number.isInteger(archiveAfterMs) || archiveAfterMs < 1_000) throw new Error('ARCHIVE_AGE_INVALID');
+  const settings = {
+    nowMs,
+    archiveAfterMs,
+    stageTimeoutMs: options.stageTimeoutMs ?? config.routing.timeoutMs,
+    conductorProvider: options.conductorProvider
+      ?? ((lane, operation) => nativeConductorProvider(lane, operation, config.routing.timeoutMs)),
+    onWarning: options.onWarning,
+  };
+  if (options.lockHeld === true) return reconcileReceiptsLocked(config, settings);
+  const release = await acquireDispatchLock(config.statePath, config.routing.lockTimeoutMs, { nowMs });
+  try {
+    return await reconcileReceiptsLocked(config, settings);
+  } finally {
+    await release();
+  }
+}
+
 function noEligibleMessage(result) {
   const evidence = result.candidates.map((candidate) => `${candidate.laneId}:${candidate.issues.join('+')}`).join(',');
   return `no eligible conductor${evidence ? `: ${evidence}` : ''}`;
@@ -525,7 +788,7 @@ function noEligibleMessage(result) {
 export async function rank(configInput, options = {}) {
   const config = validateInstallConfig(configInput, { expectedBorgHome: configInput.borgHome });
   const nowMs = options.nowMs ?? Date.now();
-  return snapshot(config, {
+  const settings = {
     nowMs,
     usageMaxAgeMs: options.usageMaxAgeMs ?? 15_000,
     stageTimeoutMs: options.stageTimeoutMs ?? config.routing.timeoutMs,
@@ -536,7 +799,15 @@ export async function rank(configInput, options = {}) {
     claimsProvider: options.claimsProvider ?? observeClaims,
     conductorProvider: options.conductorProvider
       ?? ((lane, operation) => nativeConductorProvider(lane, operation, config.routing.timeoutMs)),
+  };
+  await reconcileReceipts(config, {
+    nowMs,
+    archiveAfterMs: options.archiveAfterMs ?? config.routing.archiveAfterMs,
+    stageTimeoutMs: settings.stageTimeoutMs,
+    conductorProvider: settings.conductorProvider,
+    onWarning: options.onWarning,
   });
+  return snapshot(config, settings);
 }
 
 // Work IDs are reserved across every claim source and machine. Workspace
@@ -577,16 +848,23 @@ export async function inspectDispatch(configInput, options = {}) {
     if (intent !== null) break;
   }
   if (intent === null) return { found: false, state: 'NOT_FOUND', noStartProven: false, completionVerified: false };
-  const receiptPath = intent.receiptPath;
-  if (typeof receiptPath !== 'string' || path.dirname(receiptPath) !== path.join(config.statePath, 'dispatch-receipts')
+  let receiptPath = intent.receiptPath;
+  const receiptsDirectory = path.join(config.statePath, 'dispatch-receipts');
+  const allowedDirectories = new Set([receiptsDirectory, path.join(receiptsDirectory, 'archive')]);
+  if (typeof receiptPath !== 'string' || !allowedDirectories.has(path.dirname(receiptPath))
       || !path.basename(receiptPath).endsWith('.json')) throw new Error('UNSAFE_RECEIPT_REFERENCE');
-  const receipt = await readPrivateJsonRecord(receiptPath);
+  let receipt = await readPrivateJsonRecord(receiptPath);
+  if (receipt === null && path.dirname(receiptPath) === receiptsDirectory) {
+    const archivedPath = path.join(receiptsDirectory, 'archive', path.basename(receiptPath));
+    receipt = await readPrivateJsonRecord(archivedPath);
+    if (receipt !== null) receiptPath = archivedPath;
+  }
   if (!receipt || receipt.workId !== workId || (receipt.cwd !== cwd && receipt.cwd !== lexicalCwd)) {
     throw new Error('DISPATCH_RECEIPT_MISMATCH');
   }
   return { found: true, receipt, receiptPath,
     noStartProven: receipt.state === 'PRE_START_FAILED' && receipt.nativeStartAttempted === false,
-    completionVerified: false };
+    completionVerified: receipt.state === 'COMPLETED' && receipt.nativeEvidence?.method === 'thread/read' };
 }
 
 export async function dispatch(configInput, options = {}) {
@@ -603,7 +881,9 @@ export async function dispatch(configInput, options = {}) {
   const { path: cwd } = workspace;
   const stageTimeoutMs = options.stageTimeoutMs ?? config.routing.timeoutMs;
   if (!Number.isInteger(stageTimeoutMs) || stageTimeoutMs < 1 || stageTimeoutMs > 60000) throw new Error('STAGE_TIMEOUT_INVALID');
-  const release = await acquireLock(config.statePath, config.routing.lockTimeoutMs);
+  const release = await acquireDispatchLock(config.statePath, config.routing.lockTimeoutMs, {
+    nowMs: options.nowMs ?? Date.now(),
+  });
   let receipt; let paths; let nativeAttempted = false;
   const clock = () => new Date(options.nowMs ?? Date.now()).toISOString();
   const progress = async (phase, changes = {}) => {
@@ -627,12 +907,23 @@ export async function dispatch(configInput, options = {}) {
       errorClass: null, nativeStartAttempted: false, stageTimeoutMs,
       promptSha256: sha256(options.prompt), events: [{ phase: 'PREPARING', at: clock() }],
     };
-    // Persist the work intent BEFORE any admission scans or native lifecycle call.
+    // Persist the work intent BEFORE reconciliation and every admission scan.
+    // If either refuses, the catch path records PRE_START_FAILED evidence.
     paths = await createReceipt(config, receipt, lexicalCwd);
+    // Retire native terminal work before any admission or claim collector sees
+    // the active ledger. Failed readback remains an active claim.
+    await reconcileReceipts(config, {
+      lockHeld: true,
+      nowMs: options.nowMs ?? Date.now(),
+      archiveAfterMs: options.archiveAfterMs ?? config.routing.archiveAfterMs,
+      stageTimeoutMs,
+      conductorProvider: common.conductorProvider,
+      onWarning: options.onWarning,
+    });
     await progress('ADMISSION');
-    const preliminary = await rank(config, common);
+    const preliminary = await snapshot(config, { ...common, nowMs: options.nowMs ?? Date.now() });
     await progress('RECHECK');
-    const final = await rank(config, { ...common, nowMs: options.recheckNowMs ?? options.nowMs ?? Date.now() });
+    const final = await snapshot(config, { ...common, nowMs: options.recheckNowMs ?? options.nowMs ?? Date.now() });
     const selected = final.candidates.find((candidate) => candidate.eligible);
     if (!selected) throw new Error(noEligibleMessage(final));
     // This router's own submitted and uncertain receipts are claims whichever

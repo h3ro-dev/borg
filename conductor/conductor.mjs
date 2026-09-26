@@ -11,7 +11,7 @@
 //   GET  /status                         conductor + child health, known threads, supported roles
 //   GET  /threads?limit=20               thread/list passthrough
 //   GET  /events?threadId=&afterSeq=     buffered notification stream (per thread)
-//   POST /rpc        {method, params, timeoutMs?}            raw JSON-RPC passthrough
+//   POST /rpc        {method, params, timeoutMs?}            allowlisted JSON-RPC passthrough
 //   POST /thread/start  {cwd, model?, instructions?, role?, sandbox?, personality?}
 //   POST /lead/thread/start  {cwd, model?, instructions?, sandbox?, personality?}
 //   POST /thread/resume {threadId, cwd?, role?, model?, predecessor?}
@@ -25,10 +25,12 @@
 // conductor DENIES it and logs loudly — it never silently grants.
 
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureHttpToken } from './http-auth.mjs';
 export function ownerPolicyPaths(borgHome) {
   if (typeof borgHome !== 'string' || !path.isAbsolute(borgHome)
       || path.normalize(borgHome) !== borgHome || path.resolve(borgHome) !== borgHome) {
@@ -101,6 +103,45 @@ export const LOG_DIRECTORY_MODE = 0o700;
 export const LOG_FILE_MODE = 0o600;
 export const MAX_BODY_BYTES = 64 * 1024;
 export const MAX_EVENT_PAGE = 200;
+export const RPC_METHOD_ALLOWLIST = new Set([
+  'account/read',
+  'account/rateLimits/read',
+  'model/list',
+  'thread/read',
+  'hooks/list',
+  'config/read',
+]);
+
+function allowedHost(value) {
+  if (typeof value !== 'string') return false;
+  return /^(?:(?:127\.0\.0\.1|localhost)(?::[0-9]+)?|\[::1\](?::[0-9]+)?)$/i.test(value);
+}
+
+function browserRequestReason(headers = {}) {
+  if (Object.hasOwn(headers, 'origin')) return 'origin_forbidden';
+  if (Object.hasOwn(headers, 'sec-fetch-site')
+      && String(headers['sec-fetch-site']).toLowerCase() !== 'none') {
+    return 'sec_fetch_site_forbidden';
+  }
+  return null;
+}
+
+function jsonContentType(headers = {}) {
+  const value = headers['content-type'];
+  return typeof value === 'string' && /^application\/json(?:\s*;|$)/i.test(value.trim());
+}
+
+function bearerReason(header, expected) {
+  if (header === undefined) return 'missing_token';
+  if (typeof header !== 'string') return 'bad_token';
+  const match = /^Bearer ([a-f0-9]{64})$/i.exec(header);
+  if (!match) return 'bad_token';
+  const supplied = Buffer.from(match[1], 'utf8');
+  const wanted = Buffer.from(expected, 'utf8');
+  return supplied.length === wanted.length && crypto.timingSafeEqual(supplied, wanted)
+    ? null
+    : 'bad_token';
+}
 
 export async function readBody(req) {
   const declared = Number(req.headers?.['content-length'] || 0);
@@ -390,6 +431,7 @@ const BORG_HOME = options.borgHome || process.env.BORG_HOME;
 const LOG_DIR = options.logsPath || process.env.CONDUCTOR_LOGS || path.join(process.cwd(), 'logs');
 const POLICIES = options.policies || loadOwnerPolicies(BORG_HOME);
 const EVENT_RING_MAX = 5000;
+const AUTH_MODE = options.authMode ?? process.env.CONDUCTOR_AUTH ?? 'enforce';
 
 if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) {
   throw new Error('CONDUCTOR_PORT must be an integer from 1024 to 65535');
@@ -397,11 +439,23 @@ if (!Number.isInteger(PORT) || PORT < 1024 || PORT > 65535) {
 if (!CODEX_HOME || !path.isAbsolute(CODEX_HOME)) {
   throw new Error('CODEX_HOME must be an absolute dedicated profile path');
 }
+if (!['report', 'enforce'].includes(AUTH_MODE)) {
+  throw new Error('CONDUCTOR_AUTH must be report or enforce');
+}
+const HTTP_TOKEN = ensureHttpToken(CODEX_HOME);
 
 ensurePrivateLogDirectory(LOG_DIR);
 ensurePrivateLogDirectory(path.join(LOG_DIR, 'threads'));
 const bootTs = new Date().toISOString().replace(/[:.]/g, '-');
 const mainLog = openPrivateLogStream(path.join(LOG_DIR, `conductor-${bootTs}.jsonl`));
+const authLog = openPrivateLogStream(path.join(LOG_DIR, `http-auth-${bootTs}.jsonl`));
+const authCounters = {
+  mode: AUTH_MODE,
+  unauthenticatedCount: 0,
+  lastUnauthenticatedAt: null,
+  disallowedRpcCount: 0,
+};
+const authLogTimes = new Map();
 
 function log(kind, data) {
   const entry = { ts: new Date().toISOString(), kind, data };
@@ -409,6 +463,29 @@ function log(kind, data) {
   if (kind === 'server-request' || kind === 'child-exit' || kind === 'parse-error') {
     console.error(`[conductor] ${kind}:`, typeof data === 'string' ? data.slice(0, 300) : data);
   }
+}
+
+function recordHttpViolation(req, pathname, reason) {
+  const nowMs = Date.now();
+  const ts = new Date(nowMs).toISOString();
+  if (reason === 'missing_token' || reason === 'bad_token') {
+    authCounters.unauthenticatedCount += 1;
+    authCounters.lastUnauthenticatedAt = ts;
+  }
+  if (reason === 'disallowed_rpc_method') authCounters.disallowedRpcCount += 1;
+  const key = `${pathname}\u0000${reason}`;
+  const previous = authLogTimes.get(key);
+  if (previous !== undefined && nowMs - previous < 60_000) return;
+  authLogTimes.set(key, nowMs);
+  authLog.write(`${JSON.stringify({
+    ts,
+    method: req.method || null,
+    path: pathname,
+    reason,
+    userAgent: typeof req.headers['user-agent'] === 'string'
+      ? req.headers['user-agent'].slice(0, 512)
+      : null,
+  })}\n`);
 }
 
 // ---------- app-server child ----------
@@ -551,6 +628,19 @@ function json(res, code, obj) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${HOST}:${PORT}`);
   try {
+    if (!allowedHost(req.headers.host)) return json(res, 403, { error: 'host not allowed' });
+    const browserReason = browserRequestReason(req.headers);
+    if (browserReason) return json(res, 403, { error: 'browser request not allowed' });
+    if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { ok: true });
+    const authReason = bearerReason(req.headers.authorization, HTTP_TOKEN);
+    if (authReason) {
+      recordHttpViolation(req, url.pathname, authReason);
+      if (AUTH_MODE === 'enforce') return json(res, 401, { error: 'bearer token required' });
+    }
+    if (req.method === 'POST' && !jsonContentType(req.headers)) {
+      recordHttpViolation(req, url.pathname, 'invalid_content_type');
+      if (AUTH_MODE === 'enforce') return json(res, 415, { error: 'application/json required' });
+    }
     await initialized;
     if (req.method === 'GET' && url.pathname === '/status') {
       return json(res, 200, {
@@ -558,6 +648,7 @@ const server = http.createServer(async (req, res) => {
         codexHome: CODEX_HOME,
         supportedRoles: POLICIES.lead ? ['leaf', 'lead'] : ['leaf'],
         threads: Object.fromEntries(threads), eventSeq: seq,
+        auth: { ...authCounters },
       });
     }
     if (req.method === 'GET' && url.pathname === '/threads') {
@@ -576,6 +667,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/rpc') {
       const b = await readBody(req);
+      if (!RPC_METHOD_ALLOWLIST.has(b.method)) {
+        recordHttpViolation(req, url.pathname, 'disallowed_rpc_method');
+        if (AUTH_MODE === 'enforce') return json(res, 403, { error: 'RPC method not allowed' });
+      }
       return json(res, 200, await rpc(b.method, b.params || {}, b.timeoutMs || 120000));
     }
     if (req.method === 'POST'
@@ -659,6 +754,7 @@ server.listen(PORT, HOST, () => {
 });
 
 const close = () => {
+  if (closing) return;
   closing = true;
   child.kill();
   server.close();

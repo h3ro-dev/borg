@@ -105,6 +105,9 @@ process.stdin.on('data', (chunk) => {
   });
   await listening;
 
+  const token = fs.readFileSync(path.join(root, 'profile', '.conductor', 'http-token'), 'utf8').trim();
+  const authHeaders = { 'content-type': 'application/json', authorization: `Bearer ${token}` };
+
   const predecessor = {
     laneId: 'prior-lane',
     threadId: 'thread-relocated',
@@ -112,7 +115,7 @@ process.stdin.on('data', (chunk) => {
   };
   const resumed = await fetch(`http://127.0.0.1:${port}/thread/resume`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: authHeaders,
     body: JSON.stringify({
       threadId: 'thread-relocated',
       cwd: effectiveCwd,
@@ -125,7 +128,9 @@ process.stdin.on('data', (chunk) => {
   assert.equal(resumed.status, 200);
   assert.equal((await resumed.json()).cwd, effectiveCwd);
 
-  const status = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
+  const status = await (await fetch(`http://127.0.0.1:${port}/status`, {
+    headers: { authorization: `Bearer ${token}` },
+  })).json();
   const record = status.threads['thread-relocated'];
   assert.equal(record.cwd, effectiveCwd, 'top-level native response cwd wins over historical thread cwd');
   assert.equal(record.role, 'lead');
@@ -141,11 +146,13 @@ process.stdin.on('data', (chunk) => {
 
   const resumedAgain = await fetch(`http://127.0.0.1:${port}/thread/resume`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: authHeaders,
     body: JSON.stringify({ threadId: 'thread-relocated', cwd: effectiveCwd }),
   });
   assert.equal(resumedAgain.status, 200);
-  const nextStatus = await (await fetch(`http://127.0.0.1:${port}/status`)).json();
+  const nextStatus = await (await fetch(`http://127.0.0.1:${port}/status`, {
+    headers: { authorization: `Bearer ${token}` },
+  })).json();
   const nextRecord = nextStatus.threads['thread-relocated'];
   assert.equal(nextRecord.startedAt, record.startedAt);
   assert.equal(nextRecord.role, 'lead', 'an omitted role preserves the attached thread role');

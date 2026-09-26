@@ -19,6 +19,7 @@
   "routing": {
     "timeoutMs": 5000,
     "lockTimeoutMs": 30000,
+    "archiveAfterMs": 604800000,
     "defaultLimitId": "codex",
     "modelLimitIds": {}
   },

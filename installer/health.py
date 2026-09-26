@@ -3,18 +3,47 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+import os
 from pathlib import Path
+import re
 import shlex
 import socket
+import stat
 import subprocess
 import time
 import urllib.error
 import urllib.request
 
 
-def get_json(url: str, *, timeout: int = 8) -> dict:
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout) as response:
+def get_json(url: str, *, timeout: int = 8, headers: dict | None = None) -> dict:
+    request = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=timeout) as response:
         return json.load(response)
+
+
+def conductor_headers(root: Path) -> dict[str, str]:
+    """Read the conductor token without following a substituted private path."""
+    token_path = root / "conductors/primary/profile/.conductor/http-token"
+    try:
+        directory = token_path.parent.lstat()
+    except FileNotFoundError:
+        return {}
+    if (not stat.S_ISDIR(directory.st_mode) or token_path.parent.is_symlink()
+            or directory.st_uid != os.getuid() or directory.st_mode & 0o077):
+        raise ValueError("Unsafe conductor token directory")
+    try:
+        fd = os.open(token_path, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return {}
+    with os.fdopen(fd, "r") as handle:
+        info = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or info.st_mode & 0o077 or info.st_size > 128):
+            raise ValueError("Unsafe conductor token file")
+        token = handle.read(129).strip()
+    if not re.fullmatch(r"[a-f0-9]{64}", token):
+        raise ValueError("Malformed conductor token")
+    return {"Authorization": "Bearer " + token}
 
 
 def mcp_call(url: str, name: str, authorization: str, arguments: dict | None = None) -> dict:
@@ -137,7 +166,8 @@ def status(doc: dict) -> dict:
             components["models"] = {"state": "unavailable"}
     if "conductor" in enabled:
         try:
-            native = get_json(f"http://127.0.0.1:{ports['conductor']}/status")
+            native = get_json(f"http://127.0.0.1:{ports['conductor']}/status",
+                              headers=conductor_headers(root))
             expected_profile = str(root / "conductors/primary/profile")
             matched = native.get("ok") is True and native.get("port") == ports["conductor"] and native.get("codexHome") == expected_profile
             components["conductor"]["app_server"] = "initialized" if matched else "identity_mismatch"
@@ -191,8 +221,9 @@ def status(doc: dict) -> dict:
     if "conductor" in enabled and blueprint.full(doc):
         try:
             payload = {"method": "hooks/list", "params": {"cwd": str(root / "projects")}, "timeoutMs": 8000}
+            headers = {"Content-Type": "application/json", **conductor_headers(root)}
             request = urllib.request.Request(f"http://127.0.0.1:{ports['conductor']}/rpc",
-                        data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+                        data=json.dumps(payload).encode(), headers=headers)
             with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=10) as response:
                 observed = json.load(response)
             native = observed.get("result", observed)
@@ -271,8 +302,9 @@ def tools_client_health(doc: dict) -> dict:
     root = Path(doc["home"])
     try:
         payload = {"method": "config/read", "params": {"includeLayers": True}, "timeoutMs": 8000}
+        headers = {"Content-Type": "application/json", **conductor_headers(root)}
         request = urllib.request.Request(f"http://127.0.0.1:{doc['ports']['conductor']}/rpc",
-            data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+            data=json.dumps(payload).encode(), headers=headers)
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=10) as response:
             observed = json.load(response)
         native = observed.get("result", observed)

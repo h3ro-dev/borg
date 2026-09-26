@@ -41,6 +41,22 @@ test('default config contains one owner-local machine and one dedicated unauthen
   assert.equal(config.conductors[0].accountPin, null);
   assert.equal(config.requiredVersions.node, '24.21.0');
   assert.equal(config.requiredVersions.codex, '0.146.0');
+  assert.equal(config.routing.archiveAfterMs, 7 * 24 * 60 * 60 * 1000);
+});
+
+test('terminal receipt archive age is configurable and bounded', () => {
+  const config = buildDefaultConfig(BORG_HOME, '/opt/codex/bin/codex', { nodeBin: '/opt/node/bin/node' });
+  const custom = validateInstallConfig({
+    ...config,
+    routing: { ...config.routing, archiveAfterMs: 24 * 60 * 60 * 1000 },
+  });
+  assert.equal(custom.routing.archiveAfterMs, 24 * 60 * 60 * 1000);
+  for (const archiveAfterMs of [0, -1, 999, 366 * 24 * 60 * 60 * 1000, '86400000']) {
+    assert.throws(() => validateInstallConfig({
+      ...config,
+      routing: { ...config.routing, archiveAfterMs },
+    }), /archiveAfterMs/);
+  }
 });
 
 test('install config rejects noncanonical homes, relative runtime paths, remote listeners, and credentials', () => {
