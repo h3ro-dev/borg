@@ -8,9 +8,9 @@
       "sha256": "6bfdccbe0a3994dba7c402c2f7a2e0713de367e92476c68f680bc87439e7d1cf"
     },
     {
-      "bytes": 5328,
+      "bytes": 5498,
       "path": ".github/workflows/verify.yml",
-      "sha256": "f4533a2c1794c40c425aad6c55fa173ccbc6e37587ea1c656525043adc79b080"
+      "sha256": "cb97b2990c3af1b3831c9a940df64e7f6def1287ae73e0e718c5a2d2e380a902"
     },
     {
       "bytes": 29,
@@ -948,9 +948,9 @@
       "sha256": "fd62acdc688193d2b0d42c6582882132e735bca9f7384521c47e107809b2dd3f"
     },
     {
-      "bytes": 18441,
+      "bytes": 19636,
       "path": "graph/tests/test_portable_graph.py",
-      "sha256": "6773dfde9b2187a5e67b261382910e586ad9c8282d8937c13797ec81413a823d"
+      "sha256": "7233df41ebc3d84167e3de1444fbcb6403ec4d24ca4cc31be45c1ac6b36f15d3"
     },
     {
       "bytes": 1308,
@@ -2003,7 +2003,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "fd55d76493ff5b69c7780ab5265296ebecf06312981a7bde14dac2ba9baa70d1",
+  "inventory_sha256": "2bd73da169df6c7b96867985320ec7d281eccedb7637e59ea169842e2a0ea93b",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88035869
+  "total_bytes": 88037234
 }
