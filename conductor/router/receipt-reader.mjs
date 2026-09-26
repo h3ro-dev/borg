@@ -56,6 +56,11 @@ function readInChild(mode, target, options = {}) {
         const errorCode = /^[A-Z_]+$/.test(envelope.code ?? '') ? envelope.code : 'RECEIPT_READ_FAILED';
         fail(errorCode); return;
       }
+      const warnings = Array.isArray(envelope.warnings) ? envelope.warnings : [];
+      for (const warning of warnings) {
+        if (typeof options.onWarning === 'function') options.onWarning(warning);
+        else process.emitWarning(warning.message, { code: warning.code });
+      }
       finish(null, envelope.value);
     });
   });
@@ -63,6 +68,10 @@ function readInChild(mode, target, options = {}) {
 
 export async function readPrivateJsonDirectory(directory, options = {}) {
   return readInChild('directory', directory, options);
+}
+
+export async function readPrivateJsonDirectoryEntries(directory, options = {}) {
+  return readInChild('entries', directory, options);
 }
 
 export async function readPrivateJsonRecord(target, options = {}) {

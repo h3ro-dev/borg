@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 396,
+  "file_count": 400,
   "files": [
     {
       "bytes": 1914,
@@ -8,9 +8,9 @@
       "sha256": "6bfdccbe0a3994dba7c402c2f7a2e0713de367e92476c68f680bc87439e7d1cf"
     },
     {
-      "bytes": 1756,
+      "bytes": 5498,
       "path": ".github/workflows/verify.yml",
-      "sha256": "d97bb88a2b4944ebdaa16b70322c11f1ac568c35d9321cdb9ed133fa4573e38b"
+      "sha256": "cb97b2990c3af1b3831c9a940df64e7f6def1287ae73e0e718c5a2d2e380a902"
     },
     {
       "bytes": 29,
@@ -128,14 +128,14 @@
       "sha256": "da78048f938980354dc1572d7c7b74693a5f672979f2453ab71ddd70eb41ae0f"
     },
     {
-      "bytes": 5952,
+      "bytes": 6343,
       "path": "conductor/INTEGRATION.md",
-      "sha256": "e80f558ee37bbaa1fa62f1cf7a3a3831e0c00d1265c09734e800e6e74a0bce81"
+      "sha256": "696bd18dcc8961ebcad6bc32ba4d539465683004761a7766c1de9eb11fc0eaf1"
     },
     {
-      "bytes": 5446,
+      "bytes": 6147,
       "path": "conductor/README.md",
-      "sha256": "851a3a2f15704bd767d5652d5290f4a14067ee54fcc6f4acac5fa84c6132a37e"
+      "sha256": "40137a28aba61cf7e3e07fe436a9705b19826888227175669ed321368dcbfb28"
     },
     {
       "bytes": 1007,
@@ -148,19 +148,19 @@
       "sha256": "16bfcbc021204e2086955c420d65b7e384cabaa74f9a032438bcf62467771f9d"
     },
     {
-      "bytes": 26418,
+      "bytes": 30170,
       "path": "conductor/conductor.mjs",
-      "sha256": "7e01bd436fe0c1242ff0128290ed43f05a4123c688b06b6b4d721e56ebbc06c0"
+      "sha256": "188db1b61294f411ef87bdbf54596585469776c281b7f3ddde98aacdefe29870"
     },
     {
-      "bytes": 1794,
+      "bytes": 1827,
       "path": "conductor/config.example.json",
-      "sha256": "7c448cc4badca7720cedc54cd5f7fc4e39b28fcdc70d835a46a075e13f3bc3d9"
+      "sha256": "86e3459fd8ecf7f619323e549d4a910638698c47d0ef4e15eae7a27d6462802a"
     },
     {
-      "bytes": 12451,
+      "bytes": 12901,
       "path": "conductor/config.mjs",
-      "sha256": "70dd4729fc315ac92566cc9c07b99221e402bad73d43e06a9f02b24e11461db6"
+      "sha256": "f65fdc54b8ef4d8e153299ab478e87e36a8b7e2813bd5ac77eceb7086baaeacb"
     },
     {
       "bytes": 730,
@@ -168,9 +168,9 @@
       "sha256": "b90a21d7341dbfd3f8279eaedbb0367c2eed019e9eca3906ecb27f339d3d7b04"
     },
     {
-      "bytes": 7276,
+      "bytes": 8448,
       "path": "conductor/docs/LAUNCH-RELIABILITY.md",
-      "sha256": "88e58e20a4817726a851a902193f3700c0c93bcffb471e664c0abb99c156dac8"
+      "sha256": "c6944b0ff09d2951a502d2bf151c1f58b2a73525f97e8b3f0fec29329789425f"
     },
     {
       "bytes": 2673,
@@ -181,6 +181,11 @@
       "bytes": 4085,
       "path": "conductor/docs/protocol-notes.md",
       "sha256": "b9cb66dc771323af67a9080c30385ccae63faf209b03a2a3832c719527f857bc"
+    },
+    {
+      "bytes": 3398,
+      "path": "conductor/http-auth.mjs",
+      "sha256": "fd0b2eec1968b5d9aa9dbbc39d38f6f88c310d7dc7bfdf372e81cbb8ea5068f6"
     },
     {
       "bytes": 506,
@@ -208,19 +213,19 @@
       "sha256": "dc2f397239ace8ad8f31375c1c9c064148ec7956396be9408b32df15d0a35a4f"
     },
     {
-      "bytes": 3139,
+      "bytes": 4169,
       "path": "conductor/router/receipt-reader-worker.mjs",
-      "sha256": "5810e5fbcf95a09c089f74befde10bf691dfad3ebee79c476a2c193cc9dc23a9"
+      "sha256": "87692446392c7454a68d1b9d6d9bef123a1a948d434fd1439305b6ae72d0810f"
     },
     {
-      "bytes": 2740,
+      "bytes": 3163,
       "path": "conductor/router/receipt-reader.mjs",
-      "sha256": "529a8ddfc636174029dbc45b92f62edc6ce21362ec0c7081ac337ce4f412066d"
+      "sha256": "6a6e00355c1635f9057d5744553ad9adf562134f43ddc15e97d694d4888053e8"
     },
     {
-      "bytes": 30846,
+      "bytes": 42439,
       "path": "conductor/router/router.mjs",
-      "sha256": "21dae5b306a32828eaa467dbd906d04229bb93d13997b6709c1298464ac12296"
+      "sha256": "713f100e7651aa1df14756c5f7b85b8754d80983203c078badbb484eae6b59c6"
     },
     {
       "bytes": 7600,
@@ -233,29 +238,39 @@
       "sha256": "e88a460e968cd42453b691fade79e97f5ef62af081362bd506fde0b1134742a2"
     },
     {
-      "bytes": 4707,
+      "bytes": 5403,
       "path": "conductor/tests/config.test.mjs",
-      "sha256": "de4869238830787b4a97e439d6a692b44e3a04c56ab553f8f8cd3c7e090380cf"
+      "sha256": "031e06a8af00143db161eb4cf9fee785dd274d6e7b18f9c121999bdad1bba8b7"
     },
     {
-      "bytes": 3761,
+      "bytes": 8281,
+      "path": "conductor/tests/http-auth.test.mjs",
+      "sha256": "d1363c04e8adcc92b9ce85eb874602aa0ded863bedd7606a08e81ff32178ed70"
+    },
+    {
+      "bytes": 4013,
       "path": "conductor/tests/native-app-server.test.mjs",
-      "sha256": "8e0491bf9e3665e971707d995ed52e0f59d4883d5b03450c57d535178b5b6340"
+      "sha256": "8ba0f91c04a709178958e651568ff07e480a3ad66e8e7bae0c8c28e97840174e"
     },
     {
-      "bytes": 3201,
+      "bytes": 4129,
       "path": "conductor/tests/receipt-reader.test.mjs",
-      "sha256": "9ee874660a8b68c2138ffe79a00dc004ae5a1046d1eb5faf5ca3faf37dc008be"
+      "sha256": "aaa5d2f4e69da5b517e917b5b9ee10d284f1cacf8f15acef9592c7ea725d9a76"
     },
     {
-      "bytes": 5927,
+      "bytes": 6190,
       "path": "conductor/tests/resume-bookkeeping.test.mjs",
-      "sha256": "da0d0fdb77326135e7a59805d566788872bec30f54562f793894835ec29228ec"
+      "sha256": "6314d14eb14f2e39365a3a1cc124787deccb42da834c7c736da4de634f43fde9"
     },
     {
       "bytes": 19262,
       "path": "conductor/tests/router-collision-review.test.mjs",
       "sha256": "887b542efcd87b1ee7fab0eff8f0f2c453d4dd90f531bbe1fff9d2618bd27996"
+    },
+    {
+      "bytes": 12315,
+      "path": "conductor/tests/router-lifecycle.test.mjs",
+      "sha256": "73a0fe585ca479d04bc36ba4f4618b97b1ed2815c7984cc0d0d05a71d69e0bcc"
     },
     {
       "bytes": 11193,
@@ -923,9 +938,9 @@
       "sha256": "364603a5328293467b00765f5aa989d294a5ebd8414d1d9b307997b531b3bc00"
     },
     {
-      "bytes": 2957,
+      "bytes": 3280,
       "path": "graph/tests/test_legacy_graphiti_scope_guard.py",
-      "sha256": "de7da0bf2baae31ab74e1f3afb0f978353fd436834b4be68d0c8c398599007e2"
+      "sha256": "a107021fef8b8c8d64a465dd5612aa756a037b8bb3f0191747413269aac058a9"
     },
     {
       "bytes": 7624,
@@ -933,9 +948,9 @@
       "sha256": "fd62acdc688193d2b0d42c6582882132e735bca9f7384521c47e107809b2dd3f"
     },
     {
-      "bytes": 18441,
+      "bytes": 19636,
       "path": "graph/tests/test_portable_graph.py",
-      "sha256": "6773dfde9b2187a5e67b261382910e586ad9c8282d8937c13797ec81413a823d"
+      "sha256": "7233df41ebc3d84167e3de1444fbcb6403ec4d24ca4cc31be45c1ac6b36f15d3"
     },
     {
       "bytes": 1308,
@@ -1033,9 +1048,9 @@
       "sha256": "b8573095ab48abf8bede9582452e598afd7118078f6a571d5ee86832f58a7826"
     },
     {
-      "bytes": 17826,
+      "bytes": 19270,
       "path": "installer/health.py",
-      "sha256": "561d1c1c2864a6709189b975e116760fa50342e9b266a6ab7522eb512dba4fb0"
+      "sha256": "88b70d35ff8e029a90c0ad70a80871a8aa51aff2098e56acdea7213ca9670c2e"
     },
     {
       "bytes": 14377,
@@ -1121,6 +1136,11 @@
       "bytes": 3909,
       "path": "installer/test_browser.py",
       "sha256": "5153cd2ec6e58ee83bf1bf43c4f0e1f22a4ef2cdef6ac7285eed1ea6b9188a57"
+    },
+    {
+      "bytes": 1463,
+      "path": "installer/test_conductor_auth.py",
+      "sha256": "44d3aaa890404ef1c6d2a4d4796b84cca10b755d71ba1c9e21d5a85a7860f655"
     },
     {
       "bytes": 2884,
@@ -1983,7 +2003,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "23769a5f267e127828ca7376832656052cd92035ab9af3b2537bd13d00cce849",
+  "inventory_sha256": "2bd73da169df6c7b96867985320ec7d281eccedb7637e59ea169842e2a0ea93b",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 87983389
+  "total_bytes": 88037234
 }

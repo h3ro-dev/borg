@@ -33,6 +33,15 @@ or external queue. A one-machine, one-lane configuration is valid.
 - Node at the root-provided executable inside `$BORG_HOME/runtime/`
 - Codex at `$BORG_HOME/runtime/npm/node_modules/.bin/codex`
 - HTTP bound only to `127.0.0.1:$PORT`
+- Per-profile bearer token at `$CODEX_HOME/.conductor/http-token`, mode `0600`
+
+The conductor creates a 32-byte random token on first start and defaults to
+`CONDUCTOR_AUTH=enforce`. All shipped router and installer health calls read
+that profile-local token and send it as a bearer credential. `GET /healthz` is
+the only token-free endpoint; it returns only `{ "ok": true }`. Host and browser
+origin checks apply to every endpoint in both `report` and `enforce` modes.
+`POST /rpc` accepts only `account/read`, `account/rateLimits/read`, `model/list`,
+`thread/read`, `hooks/list`, and `config/read`.
 
 Fresh installs contain no provider authentication. The owner authenticates the
 dedicated profile with native `codex login`, then pins the observed account
@@ -57,8 +66,9 @@ remaining usable native allowance; earliest reset is only the tie break.
 Actual provider exhaustion and provider spend controls have separate evidence
 codes. No discretionary reservation or allowance floor is created.
 
-Dispatch holds a private lock, persists an intent before admission scans,
-rechecks the configured fleet before selection, and refuses duplicate
+Dispatch holds a private lock, reconciles active receipts from exact native
+`thread/read` evidence, archives aged terminal receipts, persists an intent
+before admission scans, rechecks the configured fleet before selection, and refuses duplicate
 `{workId,cwd}` intents across process restarts. Workspaces are compared by
 filesystem-canonical identity, so aliases and parent/child paths overlap. Active
 workspace and work-ID claims, including this router's own receipts under any

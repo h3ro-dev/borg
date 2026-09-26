@@ -13,8 +13,9 @@ this version, every spelling resolves to the same filesystem-canonical path. Thi
 read-only reconciliation: it does not create, resume, cancel or complete a worker.
 The returned receipt contains a bounded phase history, attempt ID, selected lane,
 native thread/turn IDs when proved, and error classification. Prompt text is not
-persisted, only its SHA-256. `completionVerified` is always false: a start receipt
-is not evidence that a task finished, passed review or was deployed.
+persisted, only its SHA-256. `completionVerified` is true only for a `COMPLETED`
+receipt carrying exact native `thread/read` evidence for its thread and turn. It
+does not assert that tests, review or deployment passed.
 
 ## States and decisions
 
@@ -26,6 +27,9 @@ is not evidence that a task finished, passed review or was deployed.
 | `UNKNOWN_DO_NOT_RETRY` | Thread request may have executed; response was lost, late or invalid. | Verify native state before recovery; no automatic replay. |
 | `STARTED_TURN_UNKNOWN` | Thread exists; turn outcome is unknown. | Reconcile exact thread/turn history before any continuation. |
 | `DISPATCHED` | Native thread and turn IDs were returned. | Monitor actual worker outcome; do not call the task complete. |
+| `COMPLETED` | Exact native thread/turn readback reported completion. | Inspect the worker artifact and its independent acceptance evidence. |
+| `FAILED` | Exact native thread/turn readback reported failure. | Diagnose the native failure before a new dispatch. |
+| `CANCELLED` | Exact native thread/turn readback reported cancellation. | Confirm why it was cancelled before a new dispatch. |
 | `NOT_FOUND` (status lookup) | No matching local intent was found. | **Not** proof that no worker started elsewhere. `noStartProven` remains false. |
 
 Identical intents remain blocked on replay. No new retry, fallback, or no-start
@@ -38,8 +42,11 @@ uncertain lifecycle calls are not retried on a different account or machine.
 Missing, Boolean, empty, string and non-finite numeric telemetry are unknown, not
 safe zeroes. The same rule applies to native usage measurements. Completed
 transport dispatches and uncertain lifecycle states remain active claims until
-explicitly reconciled. A different work ID cannot evade an existing workspace
-claim; a different workspace cannot evade an active work ID.
+native reconciliation proves a terminal turn state. Before every rank or
+dispatch claim scan, the router reads each active receipt's exact native thread
+and turn through its conductor. Ambiguous, mismatched or unavailable readback
+leaves the receipt active. A different work ID cannot evade an existing
+workspace claim; a different workspace cannot evade an active work ID.
 
 Under the dispatch lock the router always rescans its own receipt ledger,
 whichever claims collector each machine uses, and checks it together with every
@@ -80,6 +87,14 @@ receipt, 4 MiB total receipt bytes, and 8 MiB captured output. It scans only the
 requested directory, not a recursive tree. A timeout reports
 `RECEIPT_READ_TIMEOUT` with its stage and target. Signalling the reader is not
 reported as proof that the OS process exited. No incomplete scan permits launch.
+
+The reader emits early warnings at 8,000 entries and 3.2 MiB. Terminal receipts
+older than `routing.archiveAfterMs` (seven days by default) move to the private
+`dispatch-receipts/archive/` directory and remain available to `route-status`.
+
+The private dispatch lock records its owning process. A live holder is never
+disturbed. A dead holder, or a lock older than ten minutes with no live holder,
+is preserved as `dispatch.lock.stale-<ISO time>` before one acquisition retry.
 
 ## Deadlines and limits
 

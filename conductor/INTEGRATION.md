@@ -18,6 +18,7 @@ $BORG_HOME/
   runtime/npm/node_modules/.bin/codex
   conductors/config.json              # conductor-owned schema
   conductors/primary/profile/
+    .conductor/http-token             # generated bearer credential, mode 0600
   conductors/primary/logs/
   policies/SEAT-RULES.md
   policies/LEAD-RULES.md
@@ -92,7 +93,10 @@ CONDUCTOR_LOGS=/absolute/path/to/borg/conductors/primary/logs \
 
 The root installer owns service management. Readiness is the interaction-backed
 `GET /status` response with `ok: true`, the configured port and the exact
-configured `codexHome`; a listening process alone is not readiness proof.
+configured `codexHome`; a listening process alone is not readiness proof. The
+shipped CLI reads the profile-local bearer token automatically. External local
+supervisors may use token-free `GET /healthz` only for process liveness; it is
+not conductor initialization or provider readiness proof.
 
 ## 3. Status and native authentication
 
@@ -136,10 +140,11 @@ BORG_HOME=/absolute/path/to/borg \
   --effort high
 ```
 
-`rank` is read-only. `route` is the only dispatch entrypoint; it writes private
-intent/receipt evidence and then uses the existing conductor thread and turn
-protocol. Root should never dispatch directly to a port when fleet admission
-or duplicate protection is required.
+`rank` never dispatches work, but it reconciles and may archive private receipt
+evidence before scanning claims. `route` is the only dispatch entrypoint; it
+writes private intent/receipt evidence and then uses the existing conductor
+thread and turn protocol. Root should never dispatch directly to a port when
+fleet admission or duplicate protection is required.
 
 ## Multi-machine or multi-account extension
 
