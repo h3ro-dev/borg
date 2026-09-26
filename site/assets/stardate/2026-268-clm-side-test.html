@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#080b09">
+<meta name="description" content="We tested whether CLM, an 8B model run on one of our own studios, could pick recall context instead of JEV. It could not; it found the needed rows far less often and was fast enough only with a precomputed cache.">
+<meta name="generator" content="Stardate log publisher (static, from Markdown entries)">
+<title>Stardate 2026.268: The CLM side test, and why we stay on JEV — BORG Collective</title>
+<link rel="canonical" href="https://borg.utlyze.com/assets/stardate/2026-268-clm-side-test.html">
+<link rel="icon" href="../mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../../styles.css">
+<link rel="stylesheet" href="./stardate.css">
+</head>
+<body class="sd-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="header wrap sd-header">
+<a class="brand" href="../../" aria-label="BORG Collective home"><img src="../mark.svg" width="36" height="40" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<nav class="sd-nav" aria-label="Main navigation"><a href="../../#system" class="sd-keep">The system</a><a href="./" class="sd-keep">Stardate log</a><a href="../../#fleet">The fleet</a><a href="../../#configure">Configure</a><a href="../../guide.html">Install guide</a><a class="nav-source" href="https://github.com/h3ro-dev/borg">GitHub <span aria-hidden="true">↗</span></a></nav>
+</header>
+<main id="main" tabindex="-1" class="wrap sd-main">
+<nav class="sd-crumbs" aria-label="Breadcrumb"><ol><li><a href="./">Stardate log</a></li><li><span aria-current="page">Stardate 2026.268</span></li></ol></nav>
+<article class="sd-entry" aria-labelledby="entry-title">
+<header class="sd-entry-head">
+<p class="sd-stardate">STARDATE <b>2026.268</b></p>
+<h1 id="entry-title">The CLM side test, and why we stay on JEV</h1>
+<dl class="sd-meta">
+<div><dt>Date</dt><dd><time datetime="2026-09-25">25 September 2026</time> <span class="sd-tz">America/Denver</span></dd></div>
+<div><dt>Status</dt><dd><span class="sd-status" data-status="finished">Finished</span></dd></div>
+<div><dt>Format</dt><dd>Did · Learned · Open · Log</dd></div>
+</dl>
+<p class="sd-summary">We tested whether CLM, an 8B model run on one of our own studios, could pick recall context instead of JEV. It could not; it found the needed rows far less often and was fast enough only with a precomputed cache.</p>
+</header>
+<section class="sd-section sd-what-we-did" aria-labelledby="what-we-did">
+<h2 id="what-we-did"><span class="sd-num" aria-hidden="true">01</span> What we did</h2>
+<p>Recall picks which memory rows go into an agent's context before it answers, and today JEV, our small judge model, does that job. Could CLM, an 8B model run locally on an Apple Silicon studio, do it instead, at least as well and fast enough?</p>
+<p>We used a frozen holdout of 600 episodes. An episode is one question with a pool of candidate rows; a holdout is a test set kept apart from all tuning. In 300 episodes the needed evidence was present. CLM's input format and a score cutoff were chosen on a separate practice set, and the rule for switching was written before any scoring. CLM ran zero-shot, as it comes, with no training on our data. Its authors say this kind of use needs fine-tuned heads, so a zero-shot result is not the model's ceiling.</p>
+</section>
+<section class="sd-section sd-what-we-learned" aria-labelledby="what-we-learned">
+<h2 id="what-we-learned"><span class="sd-num" aria-hidden="true">02</span> What we learned</h2>
+<p><strong>Quality: no.</strong> Routing picks 8 rows from the pool. How often did those 8 hold every row the answer needs, over the 300 evidence-present episodes?</p>
+<div class="sd-table" role="region" tabindex="0" aria-label="What we learned, table 1"><table><thead><tr><th scope="col">Router</th><th scope="col">Full cover</th><th scope="col">Versus the JEV arm</th></tr></thead><tbody><tr><th scope="row">JEV arm's routing (cheap word matching)</th><td class="num">230 (76.7%)</td><td>baseline</td></tr><tr><th scope="row">Installed current workflow</th><td class="num">192 (64.0%)</td><td class="num">−12.7 points</td></tr><tr><th scope="row">CLM, row text as is</th><td class="num">81 (27.0%)</td><td class="num">−49.7 points</td></tr><tr><th scope="row">CLM, row prefixed with its file name</th><td class="num">146 (48.7%)</td><td class="num">−28.0 points</td></tr></tbody></table></div>
+<p>Both CLM gaps have uncertainty ranges entirely below zero, the pre-registered signal to stay on JEV.</p>
+<p>End to end, CLM's own arm declined every question: on the practice set, no score cutoff beat declining everything. Its 30 most confident answers were 26 critical errors and 4 fully supported.</p>
+<p>What surprised us: one CLM variant beat a baseline by 6.3 points of fully supported answers, yet a control using 8 random rows matched it in all three seeds. The gain came from the framework's word-matching repair pass, which fired in 440 of 600 episodes behind CLM against 197 behind the word-matching router.</p>
+<p><strong>Speed: only with a cache.</strong> On a shared GPU that was 92 to 99% busy, encoding the query and every row took 3.0 to 4.0 s at the median, against a recall budget of about 1.6 s. With each row's embedding (numbers that stand for its meaning) cached ahead of time, it took 123 to 125 ms. Cold start was 16 s to ready, and peak memory was 20.7 GB.</p>
+<p><strong>Not a port defect.</strong> Our local build matched the maintainers' reference outputs, with the largest gap under 0.001 in cosine terms.</p>
+</section>
+<section class="sd-section sd-open-questions" aria-labelledby="open-questions">
+<h2 id="open-questions"><span class="sd-num" aria-hidden="true">03</span> Open questions</h2>
+<ul><li>The framework has no recording of JEV's own reranking. A shadow run comparing JEV's top picks with a candidate's on live pools would fill that gap.</li><li>The questions name topic terms from the answering row, which favours word matching. Would real, more semantic queries narrow a 28-point gap?</li><li>A fine-tuned head of about 19 million parameters might help, in a separate project that never trains on this holdout.</li></ul>
+</section>
+<section class="sd-section sd-lab-book-log" aria-labelledby="lab-book-log">
+<h2 id="lab-book-log"><span class="sd-num" aria-hidden="true">04</span> Lab book log</h2>
+<ol class="sd-log"><li><time datetime="2026-09-25">2026-09-25</time><p>The source report records no run dates; this entry was filed on this day.</p></li><li><span class="sd-phase">pre registration</span><p>Switch rule written before any calibration or holdout scoring.</p></li><li><span class="sd-phase">parity</span><p>Local build matched the maintainers' outputs within 0.001 cosine.</p></li><li><span class="sd-phase">dev</span><p>Format and cutoff chosen; no cutoff beat declining everything.</p></li><li><span class="sd-phase">holdout</span><p>600 episodes scored; CLM routing 49.7 and 28.0 points behind.</p></li><li><span class="sd-phase">latency</span><p>60 real pools timed on a shared GPU; 3.0 to 4.0 s median uncached.</p></li><li><span class="sd-phase">control</span><p>Random rows matched the best CLM variant.</p></li><li><span class="sd-phase">decision</span><p>Stay on JEV.</p></li></ol>
+</section>
+</article>
+<nav class="sd-pager" aria-label="More entries"><a class="sd-pager-older" href="./2026-268-grok-hooks-ab.html"><span>Older entry</span> Grok memory hooks, an A/B test</a><a class="sd-pager-all" href="./">All entries</a><a class="sd-pager-newer" href="./2026-268-memory-reach.html"><span>Newer entry</span> Memory rarely reaches the agents that need it</a></nav>
+</main>
+<footer class="footer wrap">
+<a class="brand" href="../../"><img src="../mark.svg" width="30" height="34" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<p>An independent open-source project.<br>Not affiliated with Star Trek or its rights holders.</p>
+<nav aria-label="Footer navigation"><a href="./">Stardate log</a><a href="../../#system">The system</a><a href="../../guide.html">Install guide</a><a href="https://github.com/h3ro-dev/borg">GitHub ↗</a></nav>
+</footer>
+</body>
+</html>

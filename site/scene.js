@@ -4,12 +4,14 @@ const stage = document.querySelector(".ship-stage");
 const button = document.querySelector("#motion-toggle");
 const fleet = document.querySelector("#fleet");
 const fleetButton = document.querySelector("#fleet-motion-toggle");
-const motionButtons = [button, fleetButton, document.querySelector("#profile-motion-toggle")].filter(Boolean);
+const map = document.querySelector("#system");
+const motionButtons = [button, fleetButton, document.querySelector("#profile-motion-toggle"), document.querySelector("#map-motion-toggle")].filter(Boolean);
 const status = document.querySelector("#scene-status");
 const motionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
 let paused = motionPreference.matches;
 let visible = true;
 let fleetVisible = false;
+let mapVisible = false;
 let loading = false;
 let failed = false;
 let renderer, scene, camera, ship, stars, environment;
@@ -24,6 +26,7 @@ function motionState() {
   document.documentElement.dataset.motion = running ? "running" : "paused";
   hero.dataset.motion = running && visible ? "running" : "paused";
   if (fleet) fleet.dataset.motion = running && fleetVisible ? "running" : "paused";
+  if (map) map.dataset.motion = running && mapVisible ? "running" : "paused";
   status.textContent = paused
     ? (motionPreference.matches ? "Static view · reduced motion" : "Motion paused")
     : (failed ? "Static ship · stars in motion" : "Your collective. In orbit.");
@@ -264,6 +267,7 @@ const intersection = new IntersectionObserver(
   (entries) => {
     for (const entry of entries) {
       if (entry.target === hero) visible = entry.isIntersecting;
+      else if (entry.target === map) mapVisible = entry.isIntersecting;
       else fleetVisible = entry.isIntersecting;
     }
     motionState();
@@ -273,6 +277,7 @@ const intersection = new IntersectionObserver(
 );
 intersection.observe(hero);
 if (fleet) intersection.observe(fleet);
+if (map) intersection.observe(map);
 const dimensions = new ResizeObserver(resize);
 dimensions.observe(stage);
 window.addEventListener("pagehide", () => {
@@ -280,6 +285,7 @@ window.addEventListener("pagehide", () => {
   hero.dataset.motion = "paused";
   document.documentElement.dataset.motion = "paused";
   if (fleet) fleet.dataset.motion = "paused";
+  if (map) map.dataset.motion = "paused";
 });
 window.addEventListener("pageshow", motionState);
 // Reduced-motion users start with the poster and do not download Three.js or GLB.

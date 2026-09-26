@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#080b09">
+<meta name="description" content="Every experiment the collective runs, in one format: what we did, what we learned, open questions and the lab book log.">
+<meta name="generator" content="Stardate log publisher (static, from Markdown entries)">
+<title>Stardate log — the lab book of the BORG Collective</title>
+<link rel="canonical" href="https://borg.utlyze.com/assets/stardate/">
+<link rel="icon" href="../mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../../styles.css">
+<link rel="stylesheet" href="./stardate.css">
+</head>
+<body class="sd-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="header wrap sd-header">
+<a class="brand" href="../../" aria-label="BORG Collective home"><img src="../mark.svg" width="36" height="40" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<nav class="sd-nav" aria-label="Main navigation"><a href="../../#system" class="sd-keep">The system</a><a href="./" class="sd-keep" aria-current="page">Stardate log</a><a href="../../#fleet">The fleet</a><a href="../../#configure">Configure</a><a href="../../guide.html">Install guide</a><a class="nav-source" href="https://github.com/h3ro-dev/borg">GitHub <span aria-hidden="true">↗</span></a></nav>
+</header>
+<main id="main" tabindex="-1" class="wrap sd-main">
+<section class="sd-hero" aria-labelledby="log-title">
+<p class="eyebrow"><span class="square" aria-hidden="true"></span> LAB BOOK / THE COLLECTIVE</p>
+<h1 id="log-title">STARDATE<br><span>LOG.</span></h1>
+<p class="sd-lede">Every experiment the collective runs is written up here, the same way every time: what we did, what we learned, what we still don’t know, and the lab book log.</p>
+<dl class="sd-key">
+<div><dt>Reading a stardate</dt><dd><b>2026.268</b> is the year, then the day of the year in America/Denver. Day 268 of 2026 is 25 September 2026.</dd></div>
+<div><dt>Status</dt><dd><b>Running</b> means the work is still going. <b>Finished</b> means it reached a result. <b>Superseded</b> means a later entry replaced it.</dd></div>
+<div><dt>Entries</dt><dd>8 so far, newest first. Numbers come from the collective’s own reports; names, machines and accounts are left out.</dd></div>
+</dl>
+</section>
+<section class="sd-list" aria-labelledby="entries-title">
+<h2 id="entries-title">Entries, newest first</h2>
+<ol class="sd-days">
+<li class="sd-day">
+<h3 class="sd-day-head"><span>Stardate 2026.268</span> 25 September 2026</h3>
+<ol class="sd-day-entries"><li><article class="sd-card" aria-labelledby="card-2026-268-marker-chains">
+<p class="sd-card-meta"><span class="sd-card-stardate">STARDATE 2026.268</span> <time datetime="2026-09-25T14:58">25 September 2026, 14:58</time> <span class="sd-status" data-status="running">Running</span></p>
+<h4 id="card-2026-268-marker-chains"><a href="./2026-268-marker-chains.html">Marker chains, when the kept copy gets retired</a></h4>
+<p>We found 527 duplicate markers that had quietly switched off because the copy they pointed to was later retired. The fix is installed, the repair has run, and the first protected nightly run is next.</p>
+</article></li><li><article class="sd-card" aria-labelledby="card-2026-268-incoming-filter-on">
+<p class="sd-card-meta"><span class="sd-card-stardate">STARDATE 2026.268</span> <time datetime="2026-09-25T14:07">25 September 2026, 14:07</time> <span class="sd-status" data-status="finished">Finished</span></p>
+<h4 id="card-2026-268-incoming-filter-on"><a href="./2026-268-incoming-filter-on.html">The incoming filter, from shadow to on</a></h4>
+<p>After 24 hours in shadow mode we read all 116 would-be drops by hand and found no durable facts. We then switched the filter on, and its first real drop was written to an owner-only recovery copy before being dropped.</p>
+</article></li><li><article class="sd-card" aria-labelledby="card-2026-268-deep-dream-day-one">
+<p class="sd-card-meta"><span class="sd-card-stardate">STARDATE 2026.268</span> <time datetime="2026-09-25T09:36">25 September 2026, 09:36</time> <span class="sd-status" data-status="running">Running</span></p>
+<h4 id="card-2026-268-deep-dream-day-one"><a href="./2026-268-deep-dream-day-one.html">Deep dream, day one</a></h4>
+<p>Our first full clean-up pass over the main studio's memory retired 3,133 of 117,506 live memories by 09:36, all reversibly. The near-duplicate wave paused at the day's JEV budget, and we resumed it the same afternoon.</p>
+</article></li><li><article class="sd-card" aria-labelledby="card-2026-268-memory-reach">
+<p class="sd-card-meta"><span class="sd-card-stardate">STARDATE 2026.268</span> <time datetime="2026-09-25T01:00">25 September 2026, 01:00</time> <span class="sd-status" data-status="finished">Finished</span></p>
+<h4 id="card-2026-268-memory-reach"><a href="./2026-268-memory-reach.html">Memory rarely reaches the agents that need it</a></h4>
+<p>On lane hosts, recall delivered something on only 5 to 10% of prompts, and almost nothing for Grok. The facts were in memory, but queries built from the raw prompt missed them.</p>
+</article></li><li><article class="sd-card" aria-labelledby="card-2026-268-clm-side-test">
+<p class="sd-card-meta"><span class="sd-card-stardate">STARDATE 2026.268</span> <time datetime="2026-09-25">25 September 2026</time> <span class="sd-status" data-status="finished">Finished</span></p>
+<h4 id="card-2026-268-clm-side-test"><a href="./2026-268-clm-side-test.html">The CLM side test, and why we stay on JEV</a></h4>
+<p>We tested whether CLM, an 8B model run on one of our own studios, could pick recall context instead of JEV. It could not; it found the needed rows far less often and was fast enough only with a precomputed cache.</p>
+</article></li><li><article class="sd-card" aria-labelledby="card-2026-268-grok-hooks-ab">
+<p class="sd-card-meta"><span class="sd-card-stardate">STARDATE 2026.268</span> <time datetime="2026-09-25">25 September 2026</time> <span class="sd-status" data-status="finished">Finished</span></p>
+<h4 id="card-2026-268-grok-hooks-ab"><a href="./2026-268-grok-hooks-ab.html">Grok memory hooks, an A/B test</a></h4>
+<p>In 96 headless Grok runs, a memory-search tool got the fewest knowledge questions wrong and answered about 3× cheaper and 4× faster. Injecting recall into the prompt made Grok worse.</p>
+</article></li><li><article class="sd-card" aria-labelledby="card-2026-268-judge-kit-reviews">
+<p class="sd-card-meta"><span class="sd-card-stardate">STARDATE 2026.268</span> <time datetime="2026-09-25">25 September 2026</time> <span class="sd-status" data-status="finished">Finished</span></p>
+<h4 id="card-2026-268-judge-kit-reviews"><a href="./2026-268-judge-kit-reviews.html">The judge kit and its two independent reviews</a></h4>
+<p>We added seven quality items around our agents. Two independent code reviews found real defects, and every high and medium finding is now fixed.</p>
+</article></li></ol>
+</li>
+<li class="sd-day">
+<h3 class="sd-day-head"><span>Stardate 2026.267</span> 24 September 2026</h3>
+<ol class="sd-day-entries"><li><article class="sd-card" aria-labelledby="card-2026-267-recall-budget-jam">
+<p class="sd-card-meta"><span class="sd-card-stardate">STARDATE 2026.267</span> <time datetime="2026-09-24">24 September 2026</time> <span class="sd-status" data-status="finished">Finished</span></p>
+<h4 id="card-2026-267-recall-budget-jam"><a href="./2026-267-recall-budget-jam.html">The recall budget jam and its fix</a></h4>
+<p>Recall fell back to its old behaviour on 1,539 of 1,685 live attempts because its budget ledger was full of phantom charges, while real spend was about $0.0014. We traced the cause and fixed the accounting.</p>
+</article></li></ol>
+</li>
+</ol>
+</section>
+</main>
+<footer class="footer wrap">
+<a class="brand" href="../../"><img src="../mark.svg" width="30" height="34" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<p>An independent open-source project.<br>Not affiliated with Star Trek or its rights holders.</p>
+<nav aria-label="Footer navigation"><a href="./">Stardate log</a><a href="../../#system">The system</a><a href="../../guide.html">Install guide</a><a href="https://github.com/h3ro-dev/borg">GitHub ↗</a></nav>
+</footer>
+</body>
+</html>

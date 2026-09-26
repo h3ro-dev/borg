@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#080b09">
+<meta name="description" content="We found 527 duplicate markers that had quietly switched off because the copy they pointed to was later retired. The fix is installed, the repair has run, and the first protected nightly run is next.">
+<meta name="generator" content="Stardate log publisher (static, from Markdown entries)">
+<title>Stardate 2026.268: Marker chains, when the kept copy gets retired — BORG Collective</title>
+<link rel="canonical" href="https://borg.utlyze.com/assets/stardate/2026-268-marker-chains.html">
+<link rel="icon" href="../mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../../styles.css">
+<link rel="stylesheet" href="./stardate.css">
+</head>
+<body class="sd-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="header wrap sd-header">
+<a class="brand" href="../../" aria-label="BORG Collective home"><img src="../mark.svg" width="36" height="40" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<nav class="sd-nav" aria-label="Main navigation"><a href="../../#system" class="sd-keep">The system</a><a href="./" class="sd-keep">Stardate log</a><a href="../../#fleet">The fleet</a><a href="../../#configure">Configure</a><a href="../../guide.html">Install guide</a><a class="nav-source" href="https://github.com/h3ro-dev/borg">GitHub <span aria-hidden="true">↗</span></a></nav>
+</header>
+<main id="main" tabindex="-1" class="wrap sd-main">
+<nav class="sd-crumbs" aria-label="Breadcrumb"><ol><li><a href="./">Stardate log</a></li><li><span aria-current="page">Stardate 2026.268</span></li></ol></nav>
+<article class="sd-entry" aria-labelledby="entry-title">
+<header class="sd-entry-head">
+<p class="sd-stardate">STARDATE <b>2026.268</b></p>
+<h1 id="entry-title">Marker chains, when the kept copy gets retired</h1>
+<dl class="sd-meta">
+<div><dt>Date</dt><dd><time datetime="2026-09-25T14:58">25 September 2026, 14:58</time> <span class="sd-tz">America/Denver</span></dd></div>
+<div><dt>Status</dt><dd><span class="sd-status" data-status="running">Running</span></dd></div>
+<div><dt>Format</dt><dd>Did · Learned · Open · Log</dd></div>
+</dl>
+<p class="sd-summary">We found 527 duplicate markers that had quietly switched off because the copy they pointed to was later retired. The fix is installed, the repair has run, and the first protected nightly run is next.</p>
+</header>
+<section class="sd-section sd-what-we-did" aria-labelledby="what-we-did">
+<h2 id="what-we-did"><span class="sd-num" aria-hidden="true">01</span> What we did</h2>
+<p>When our memory holds two copies of the same fact, the nightly dream keeps one and retires the other with a retirement marker, a flag that hides a note from recall without deleting it. Each marker points to its kept copy, the one that stays visible.</p>
+<p>On 2026-09-25 we asked a narrow question: do those markers keep working over time? A marker hides its duplicate only while its kept copy is live and unmarked. So we ran a census, a read-only count of every marker and the state of its kept copy, on the main studio.</p>
+</section>
+<section class="sd-section sd-what-we-learned" aria-labelledby="what-we-learned">
+<h2 id="what-we-learned"><span class="sd-num" aria-hidden="true">02</span> What we learned</h2>
+<p><strong>Markers were quietly switching off.</strong> At 13:44 the census found 7,222 marked notes. 527 exact-duplicate markers were inactive, because their kept copy had itself been retired later. Nothing was lost, but each of those duplicates was visible to recall again.</p>
+<ul><li>503 were exact-on-exact chains, built up since 09-06 at about 26 a night: a later exact-duplicate pass retired an earlier marker's kept copy.</li><li>24 came from 4 kept copies that the nightly's near-duplicate step retired.</li><li>None came from deep dream. Its chain rule, which keeps any note another marker points to, held.</li></ul>
+<p><strong>The cause.</strong> The nightly's exact-duplicate step picked the winner of each group of identical copies by source quality, then by id. A new identical copy with a smaller id won, and the old kept copy was retired. The retention planner, which proposes what to retire, also skips any note that carries a marker, even an inactive one. So no later run ever fixed a chain.</p>
+<p>What surprised us: nothing reported it. A marker written by any tool can be undone, silently, by a later run that retires its kept copy.</p>
+<p><strong>The fix.</strong> Three changes:</p>
+<ul><li>the planner takes a protected list, so a kept copy is never proposed for retirement and always wins its group;</li><li>the nightly scans every marker's kept copy before it plans, which took 0.8 s live, and guards its near-duplicate proposals too;</li><li>restore can target chosen markers only.</li></ul>
+<p>A repair restores only the chained markers in the nightly's journal, and the next protected nightly marks them again.</p>
+<p><strong>Where it stands.</strong> An independent review returned accept, with 0 blocking findings. The fix is installed with a one-command undo. The repair restored the 527 markers with 0 other changes to the stored notes, and the census then showed 0 inactive markers.</p>
+</section>
+<section class="sd-section sd-open-questions" aria-labelledby="open-questions">
+<h2 id="open-questions"><span class="sd-num" aria-hidden="true">03</span> Open questions</h2>
+<ul><li>The first protected nightly run, set for 09-26 03:30, will re-mark up to 500 of the restored duplicates. Will it do so cleanly?</li><li>Any new tool that writes retention markers must protect the kept copies of all existing markers. How do we make sure every future writer does?</li><li>Dream health should be measured by the count of inactive markers, not just markers applied. What count should raise an alarm?</li></ul>
+</section>
+<section class="sd-section sd-lab-book-log" aria-labelledby="lab-book-log">
+<h2 id="lab-book-log"><span class="sd-num" aria-hidden="true">04</span> Lab book log</h2>
+<ol class="sd-log"><li><time datetime="2026-09-06">2026-09-06</time><p>Start of the count: 503 exact-on-exact chains built up from here, about 26 a night.</p></li><li><time datetime="2026-09-25T13:44">13:44</time><p>Census on the main studio: 7,222 marked notes, 527 inactive duplicate markers.</p></li><li><span class="sd-phase">cause</span><p>Traced to the nightly's exact step letting a newer identical copy win its group.</p></li><li><span class="sd-phase">fix</span><p>Planner protects every kept copy; the nightly scans them before each plan.</p></li><li><span class="sd-phase">review</span><p>Independent review: accept, with 0 blocking findings.</p></li><li><span class="sd-phase">install</span><p>Fix installed with a one-command undo.</p></li><li><span class="sd-phase">repair</span><p>527 markers restored with 0 other changes; the census then showed 0 inactive.</p></li><li><time datetime="2026-09-25T14:58">14:58</time><p>State recorded; the first protected nightly is set for 09-26 03:30.</p></li></ol>
+</section>
+</article>
+<nav class="sd-pager" aria-label="More entries"><a class="sd-pager-older" href="./2026-268-incoming-filter-on.html"><span>Older entry</span> The incoming filter, from shadow to on</a><a class="sd-pager-all" href="./">All entries</a></nav>
+</main>
+<footer class="footer wrap">
+<a class="brand" href="../../"><img src="../mark.svg" width="30" height="34" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<p>An independent open-source project.<br>Not affiliated with Star Trek or its rights holders.</p>
+<nav aria-label="Footer navigation"><a href="./">Stardate log</a><a href="../../#system">The system</a><a href="../../guide.html">Install guide</a><a href="https://github.com/h3ro-dev/borg">GitHub ↗</a></nav>
+</footer>
+</body>
+</html>

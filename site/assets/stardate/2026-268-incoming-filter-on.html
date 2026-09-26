@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#080b09">
+<meta name="description" content="After 24 hours in shadow mode we read all 116 would-be drops by hand and found no durable facts. We then switched the filter on, and its first real drop was written to an owner-only recovery copy before being dropped.">
+<meta name="generator" content="Stardate log publisher (static, from Markdown entries)">
+<title>Stardate 2026.268: The incoming filter, from shadow to on — BORG Collective</title>
+<link rel="canonical" href="https://borg.utlyze.com/assets/stardate/2026-268-incoming-filter-on.html">
+<link rel="icon" href="../mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../../styles.css">
+<link rel="stylesheet" href="./stardate.css">
+</head>
+<body class="sd-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="header wrap sd-header">
+<a class="brand" href="../../" aria-label="BORG Collective home"><img src="../mark.svg" width="36" height="40" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<nav class="sd-nav" aria-label="Main navigation"><a href="../../#system" class="sd-keep">The system</a><a href="./" class="sd-keep">Stardate log</a><a href="../../#fleet">The fleet</a><a href="../../#configure">Configure</a><a href="../../guide.html">Install guide</a><a class="nav-source" href="https://github.com/h3ro-dev/borg">GitHub <span aria-hidden="true">↗</span></a></nav>
+</header>
+<main id="main" tabindex="-1" class="wrap sd-main">
+<nav class="sd-crumbs" aria-label="Breadcrumb"><ol><li><a href="./">Stardate log</a></li><li><span aria-current="page">Stardate 2026.268</span></li></ol></nav>
+<article class="sd-entry" aria-labelledby="entry-title">
+<header class="sd-entry-head">
+<p class="sd-stardate">STARDATE <b>2026.268</b></p>
+<h1 id="entry-title">The incoming filter, from shadow to on</h1>
+<dl class="sd-meta">
+<div><dt>Date</dt><dd><time datetime="2026-09-25T14:07">25 September 2026, 14:07</time> <span class="sd-tz">America/Denver</span></dd></div>
+<div><dt>Status</dt><dd><span class="sd-status" data-status="finished">Finished</span></dd></div>
+<div><dt>Format</dt><dd>Did · Learned · Open · Log</dd></div>
+</dl>
+<p class="sd-summary">After 24 hours in shadow mode we read all 116 would-be drops by hand and found no durable facts. We then switched the filter on, and its first real drop was written to an owner-only recovery copy before being dropped.</p>
+</header>
+<section class="sd-section sd-what-we-did" aria-labelledby="what-we-did">
+<h2 id="what-we-did"><span class="sd-num" aria-hidden="true">01</span> What we did</h2>
+<p>Agents write facts to our shared memory as they work. Most new rows, 80 to 98%, arrive through one capture path, and some of it is noise: echoes of tool output and scraps of telemetry. We wanted JEV, our small judge model, to stop that noise before it is stored, without losing a real fact.</p>
+<p>So the filter started in shadow mode: it judges every fact but drops nothing. After an independent review we set the rules for leaving shadow:</p>
+<ul><li>at least 24 hours of shadow after a credential fix, with credential errors near zero;</li><li>at least 100 judged candidates;</li><li>every would-be drop read by hand, with zero durable facts among them;</li><li>drops counted under the live filter's caps;</li><li>latency measured over at least 20 captures.</li></ul>
+<p>Once on, the filter may drop at most half of any one capture, and at most 8 facts an hour across the whole service. It may only drop two kinds of noise: telemetry fragments and echoes of commands that ran.</p>
+</section>
+<section class="sd-section sd-what-we-learned" aria-labelledby="what-we-learned">
+<h2 id="what-we-learned"><span class="sd-num" aria-hidden="true">02</span> What we learned</h2>
+<p><strong>The shadow day.</strong> In 24 hours the filter saw 418 captures and 2,498 candidate facts, and made 1,894 JEV calls. Credential errors were 0.4%.</p>
+<p><strong>The would-be drops.</strong> With both caps applied, it would have dropped 83 facts; the caps spared 33 more. We read all 116 by hand. Every one was an echo of test, CI (automatic build-and-test runs), build or script output, plus one fragment of system time. None was a durable fact.</p>
+<p><strong>Latency.</strong> 95% of captures finished within 45.0 s, against 41.3 s before: 3.7 s more.</p>
+<p>What surprised us was how uniform the list was: nothing but output echoes and one scrap of system time.</p>
+<p><strong>Going on.</strong> At 13:00 on 2026-09-25 we switched the filter on, and the service restarted in about 4 seconds. At 14:07 came the first real drop, a script error echo. It was written first to an owner-only recovery copy. We verified that the fact was absent from what was stored, and that the receipt links to the copy by hash.</p>
+<p><strong>Safety nets.</strong> If a recovery copy cannot be written and read back, nothing is dropped. Copies are kept for 30 days and purged only by hand, after review. A dropped fact can be restored by storing it again, word for word, in the same scope. The fast rollback is a switch in the service settings and a restart; the full one restores the exact previous files.</p>
+</section>
+<section class="sd-section sd-open-questions" aria-labelledby="open-questions">
+<h2 id="open-questions"><span class="sd-num" aria-hidden="true">03</span> Open questions</h2>
+<ul><li>Facts that match the capture hook's own drop patterns are kept unjudged, by design, so some echoes still get stored until the deep dream catches them. Should the filter judge those too?</li><li>The caps spared 33 would-be drops in shadow. Are they tighter than they need to be?</li><li>Will zero durable facts among the drops hold as the work changes?</li></ul>
+</section>
+<section class="sd-section sd-lab-book-log" aria-labelledby="lab-book-log">
+<h2 id="lab-book-log"><span class="sd-num" aria-hidden="true">04</span> Lab book log</h2>
+<ol class="sd-log"><li><time datetime="2026-09-24T12:55">09-24 12:55</time><p>Credential fix in place; the 24-hour shadow clock counts from here.</p></li><li><time datetime="2026-09-24T12:56">09-24 12:56</time><p>Capture path starts in shadow mode: JEV judges, nothing is dropped.</p></li><li><time datetime="2026-09-24T14:03">09-24 14:03</time><p>Revised build installed after a third review; recovery copies forced to disk.</p></li><li><span class="sd-phase">shadow</span><p>24 hours: 418 captures, 2,498 candidate facts, 1,894 JEV calls.</p></li><li><span class="sd-phase">review</span><p>All 116 would-be drops read by hand; zero durable facts.</p></li><li><time datetime="2026-09-25T13:00">13:00</time><p>Switched to on; the service restarted in about 4 seconds.</p></li><li><time datetime="2026-09-25T14:07">14:07</time><p>First real drop, a script error echo, saved first to a recovery copy and verified.</p></li></ol>
+</section>
+</article>
+<nav class="sd-pager" aria-label="More entries"><a class="sd-pager-older" href="./2026-268-deep-dream-day-one.html"><span>Older entry</span> Deep dream, day one</a><a class="sd-pager-all" href="./">All entries</a><a class="sd-pager-newer" href="./2026-268-marker-chains.html"><span>Newer entry</span> Marker chains, when the kept copy gets retired</a></nav>
+</main>
+<footer class="footer wrap">
+<a class="brand" href="../../"><img src="../mark.svg" width="30" height="34" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<p>An independent open-source project.<br>Not affiliated with Star Trek or its rights holders.</p>
+<nav aria-label="Footer navigation"><a href="./">Stardate log</a><a href="../../#system">The system</a><a href="../../guide.html">Install guide</a><a href="https://github.com/h3ro-dev/borg">GitHub ↗</a></nav>
+</footer>
+</body>
+</html>

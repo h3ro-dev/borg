@@ -1,13 +1,16 @@
 // Check the published static surface, including links followed by a plain HTTP agent.
 import assert from 'node:assert/strict';
-import { readFile, stat } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const site = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.dirname(site);
 const origin = 'https://borg.utlyze.com/';
-const pages = ['index.html', 'guide.html'];
+// The Stardate log is published from site/assets/stardate/ (see site/stardate/README.md).
+const stardate = (await readdir(path.join(site, 'assets', 'stardate')))
+  .filter(name => name.endsWith('.html')).sort().map(name => `assets/stardate/${name}`);
+const pages = ['index.html', 'guide.html', ...stardate];
 const ids = new Map();
 const localFile = pathname => path.join(pathname.startsWith('/platform/') ? repo : site, pathname);
 for (const page of pages) {
