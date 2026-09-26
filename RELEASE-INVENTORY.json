@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 372,
+  "file_count": 396,
   "files": [
     {
       "bytes": 1914,
@@ -1563,9 +1563,9 @@
       "sha256": "e2d5eeb2ce1e090d08862be290dfb2d20577272b7262627a8018211e01d6015f"
     },
     {
-      "bytes": 2718,
+      "bytes": 14473,
       "path": "site/app.js",
-      "sha256": "a2dcd419b71edeed321614e92c394ee71877413703c559b3ca9b1539b87b02c7"
+      "sha256": "bee0bc996140d34d0e5839bfc6e62d8a606c322644abe4214573b5e816d25499"
     },
     {
       "bytes": 4396,
@@ -1623,6 +1623,11 @@
       "sha256": "1cab603b29a2e3c9ea36f57ce340920dccef9a6ee16ba1f505e7ee960bbce228"
     },
     {
+      "bytes": 14153,
+      "path": "site/assets/generate-system-map.mjs",
+      "sha256": "9f0361bba479f227bf098af57d55437b9752ca04e5cb7515df5a1e9341bdc848"
+    },
+    {
       "bytes": 251,
       "path": "site/assets/mark.svg",
       "sha256": "9d76a542ec65363b8a126da7115c117682e6b63352700e4f12af484e0ef99afc"
@@ -1651,6 +1656,56 @@
       "bytes": 1918,
       "path": "site/assets/providers/openai.svg",
       "sha256": "b6930d08a383f03735bbf317ab9e410648501804f501cf58f563e8d5274e0880"
+    },
+    {
+      "bytes": 7475,
+      "path": "site/assets/stardate/2026-267-recall-budget-jam.html",
+      "sha256": "8b18dd4272c65ea93f804e2d5b5f670ba05df06f5eabc5aa899ec5699040c5b5"
+    },
+    {
+      "bytes": 8314,
+      "path": "site/assets/stardate/2026-268-clm-side-test.html",
+      "sha256": "d01f229fb24e1512d54f961080c0388598a37f734a214539f88e6d93c1b62029"
+    },
+    {
+      "bytes": 8482,
+      "path": "site/assets/stardate/2026-268-deep-dream-day-one.html",
+      "sha256": "f202b778954af39a4349da60f6df2bac6cb6b00ea2ff3ae9eced096f813cccf7"
+    },
+    {
+      "bytes": 8257,
+      "path": "site/assets/stardate/2026-268-grok-hooks-ab.html",
+      "sha256": "815a2875a1e2f60949794567d4939fa7d0c6347c0cb046df58cb37a576911bad"
+    },
+    {
+      "bytes": 7869,
+      "path": "site/assets/stardate/2026-268-incoming-filter-on.html",
+      "sha256": "a38df021e28c871e04bcae2c67effaa54ceb2625d64d48ba8885c7088acdecec"
+    },
+    {
+      "bytes": 7710,
+      "path": "site/assets/stardate/2026-268-judge-kit-reviews.html",
+      "sha256": "b271aabcdbc089898b8f4984dc5f9f44f40e94927bd3c7ee8e73a667749b7e92"
+    },
+    {
+      "bytes": 7932,
+      "path": "site/assets/stardate/2026-268-marker-chains.html",
+      "sha256": "cfd28bcaca87d62731574c113dc27264c3a9e365ea64415584a2f5b5af40ce24"
+    },
+    {
+      "bytes": 8092,
+      "path": "site/assets/stardate/2026-268-memory-reach.html",
+      "sha256": "70e8a9b1b154b5c71441c074f242572e8001ca7c72220fb86d1b18284a91ed90"
+    },
+    {
+      "bytes": 8374,
+      "path": "site/assets/stardate/index.html",
+      "sha256": "51bc251d6a0f23b2d309dac650b4b6a4b91057f6162f82f5ec2138e7d93ca416"
+    },
+    {
+      "bytes": 7046,
+      "path": "site/assets/stardate/stardate.css",
+      "sha256": "31ab6524b09775ab3765c3ed6240397941f5c41c684910dca3355089a261c767"
     },
     {
       "bytes": 9836,
@@ -1698,9 +1753,9 @@
       "sha256": "0ef3fd6b85ade71ccb594334f5f3e4a41000f2d9167c380b95b9248d73297d2c"
     },
     {
-      "bytes": 40555,
+      "bytes": 91082,
       "path": "site/index.html",
-      "sha256": "89371ee52f8ce4cbeb2fd661de401083db31d152d1b013c8f6bd362d5cd3aecd"
+      "sha256": "59ddda9bdaeed52e7671f3a10eeffe88abfdb37986db1b4147440b6b2ff7f007"
     },
     {
       "bytes": 2877,
@@ -1708,14 +1763,69 @@
       "sha256": "bd2cceb71e4443839ddd0e05e112ad3a0a52958e516f1ab7d6f8a43e0ae39c52"
     },
     {
-      "bytes": 9615,
+      "bytes": 9960,
       "path": "site/scene.js",
-      "sha256": "1a8e3c67a216eaf239e41223700b82e6cf66e4c2a757d76d737379105ac4cecb"
+      "sha256": "f3fb5de21e62479f6fcc1c9126f3163dbb4eb7a3a287a64b9414a48c754523f7"
     },
     {
-      "bytes": 32107,
+      "bytes": 4006,
+      "path": "site/stardate/README.md",
+      "sha256": "7d12c7fcf23a05cc00a1425d0b619b8f422e3f106234e3521cc59a8a5dc78e8b"
+    },
+    {
+      "bytes": 3470,
+      "path": "site/stardate/entries/2026-267-recall-budget-jam.md",
+      "sha256": "8afcecb62a32871bc38e549f1e9f785fb44a8c8a679a381d7c54e9aeb51e9c5f"
+    },
+    {
+      "bytes": 3676,
+      "path": "site/stardate/entries/2026-268-clm-side-test.md",
+      "sha256": "f5c6432059172bba4bed215be597394e62fce5b2cc2f35f9a4baa60caaad94e8"
+    },
+    {
+      "bytes": 3839,
+      "path": "site/stardate/entries/2026-268-deep-dream-day-one.md",
+      "sha256": "dab39f0dfc2c07f372aa58232f78817d7753b15e634ce9114f89b932b5ba339a"
+    },
+    {
+      "bytes": 3522,
+      "path": "site/stardate/entries/2026-268-grok-hooks-ab.md",
+      "sha256": "e90d263eaed4218d9471ae533156246943300e103ca16393ce78d9ca2741244a"
+    },
+    {
+      "bytes": 3565,
+      "path": "site/stardate/entries/2026-268-incoming-filter-on.md",
+      "sha256": "f1bc2dfe472e3a8ff6f9cea35fa3b0b84b8bfdac47146f83c180ca3dd17ff208"
+    },
+    {
+      "bytes": 3183,
+      "path": "site/stardate/entries/2026-268-judge-kit-reviews.md",
+      "sha256": "a234371abb14440ec3598b57e43465dfe83cfa7555d0d46c7ce59d786e8ec0d7"
+    },
+    {
+      "bytes": 3755,
+      "path": "site/stardate/entries/2026-268-marker-chains.md",
+      "sha256": "942a8b5763a6d205473b624555949c83da79759d1d5e6f77817ea9829459844f"
+    },
+    {
+      "bytes": 3469,
+      "path": "site/stardate/entries/2026-268-memory-reach.md",
+      "sha256": "37054bd09340768179275144f3b2010428b3bf476fa7810cd1f7b79e0c8f6d2a"
+    },
+    {
+      "bytes": 1952,
+      "path": "site/stardate/publish.mjs",
+      "sha256": "e9b3aee47279968d24eae1b61c9dfa3359e2485cee53b0cc386e230d9fe30fa2"
+    },
+    {
+      "bytes": 19504,
+      "path": "site/stardate/stardate.mjs",
+      "sha256": "80511b3233b79ea29710fcd1140a374819dca979636ca7927ef94c84736cfd29"
+    },
+    {
+      "bytes": 48300,
       "path": "site/styles.css",
-      "sha256": "133511e31c2aae749ce9376b5e7c4757fa11ec34d3fb988f5ec1a4eaa615780c"
+      "sha256": "04e466033c64bb886b2a2d6da9bee71edd535491da646a9310bc8000f24bb37a"
     },
     {
       "bytes": 1081,
@@ -1783,14 +1893,24 @@
       "sha256": "3b1bef292bc037c13b9291bf034421a791d7e011a244e184da68a9c565bd2d09"
     },
     {
-      "bytes": 2009,
+      "bytes": 2283,
       "path": "site/verify-links.mjs",
-      "sha256": "edc3d3529ea3382663faa3fdbec157352692e0d2e89e5de98ceeca111a79db7c"
+      "sha256": "999257d4f0159267f0dcc0cb8311d7ea2eef6852c3a2e3a0e4c817c78760f163"
     },
     {
-      "bytes": 12794,
+      "bytes": 8125,
+      "path": "site/verify-map.mjs",
+      "sha256": "3d6d9e9be392aa684ef688f9b7b2e3de3d7ebf0595c2db65666a137d5a992e42"
+    },
+    {
+      "bytes": 10730,
+      "path": "site/verify-stardate.mjs",
+      "sha256": "24598b63866dcf3f17f0b1498f704e3e3cdc4d9caf08ca2e35f7344320022cae"
+    },
+    {
+      "bytes": 13966,
       "path": "site/verify.mjs",
-      "sha256": "06dbd515ebdc2e2bc61b2b9d729af9e071ddb75109f7aa81ada3c4b1baa83005"
+      "sha256": "13b988b925ddbde8e37a4d70122c0354fe76fa7c4272490bc6f0c536a17f1155"
     },
     {
       "bytes": 6275,
@@ -1863,7 +1983,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "787241ae9bf10d37224ad69423f5b37cbc3d8110df4c4e7d9461320adf1afbe6",
+  "inventory_sha256": "772c13116dd673c24a24aeee691bcf57ee60891a7b75da8310f286d5c7a28a58",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 87734443
+  "total_bytes": 87981209
 }

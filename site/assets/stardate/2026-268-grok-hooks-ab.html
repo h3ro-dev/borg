@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#080b09">
+<meta name="description" content="In 96 headless Grok runs, a memory-search tool got the fewest knowledge questions wrong and answered about 3× cheaper and 4× faster. Injecting recall into the prompt made Grok worse.">
+<meta name="generator" content="Stardate log publisher (static, from Markdown entries)">
+<title>Stardate 2026.268: Grok memory hooks, an A/B test — BORG Collective</title>
+<link rel="canonical" href="https://borg.utlyze.com/assets/stardate/2026-268-grok-hooks-ab.html">
+<link rel="icon" href="../mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../../styles.css">
+<link rel="stylesheet" href="./stardate.css">
+</head>
+<body class="sd-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="header wrap sd-header">
+<a class="brand" href="../../" aria-label="BORG Collective home"><img src="../mark.svg" width="36" height="40" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<nav class="sd-nav" aria-label="Main navigation"><a href="../../#system" class="sd-keep">The system</a><a href="./" class="sd-keep">Stardate log</a><a href="../../#fleet">The fleet</a><a href="../../#configure">Configure</a><a href="../../guide.html">Install guide</a><a class="nav-source" href="https://github.com/h3ro-dev/borg">GitHub <span aria-hidden="true">↗</span></a></nav>
+</header>
+<main id="main" tabindex="-1" class="wrap sd-main">
+<nav class="sd-crumbs" aria-label="Breadcrumb"><ol><li><a href="./">Stardate log</a></li><li><span aria-current="page">Stardate 2026.268</span></li></ol></nav>
+<article class="sd-entry" aria-labelledby="entry-title">
+<header class="sd-entry-head">
+<p class="sd-stardate">STARDATE <b>2026.268</b></p>
+<h1 id="entry-title">Grok memory hooks, an A/B test</h1>
+<dl class="sd-meta">
+<div><dt>Date</dt><dd><time datetime="2026-09-25">25 September 2026</time> <span class="sd-tz">America/Denver</span></dd></div>
+<div><dt>Status</dt><dd><span class="sd-status" data-status="finished">Finished</span></dd></div>
+<div><dt>Format</dt><dd>Did · Learned · Open · Log</dd></div>
+</dl>
+<p class="sd-summary">In 96 headless Grok runs, a memory-search tool got the fewest knowledge questions wrong and answered about 3× cheaper and 4× faster. Injecting recall into the prompt made Grok worse.</p>
+</header>
+<section class="sd-section sd-what-we-did" aria-labelledby="what-we-did">
+<h2 id="what-we-did"><span class="sd-num" aria-hidden="true">01</span> What we did</h2>
+<p>How should Grok reach our shared memory? We compared four setups, called arms. (A hook is a small program that runs at set points in an agent's loop and can add text to its prompt.)</p>
+<ul><li><strong>A</strong>: no memory hooks.</li><li><strong>R</strong>: recall injected into the prompt, as Claude gets it on the main studio.</li><li><strong>M</strong>: a read-only memory-search tool.</li><li><strong>C</strong>: recall plus advice hooks from JEV, our small judge model.</li></ul>
+<p>The 12 tasks were six fleet-knowledge questions whose answers live in memory, and six small coding tasks with tests. Each ran twice per arm: 96 headless runs (scripted, nobody at the keyboard), same settings throughout. Each run had a fresh private home folder, and grading happened elsewhere, so no agent saw the answer key.</p>
+</section>
+<section class="sd-section sd-what-we-learned" aria-labelledby="what-we-learned">
+<h2 id="what-we-learned"><span class="sd-num" aria-hidden="true">02</span> What we learned</h2>
+<p>All 48 coding runs passed in every arm; memory neither helped nor hurt. Knowledge questions told a different story (12 runs per arm, 95% ranges in parentheses):</p>
+<div class="sd-table" role="region" tabindex="0" aria-label="What we learned, table 1"><table><thead><tr><th scope="col">Arm</th><th scope="col">Wrong</th><th scope="col">Mean cost</th><th scope="col">Median time</th></tr></thead><tbody><tr><th scope="row">M, search tool</th><td class="num">25% (9 to 53%)</td><td class="num">$0.119</td><td class="num">24 s</td></tr><tr><th scope="row">A, no hooks</th><td class="num">50% (25 to 75%)</td><td class="num">$0.386</td><td class="num">106 s</td></tr><tr><th scope="row">C, recall and advice</th><td class="num">50% (25 to 75%)</td><td class="num">$0.390</td><td class="num">276 s</td></tr><tr><th scope="row">R, recall injected</th><td class="num">75% (47 to 91%)</td><td class="num">$0.373</td><td class="num">113 s</td></tr></tbody></table></div>
+<ul><li><strong>The search tool won on cost and speed</strong>: about 3× cheaper and about 4× faster, clear against every arm (p ≤ 0.04). On accuracy, only its gap to injected recall is clear (p = 0.04); against no hooks it is suggestive, not proven (p = 0.40).</li><li><strong>Injected recall made Grok worse.</strong> 8 of its 12 knowledge runs hit the 20-turn limit without answering. The recall block sent Grok hunting through the host to check what it said: 216 tool calls on host paths, against 7 for the search tool.</li><li><strong>Advice hooks gave no clear gain.</strong> Turns took about 14 s instead of about 6 s, causing 4 of the 5 timeouts, perhaps partly because each test run used a fresh state folder.</li><li><strong>Stale memories mislead.</strong> Both of M's misses on which machines take no new work came from old machine-state notes treated as current. The search tool returns facts without their dates.</li></ul>
+<p>What surprised us most: recall meant to help sent Grok checking instead of answering.</p>
+<p><strong>Caveats.</strong> With 12 runs per arm, treat the accuracy order as a strong hint; cost and speed are solid. &quot;No memory&quot; is not knowledge-free: in 10 of 12 no-hook knowledge runs, Grok read the host's own notes.</p>
+<p>Two lessons for anyone running agents: an agent without a sandbox can read anything its user account can, and a killed run can leave its tool processes running.</p>
+</section>
+<section class="sd-section sd-open-questions" aria-labelledby="open-questions">
+<h2 id="open-questions"><span class="sd-num" aria-hidden="true">03</span> Open questions</h2>
+<ul><li>Would the search tool, recommended but not yet built, help lane-host agents in production?</li><li>Would returning each memory with its date and type stop the stale-note misses?</li><li>Can JEV advice calls get fast enough for Grok lanes? Until then we would keep them off.</li></ul>
+</section>
+<section class="sd-section sd-lab-book-log" aria-labelledby="lab-book-log">
+<h2 id="lab-book-log"><span class="sd-num" aria-hidden="true">04</span> Lab book log</h2>
+<ol class="sd-log"><li><span class="sd-phase">setup</span><p>Harness built and validated for $3.96: 12 tasks, 4 arms, 2 repeats.</p></li><li><span class="sd-phase">runs</span><p>96 headless Grok runs on one lane host; recorded cost $16.30.</p></li><li><span class="sd-phase">cleanup</span><p>Stopped ten leftover scans that ran up to 55 minutes after killed runs.</p></li><li><span class="sd-phase">grading</span><p>Graded elsewhere; one task regraded by hand, same rule for every arm.</p></li><li><time datetime="2026-09-25">2026-09-25</time><p>Report written: $20.26 recorded, about $22 to 25 counting five timed-out runs.</p></li></ol>
+</section>
+</article>
+<nav class="sd-pager" aria-label="More entries"><a class="sd-pager-older" href="./2026-268-judge-kit-reviews.html"><span>Older entry</span> The judge kit and its two independent reviews</a><a class="sd-pager-all" href="./">All entries</a><a class="sd-pager-newer" href="./2026-268-clm-side-test.html"><span>Newer entry</span> The CLM side test, and why we stay on JEV</a></nav>
+</main>
+<footer class="footer wrap">
+<a class="brand" href="../../"><img src="../mark.svg" width="30" height="34" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<p>An independent open-source project.<br>Not affiliated with Star Trek or its rights holders.</p>
+<nav aria-label="Footer navigation"><a href="./">Stardate log</a><a href="../../#system">The system</a><a href="../../guide.html">Install guide</a><a href="https://github.com/h3ro-dev/borg">GitHub ↗</a></nav>
+</footer>
+</body>
+</html>

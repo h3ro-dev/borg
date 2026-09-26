@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#080b09">
+<meta name="description" content="We added seven quality items around our agents. Two independent code reviews found real defects, and every high and medium finding is now fixed.">
+<meta name="generator" content="Stardate log publisher (static, from Markdown entries)">
+<title>Stardate 2026.268: The judge kit and its two independent reviews — BORG Collective</title>
+<link rel="canonical" href="https://borg.utlyze.com/assets/stardate/2026-268-judge-kit-reviews.html">
+<link rel="icon" href="../mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../../styles.css">
+<link rel="stylesheet" href="./stardate.css">
+</head>
+<body class="sd-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="header wrap sd-header">
+<a class="brand" href="../../" aria-label="BORG Collective home"><img src="../mark.svg" width="36" height="40" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<nav class="sd-nav" aria-label="Main navigation"><a href="../../#system" class="sd-keep">The system</a><a href="./" class="sd-keep">Stardate log</a><a href="../../#fleet">The fleet</a><a href="../../#configure">Configure</a><a href="../../guide.html">Install guide</a><a class="nav-source" href="https://github.com/h3ro-dev/borg">GitHub <span aria-hidden="true">↗</span></a></nav>
+</header>
+<main id="main" tabindex="-1" class="wrap sd-main">
+<nav class="sd-crumbs" aria-label="Breadcrumb"><ol><li><a href="./">Stardate log</a></li><li><span aria-current="page">Stardate 2026.268</span></li></ol></nav>
+<article class="sd-entry" aria-labelledby="entry-title">
+<header class="sd-entry-head">
+<p class="sd-stardate">STARDATE <b>2026.268</b></p>
+<h1 id="entry-title">The judge kit and its two independent reviews</h1>
+<dl class="sd-meta">
+<div><dt>Date</dt><dd><time datetime="2026-09-25">25 September 2026</time> <span class="sd-tz">America/Denver</span></dd></div>
+<div><dt>Status</dt><dd><span class="sd-status" data-status="finished">Finished</span></dd></div>
+<div><dt>Format</dt><dd>Did · Learned · Open · Log</dd></div>
+</dl>
+<p class="sd-summary">We added seven quality items around our agents. Two independent code reviews found real defects, and every high and medium finding is now fixed.</p>
+</header>
+<section class="sd-section sd-what-we-did" aria-labelledby="what-we-did">
+<h2 id="what-we-did"><span class="sd-num" aria-hidden="true">01</span> What we did</h2>
+<p>The judge kit is our set of quality checks around the agents. We added seven items, each with a canary (a small automatic check that runs all the time) in our regression harness.</p>
+<div class="sd-table" role="region" tabindex="0" aria-label="What we did, table 1"><table><thead><tr><th scope="col">Item</th><th scope="col">What it does</th><th scope="col">First result</th></tr></thead><tbody><tr><th scope="row">Outcome grading</th><td>Hourly, asks whether each recalled memory was used</td><td>0.8% of 4,451 clearly used</td></tr><tr><th scope="row">Claim checks</th><td>Hourly, asks whether a &quot;done&quot; claim has evidence</td><td>about 5% of claim turns flagged</td></tr><tr><th scope="row">Pre-send guard</th><td>Checks recipients and holds before a client message; only orchestration-tier models may send</td><td>tests 20 of 20</td></tr><tr><th scope="row">Brief checks</th><td>Blocks a task brief with no acceptance check, artifact or stop condition</td><td>45% of real briefs lacked acceptance checks</td></tr><tr><th scope="row">Hook triage</th><td>Measures the text our hooks add to prompts</td><td>about 18.7 KB per prompt</td></tr><tr><th scope="row">Drift alarms</th><td>Every 15 minutes, compares each lane with its last 24 hours</td><td>in a backtest, caught the 09-24 incidents within the hour</td></tr><tr><th scope="row">Routing scoreboard</th><td>Hourly, observed success per model, account and machine</td><td>one model, 90% on one studio and 65% on another</td></tr></tbody></table></div>
+<p>Six items had passed their own tests, canaries and live samples, but no second reader had seen the code. Our question: would independent reviewers find what our own tests missed?</p>
+</section>
+<section class="sd-section sd-what-we-learned" aria-labelledby="what-we-learned">
+<h2 id="what-we-learned"><span class="sd-num" aria-hidden="true">02</span> What we learned</h2>
+<p><strong>The first review found real defects.</strong> A reviewer on another studio read all the code, ran every suite and wrote 12 probe scripts.</p>
+<ul><li><strong>Five high-severity and five medium defects:</strong> three in the pre-send guard, two in the drift alarms, and partial grading in the hourly checks.</li><li>The kind of thing it caught: a lane failing every call never raised an alarm, and turns still in progress were graded on a partial reply and never graded again.</li></ul>
+<p>All 5 high and 5 medium findings were fixed, and 15 of the 16 low. We also made subagents (helpers started by another agent) draft-only for client messages.</p>
+<p><strong>The second review, of the fixes, found three more:</strong> one high and two medium, in the pre-send guard and the brief check. All are fixed, along with 11 low findings.</p>
+<p>What surprised us: code that had passed its own tests, canaries and live samples still hid high-severity gaps.</p>
+</section>
+<section class="sd-section sd-open-questions" aria-labelledby="open-questions">
+<h2 id="open-questions"><span class="sd-num" aria-hidden="true">03</span> Open questions</h2>
+<ul><li>Only 0.8% of injected memories are clearly used. Is recall picking poorly, or is the grader strict?</li><li>A tested patch for the Inbox check-in saved 4.7 MB a day (38%) in a replay, and it is now live on the main studio. Will it hold up across the fleet?</li></ul>
+</section>
+<section class="sd-section sd-lab-book-log" aria-labelledby="lab-book-log">
+<h2 id="lab-book-log"><span class="sd-num" aria-hidden="true">04</span> Lab book log</h2>
+<ol class="sd-log"><li><span class="sd-phase">build</span><p>Seven items built, each with a canary.</p></li><li><span class="sd-phase">review one</span><p>First review of six items: 5 high, 5 medium, 16 low.</p></li><li><span class="sd-phase">fixes</span><p>All high and medium fixed, 15 of 16 low; probes rerun clean.</p></li><li><span class="sd-phase">review two</span><p>Second review, of the fixes: one high, two medium, 11 low.</p></li><li><span class="sd-phase">refix</span><p>Second-review findings fixed; three low items accepted as they are; 100 tests pass; four superseded grants revoked.</p></li><li><time datetime="2026-09-25">2026-09-25</time><p>Report written: all seven items live, regression 12 of 12.</p></li></ol>
+</section>
+</article>
+<nav class="sd-pager" aria-label="More entries"><a class="sd-pager-older" href="./2026-267-recall-budget-jam.html"><span>Older entry</span> The recall budget jam and its fix</a><a class="sd-pager-all" href="./">All entries</a><a class="sd-pager-newer" href="./2026-268-grok-hooks-ab.html"><span>Newer entry</span> Grok memory hooks, an A/B test</a></nav>
+</main>
+<footer class="footer wrap">
+<a class="brand" href="../../"><img src="../mark.svg" width="30" height="34" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<p>An independent open-source project.<br>Not affiliated with Star Trek or its rights holders.</p>
+<nav aria-label="Footer navigation"><a href="./">Stardate log</a><a href="../../#system">The system</a><a href="../../guide.html">Install guide</a><a href="https://github.com/h3ro-dev/borg">GitHub ↗</a></nav>
+</footer>
+</body>
+</html>

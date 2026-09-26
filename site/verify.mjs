@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import { verifyConfigurator } from "./verify-configure.mjs";
 import { verifyGuide } from "./verify-guide.mjs";
 import { verifyExplorer } from "./verify-explorer.mjs";
+import { verifyMap } from "./verify-map.mjs";
+import { verifyStardate, verifyStardateStatic } from "./verify-stardate.mjs";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const { chromium, webkit } = await import(
   process.env.PLAYWRIGHT_MODULE
@@ -34,8 +36,9 @@ const server = createServer(async (req, res) => {
       res.writeHead(404).end();
       return;
     }
-    const relative =
-      decodeURIComponent(url.pathname.slice("/borg/".length)) || "index.html";
+    const requested = decodeURIComponent(url.pathname.slice("/borg/".length));
+    // Like GitHub Pages, a folder URL serves its index.html.
+    const relative = !requested || requested.endsWith("/") ? requested + "index.html" : requested;
     const publicRoot = relative.startsWith('platform/') ? path.dirname(root) : root;
     const target = path.resolve(publicRoot, relative);
     if (!target.startsWith(publicRoot + path.sep)) {
@@ -259,6 +262,9 @@ try {
   }
   await verifyConfigurator({ page, origin, evidence, results });
   await verifyExplorer({ page, browser, origin, evidence, results });
+  await verifyMap({ page, browser, origin, evidence, results });
+  for (const check of await verifyStardateStatic()) results.checks.push(`Stardate static: ${check}`);
+  await verifyStardate({ browser, origin, evidence, results });
   const nojs = await browser.newContext({
     javaScriptEnabled: false,
     viewport: { width: 390, height: 844 },
@@ -313,6 +319,16 @@ try {
     results.checks.push("WebKit mobile render, overflow and setup interaction");
     await verifyExplorer({ page, browser, origin, evidence, results });
     await verifyGuide({ page, origin, evidence, results });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(origin + "/borg/#system");
+    await page.locator(".map-node[data-part=\"recall\"]").click();
+    assert.equal(await page.locator("#map-card h3").textContent(), "Recall");
+    for (const url of ["/borg/assets/stardate/", "/borg/assets/stardate/2026-268-grok-hooks-ab.html"]) {
+      await page.goto(origin + url);
+      assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `WebKit overflow ${url}`);
+      assert(await page.locator("h1").isVisible());
+    }
+    results.checks.push("WebKit mobile: a map cube opens its card; Stardate index and entry fit 390px");
   }
 } catch (error) {
   results.failures.push(error.stack || error.message);

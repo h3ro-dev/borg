@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#080b09">
+<meta name="description" content="Recall fell back to its old behaviour on 1,539 of 1,685 live attempts because its budget ledger was full of phantom charges, while real spend was about $0.0014. We traced the cause and fixed the accounting.">
+<meta name="generator" content="Stardate log publisher (static, from Markdown entries)">
+<title>Stardate 2026.267: The recall budget jam and its fix — BORG Collective</title>
+<link rel="canonical" href="https://borg.utlyze.com/assets/stardate/2026-267-recall-budget-jam.html">
+<link rel="icon" href="../mark.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../../styles.css">
+<link rel="stylesheet" href="./stardate.css">
+</head>
+<body class="sd-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="header wrap sd-header">
+<a class="brand" href="../../" aria-label="BORG Collective home"><img src="../mark.svg" width="36" height="40" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<nav class="sd-nav" aria-label="Main navigation"><a href="../../#system" class="sd-keep">The system</a><a href="./" class="sd-keep">Stardate log</a><a href="../../#fleet">The fleet</a><a href="../../#configure">Configure</a><a href="../../guide.html">Install guide</a><a class="nav-source" href="https://github.com/h3ro-dev/borg">GitHub <span aria-hidden="true">↗</span></a></nav>
+</header>
+<main id="main" tabindex="-1" class="wrap sd-main">
+<nav class="sd-crumbs" aria-label="Breadcrumb"><ol><li><a href="./">Stardate log</a></li><li><span aria-current="page">Stardate 2026.267</span></li></ol></nav>
+<article class="sd-entry" aria-labelledby="entry-title">
+<header class="sd-entry-head">
+<p class="sd-stardate">STARDATE <b>2026.267</b></p>
+<h1 id="entry-title">The recall budget jam and its fix</h1>
+<dl class="sd-meta">
+<div><dt>Date</dt><dd><time datetime="2026-09-24">24 September 2026</time> <span class="sd-tz">America/Denver</span></dd></div>
+<div><dt>Status</dt><dd><span class="sd-status" data-status="finished">Finished</span></dd></div>
+<div><dt>Format</dt><dd>Did · Learned · Open · Log</dd></div>
+</dl>
+<p class="sd-summary">Recall fell back to its old behaviour on 1,539 of 1,685 live attempts because its budget ledger was full of phantom charges, while real spend was about $0.0014. We traced the cause and fixed the accounting.</p>
+</header>
+<section class="sd-section sd-what-we-did" aria-labelledby="what-we-did">
+<h2 id="what-we-did"><span class="sd-num" aria-hidden="true">01</span> What we did</h2>
+<p>Recall is the step where JEV, our small judge model, picks which memories go into an agent's context before it answers. Every JEV lane (one job the judge does) has a daily budget. When the budget says no, the lane falls back to its old behaviour. Nothing breaks, but the agent answers without the judge's help.</p>
+<p>Each lane keeps a ledger: before each call it books an estimated cost, called a reservation.</p>
+<p>On 2026-09-24 we found recall falling back far too often. Why was a lane that spends almost nothing always out of money? We looked at 1,685 live recall attempts, the lane's ledger, and the timing of each step inside one recall.</p>
+</section>
+<section class="sd-section sd-what-we-learned" aria-labelledby="what-we-learned">
+<h2 id="what-we-learned"><span class="sd-num" aria-hidden="true">02</span> What we learned</h2>
+<p><strong>The budget was full of phantom charges.</strong> 1,539 of the 1,685 attempts, about 91%, fell back because the budget said no. The ledger showed $0.4989 charged against a $0.50 limit. Real spend was about $0.0014.</p>
+<p>The chain:</p>
+<ol><li>A recall step has 2.0 seconds in total.</li><li>About 0.4 s went on two Inbox lookups of the lane's grant (its signed permission), and about 0.4 s on fetching its key from the vault.</li><li>The lane kept 1.0 s in reserve for a retry, and the call itself got only about 0.3 s.</li><li>Large requests take 0.4 to 0.5 s, so they timed out with an unknown outcome.</li><li>An unknown outcome was booked at a worst case that grew with request size and question count, then doubled. With about 86 questions in a large recall, each booking was 16 to 750 times the real bill.</li><li>These bookings, and those for refused calls (HTTP 403), never aged out of what was meant to be a daily window. They piled up until the ledger was full.</li></ol>
+<p>What surprised us: the lane was not short of money at all. Its own bookkeeping blocked it. The same pessimistic accounting sits in the shared client used by other JEV lanes, including the incoming filter and nightly dreaming. Any lane with real traffic and occasional timeouts will jam the same way.</p>
+<p><strong>The fix</strong> is a corrected client for the lane. A booking is capped by the request's size in bytes, old bookings age out of a true rolling window, and a refused request (a 4xx error) costs nothing. The lesson we keep: check a lane's ledger before blaming the provider.</p>
+<p>A later readout, from our system map on 2026-09-25, shows recall applying on 590 of 591 prompts over six hours. That is a later reading, not proof that this fix alone caused it.</p>
+</section>
+<section class="sd-section sd-open-questions" aria-labelledby="open-questions">
+<h2 id="open-questions"><span class="sd-num" aria-hidden="true">03</span> Open questions</h2>
+<ul><li>Other lanes shared the same accounting when we found this. Should they move to the corrected client before real traffic jams them?</li><li>The lookups eat into a 2.0 s step. How much of that time can we win back?</li><li>The later readout covers six hours. Does it hold over days and under heavy load?</li></ul>
+</section>
+<section class="sd-section sd-lab-book-log" aria-labelledby="lab-book-log">
+<h2 id="lab-book-log"><span class="sd-num" aria-hidden="true">04</span> Lab book log</h2>
+<ol class="sd-log"><li><time datetime="2026-09-24">2026-09-24</time><p>Found 1,539 of 1,685 live recall attempts falling back on budget.</p></li><li><span class="sd-phase">timing</span><p>Grant lookups took about 0.4 s, the key fetch about 0.4 s; the call got about 0.3 s.</p></li><li><span class="sd-phase">root cause</span><p>Unknown outcomes were booked at 16 to 750 times the real bill and never aged out.</p></li><li><span class="sd-phase">fix</span><p>Corrected client: capped bookings, rolling-window aging, no charge for refused calls.</p></li><li><time datetime="2026-09-25">2026-09-25</time><p>Later readout from the system map: recall applies on 590 of 591 prompts over six hours.</p></li></ol>
+</section>
+</article>
+<nav class="sd-pager" aria-label="More entries"><a class="sd-pager-all" href="./">All entries</a><a class="sd-pager-newer" href="./2026-268-judge-kit-reviews.html"><span>Newer entry</span> The judge kit and its two independent reviews</a></nav>
+</main>
+<footer class="footer wrap">
+<a class="brand" href="../../"><img src="../mark.svg" width="30" height="34" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
+<p>An independent open-source project.<br>Not affiliated with Star Trek or its rights holders.</p>
+<nav aria-label="Footer navigation"><a href="./">Stardate log</a><a href="../../#system">The system</a><a href="../../guide.html">Install guide</a><a href="https://github.com/h3ro-dev/borg">GitHub ↗</a></nav>
+</footer>
+</body>
+</html>
