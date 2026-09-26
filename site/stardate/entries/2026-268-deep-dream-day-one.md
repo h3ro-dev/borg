@@ -2,9 +2,9 @@
 stardate: 2026.268
 title: Deep dream, day one
 date: 2026-09-25
-time: "09:36"
-status: running
-summary: Our first full clean-up pass over the main studio's memory retired 3,133 of 117,506 live memories by 09:36, all reversibly. The near-duplicate wave paused at the day's JEV budget, and we resumed it the same afternoon.
+time: "20:03"
+status: finished
+summary: Our first full clean-up pass over the main studio's memory retired 3,618 of 117,506 live memories, 3.1%, all reversibly. It finished at 20:03 after the near-duplicate wave resumed on a raised budget, and recall never returned a retired copy.
 ---
 
 ## What we did
@@ -17,33 +17,37 @@ Three independent code reviews came first, and every required fix was applied. A
 
 ## What we learned
 
-By 09:36, 3,133 memories were retired, 2.7% of the plan.
+The pass retired 3,618 memories, 3.1% of the plan. By 09:36 it had retired 3,133; the near-duplicate wave paused at the day's JEV budget, resumed at 16:09 and finished at 20:03.
 
 | Wave | Candidates | Retired | Why the rest stayed |
 |---|---|---|---|
 | Machine-state snapshots | 13 | 9 | 3 kept by JEV; 1 not yet 7 days old |
 | Tool echoes | 498 | 371 | 90 kept by JEV; 3 held back for privacy; 34 pointed at by another marker |
 | Exact duplicates | 535 extra copies | 11 | 4 protected decisions; the rest refused by the planner's compatibility rules |
-| Near-duplicates | 9,642 pairs | 2,742 | 6,010 pairs judged so far; 142 contradictions logged, not merged; 103 held by the chain rule |
+| Near-duplicates | 9,642 pairs | 3,227 | 9,297 pairs judged; 228 contradictions logged, not merged; 109 held by the chain rule |
 
 For near-duplicates, JEV must say "same fact" or "supersedes" with at least 90% confidence; then the shorter or older copy is retired. The chain rule keeps any note that another marker points to.
 
-**The checks held.** Recall, sampled 40 times after each wave, never returned a retired copy, and found the kept fact about 90% of the time. Every changed memory changed only in its marker and labels. A live undo test on the snapshot wave restored 9, and all 13 notes matched the before-snapshot byte for byte. Spot checks of merges down to a similarity of 0.92 found only true rewordings.
+**The checks held.** Recall, sampled 40 times after each wave, never returned a retired copy, and found the kept fact about 90% of the time. At the finish we sampled it 300 times: it returned no retired copy, every kept copy was still live, and the control search found 298 of 300. Of the 19,284 near-duplicate candidates, 3,227 changed only in their marker and labels, and none changed in any other way. A live undo test on the snapshot wave restored 9, and all 13 notes matched the before-snapshot byte for byte. Spot checks of merges down to a similarity of 0.92 found only true rewordings.
 
-**It was cheap.** JEV calls since 07:05 cost $0.176, for 6,173 calls. Deep dream was set to stop at $0.23 of a rolling 24-hour budget of $0.25 that it shares with the nightly. The near-duplicate wave stopped at the day's JEV budget. The remaining 3,632 pairs were first set for the next morning; instead we raised the rolling budget to $1.00, with an undo, and resumed them at 16:09.
+**It was cheap.** JEV calls from 07:05 to the finish cost $0.281, for 9,584 calls: $0.176 for 6,173 calls by the morning, and $0.098 for 3,411 calls in the evening. Deep dream first stopped at $0.23 of a rolling 24-hour budget of $0.25 that it shares with the nightly. We raised that budget to $1.00, with an undo, and resumed the remaining pairs at 16:09 instead of waiting for the next morning.
 
-What surprised us: exact duplicates, which sound easy, retired only 11 of 535 extra copies. And on most near-duplicate pairs JEV was at least 90% sure the notes were redundant, but split its answer between "same fact" and "newer replaces older". Neither answer reached 90%, so both copies stayed.
+What surprised us: exact duplicates, which sound easy, retired only 11 of 535 extra copies. And most near-duplicate pairs stayed: of 9,297 judged, JEV cleared 3,336 for retirement. On many of the rest it was at least 90% sure the notes were redundant, but split its answer between "same fact" and "newer replaces older". Neither answer reached 90%, so both copies stayed.
 
 ## Open questions
 
 - Which copy should we keep when JEV splits its answer? One proposal: the newer copy when it holds everything the older says, otherwise the longer.
 - 385 exact-duplicate groups hold the same text saved as different kinds of note. Nothing merges them yet.
-- The lane re-checks its permission with about 6 Inbox hub calls per pair, which caused 9 safe stops when the hub was slow. Can it check less often, safely?
+- The lane re-checks its permission with about 6 Inbox hub calls per pair. When the hub was slow, 17 of those checks failed safely and both copies stayed. Can it check less often, safely?
+- Late in the evening the hub was busy enough that recall's own permission check started missing its deadline too. Should lanes share one short-lived proof of permission instead of each asking the hub?
 
 ## Lab book log
 
 - `review` Three independent code reviews, then a rehearsal on a copy; every stage undone byte for byte.
 - `06:22` Live plan made over 117,506 live memories.
-- `07:05` Cost window opens; $0.176 over 6,173 JEV calls from here.
-- `09:36` 3,133 retired, 2.7% of the plan; near-duplicates paused at the day's JEV budget.
+- `07:05` Cost window opens.
+- `09:36` 3,133 retired, 2.7% of the plan; near-duplicates paused at the day's JEV budget after 6,173 calls ($0.176).
 - `16:09` Rolling budget raised to $1.00, with an undo; the remaining near-duplicate pairs resumed.
+- `18:47` A slow hub stopped the wave safely; it resumed 20 seconds later.
+- `20:03` Finished: every remaining pair judged; 3,618 retired in total, 3.1% of the plan; 9,584 JEV calls ($0.281).
+- `20:05` Final checks: 300 recall samples returned no retired copy; no memory changed except its marker and labels.
