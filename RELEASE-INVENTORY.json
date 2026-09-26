@@ -1668,9 +1668,9 @@
       "sha256": "d01f229fb24e1512d54f961080c0388598a37f734a214539f88e6d93c1b62029"
     },
     {
-      "bytes": 8482,
+      "bytes": 9494,
       "path": "site/assets/stardate/2026-268-deep-dream-day-one.html",
-      "sha256": "f202b778954af39a4349da60f6df2bac6cb6b00ea2ff3ae9eced096f813cccf7"
+      "sha256": "8fff60c9222f8c940ff7a1e9aee2128462835303fdfc71e50e4b3cf885a6644e"
     },
     {
       "bytes": 8257,
@@ -1678,9 +1678,9 @@
       "sha256": "815a2875a1e2f60949794567d4939fa7d0c6347c0cb046df58cb37a576911bad"
     },
     {
-      "bytes": 7869,
+      "bytes": 7889,
       "path": "site/assets/stardate/2026-268-incoming-filter-on.html",
-      "sha256": "a38df021e28c871e04bcae2c67effaa54ceb2625d64d48ba8885c7088acdecec"
+      "sha256": "80904aa1107e2a79bdf3a0b3944923247d3da61224efc41396d394374ce124eb"
     },
     {
       "bytes": 7710,
@@ -1688,19 +1688,19 @@
       "sha256": "b271aabcdbc089898b8f4984dc5f9f44f40e94927bd3c7ee8e73a667749b7e92"
     },
     {
-      "bytes": 7932,
+      "bytes": 8048,
       "path": "site/assets/stardate/2026-268-marker-chains.html",
-      "sha256": "cfd28bcaca87d62731574c113dc27264c3a9e365ea64415584a2f5b5af40ce24"
+      "sha256": "eba4bc5465853ea9c86d88702d3a2172ba78c91b298f7139f6d931b02eef0d02"
     },
     {
-      "bytes": 8092,
+      "bytes": 8111,
       "path": "site/assets/stardate/2026-268-memory-reach.html",
-      "sha256": "70e8a9b1b154b5c71441c074f242572e8001ca7c72220fb86d1b18284a91ed90"
+      "sha256": "e7940ff02995ece6c81f17c9c4ac1c1272cb04c8f5d3afe351fd916eee0a3d82"
     },
     {
-      "bytes": 8374,
+      "bytes": 8400,
       "path": "site/assets/stardate/index.html",
-      "sha256": "51bc251d6a0f23b2d309dac650b4b6a4b91057f6162f82f5ec2138e7d93ca416"
+      "sha256": "c451ac767c354e5d70580baaddb73935f454ea16e96e796e705a047273ddff4f"
     },
     {
       "bytes": 7046,
@@ -1753,9 +1753,9 @@
       "sha256": "0ef3fd6b85ade71ccb594334f5f3e4a41000f2d9167c380b95b9248d73297d2c"
     },
     {
-      "bytes": 91082,
+      "bytes": 91108,
       "path": "site/index.html",
-      "sha256": "59ddda9bdaeed52e7671f3a10eeffe88abfdb37986db1b4147440b6b2ff7f007"
+      "sha256": "ec38faf6213bf6619bb68b236e02a097d30644ca1b4e54c02ee36cc8cc96dd23"
     },
     {
       "bytes": 2877,
@@ -1783,9 +1783,9 @@
       "sha256": "f5c6432059172bba4bed215be597394e62fce5b2cc2f35f9a4baa60caaad94e8"
     },
     {
-      "bytes": 3839,
+      "bytes": 4800,
       "path": "site/stardate/entries/2026-268-deep-dream-day-one.md",
-      "sha256": "dab39f0dfc2c07f372aa58232f78817d7753b15e634ce9114f89b932b5ba339a"
+      "sha256": "2e03c03e93cf7c7785552103a49f8967f4806bae39d3b09a38b311bbde331b7a"
     },
     {
       "bytes": 3522,
@@ -1983,7 +1983,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "772c13116dd673c24a24aeee691bcf57ee60891a7b75da8310f286d5c7a28a58",
+  "inventory_sha256": "23769a5f267e127828ca7376832656052cd92035ab9af3b2537bd13d00cce849",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 87981209
+  "total_bytes": 87983389
 }
