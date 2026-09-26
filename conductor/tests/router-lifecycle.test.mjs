@@ -223,7 +223,7 @@ test('aged terminal receipts move to archive and their durable intent follows th
   assert.equal(inspected.completionVerified, true);
 });
 
-test('dispatch lock preserves a live holder and recovers dead, aged, and zero-byte locks by rename', async (t) => {
+test('dispatch lock preserves live and young empty locks and recovers only stale owners', async (t) => {
   const { config } = fixture(t);
   const lockPath = path.join(config.statePath, 'dispatch.lock');
   fs.mkdirSync(config.statePath, { recursive: true, mode: 0o700 });
@@ -236,10 +236,18 @@ test('dispatch lock preserves a live holder and recovers dead, aged, and zero-by
   assert.equal(fs.readFileSync(lockPath, 'utf8'), `${process.pid}\n`);
   assert.deepEqual(fs.readdirSync(config.statePath).filter((name) => name.startsWith('dispatch.lock.stale-')), []);
 
+  fs.writeFileSync(lockPath, '', { mode: 0o600 });
+  fs.utimesSync(lockPath, new Date(NOW), new Date(NOW));
+  await assert.rejects(router.acquireDispatchLock(config.statePath, 20, {
+    nowMs: NOW, processAlive: () => false,
+  }), /dispatch lock busy/);
+  assert.equal(fs.readFileSync(lockPath, 'utf8'), '');
+  assert.deepEqual(fs.readdirSync(config.statePath).filter((name) => name.startsWith('dispatch.lock.stale-')), []);
+
   for (const [name, body, aged, processAlive] of [
     ['dead', '999999999\n', false, () => false],
     ['aged', 'not-a-pid\n', true, () => false],
-    ['zero', '', false, () => false],
+    ['zero', '', true, () => false],
   ]) {
     fs.rmSync(lockPath, { force: true });
     fs.writeFileSync(lockPath, body, { mode: 0o600 });
@@ -251,12 +259,122 @@ test('dispatch lock preserves a live holder and recovers dead, aged, and zero-by
       nowMs: NOW, processAlive,
     });
     const stale = fs.readdirSync(config.statePath)
-      .filter((entry) => entry.startsWith(`dispatch.lock.stale-${new Date(NOW).toISOString()}`));
+      .filter((entry) => entry.startsWith('dispatch.lock.stale-'));
     assert.ok(stale.length >= 1, `${name} lock must be retained under a stale name`);
     assert.equal(fs.existsSync(lockPath), true);
     await release();
     assert.equal(fs.existsSync(lockPath), false);
   }
+});
+
+test('overlapping lock acquirers cannot both win while the first lock body is empty', async (t) => {
+  const { config } = fixture(t);
+  const lockPath = path.join(config.statePath, 'dispatch.lock');
+  fs.mkdirSync(config.statePath, { recursive: true, mode: 0o700 });
+  const originalOpen = fs.promises.open;
+  let intercepted = false;
+  let announceOpen;
+  let resumeWrite;
+  const opened = new Promise((resolve) => { announceOpen = resolve; });
+  const resume = new Promise((resolve) => { resumeWrite = resolve; });
+  fs.promises.open = async (...args) => {
+    const handle = await originalOpen(...args);
+    if (!intercepted && args[0] === lockPath && args[1] === 'wx') {
+      intercepted = true;
+      const originalWrite = handle.writeFile.bind(handle);
+      handle.writeFile = async (...writeArgs) => {
+        announceOpen();
+        await resume;
+        return originalWrite(...writeArgs);
+      };
+    }
+    return handle;
+  };
+  t.after(() => {
+    fs.promises.open = originalOpen;
+    resumeWrite();
+  });
+
+  const settle = (promise) => promise.then(
+    (release) => ({ acquired: true, release }),
+    (error) => ({ acquired: false, error }),
+  );
+  const first = settle(router.acquireDispatchLock(config.statePath, 250, { nowMs: NOW }));
+  await opened;
+  fs.utimesSync(lockPath, new Date(NOW), new Date(NOW));
+  const second = settle(router.acquireDispatchLock(config.statePath, 100, { nowMs: NOW }));
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  resumeWrite();
+  const outcomes = await Promise.all([first, second]);
+  try {
+    assert.equal(outcomes.filter((outcome) => outcome.acquired).length, 1);
+    assert.match(outcomes.find((outcome) => !outcome.acquired).error.message, /dispatch lock busy/);
+  } finally {
+    await Promise.allSettled(outcomes.filter((outcome) => outcome.acquired)
+      .map((outcome) => outcome.release()));
+  }
+});
+
+test('dispatch lock recovers a recycled live pid with a different process start time', async (t) => {
+  const { config } = fixture(t);
+  const lockPath = path.join(config.statePath, 'dispatch.lock');
+  fs.mkdirSync(config.statePath, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(lockPath, `${JSON.stringify({
+    schemaVersion: 1,
+    lockId: 'previous-process',
+    pid: process.pid,
+    processStartTime: 'old-process-start',
+    acquiredAt: new Date(NOW).toISOString(),
+  })}\n`, { mode: 0o600 });
+  let release;
+  await assert.doesNotReject(async () => {
+    release = await router.acquireDispatchLock(config.statePath, 100, {
+      nowMs: NOW,
+      processAlive: () => true,
+      processStartTime: async () => 'current-process-start',
+    });
+  });
+  const stale = fs.readdirSync(config.statePath)
+    .find((entry) => entry.startsWith('dispatch.lock.stale-'));
+  assert.ok(stale);
+  assert.equal(readJson(path.join(config.statePath, stale)).lockId, 'previous-process');
+  assert.equal(readJson(lockPath).processStartTime, 'current-process-start');
+  await release();
+});
+
+test('stale recovery never retires a replacement lock inode', async (t) => {
+  const { config } = fixture(t);
+  const lockPath = path.join(config.statePath, 'dispatch.lock');
+  fs.mkdirSync(config.statePath, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(lockPath, `${JSON.stringify({ pid: 999999999, processStartTime: 'dead-start' })}\n`, {
+    mode: 0o600,
+  });
+  const originalLink = fs.promises.link;
+  let swapped = false;
+  fs.promises.link = async (source, destination) => {
+    if (!swapped && source === lockPath) {
+      swapped = true;
+      await fs.promises.rename(lockPath, `${lockPath}.before-swap`);
+      await fs.promises.writeFile(lockPath, `${JSON.stringify({
+        schemaVersion: 1,
+        lockId: 'replacement',
+        pid: process.pid,
+        processStartTime: 'current-process-start',
+      })}\n`, { mode: 0o600, flag: 'wx' });
+    }
+    return originalLink(source, destination);
+  };
+  t.after(() => { fs.promises.link = originalLink; });
+
+  await assert.rejects(router.acquireDispatchLock(config.statePath, 70, {
+    nowMs: NOW,
+    processAlive: (pid) => pid === process.pid,
+    processStartTime: async () => 'current-process-start',
+  }), /dispatch lock busy/);
+  assert.equal(readJson(lockPath).lockId, 'replacement');
+  assert.deepEqual(fs.readdirSync(config.statePath).filter((entry) => (
+    entry.startsWith('dispatch.lock.stale-')
+  )), []);
 });
 
 test('native conductor calls send each lane profile token and tolerate a missing token', async (t) => {

@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import crypto from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { constants as fsConstants, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -442,55 +442,189 @@ function processIsAlive(pid) {
   }
 }
 
-function lockPid(body) {
+async function readProcessStartTime(pid) {
+  if (!Number.isInteger(pid) || pid < 1) return null;
+  try {
+    if (process.platform === 'linux') {
+      const [stat, bootIdBody] = await Promise.all([
+        fs.readFile(`/proc/${pid}/stat`, 'utf8'),
+        fs.readFile('/proc/sys/kernel/random/boot_id', 'utf8'),
+      ]);
+      const commandEnd = stat.lastIndexOf(')');
+      if (commandEnd < 0) return null;
+      // Fields following the command start at field 3; process start time is field 22.
+      const fields = stat.slice(commandEnd + 1).trim().split(/\s+/);
+      const startTime = fields[19];
+      const bootId = bootIdBody.trim().toLowerCase();
+      return /^\d+$/.test(startTime ?? '') && /^[0-9a-f-]+$/.test(bootId)
+        ? `linux-proc:${bootId}:${startTime}`
+        : null;
+    }
+    if (process.platform === 'darwin') {
+      const { stdout } = await execFile('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], {
+        encoding: 'utf8',
+        env: { LC_ALL: 'C', TZ: 'UTC' },
+        maxBuffer: 16 * 1024,
+      });
+      const startTime = stdout.trim().replace(/\s+/g, ' ');
+      return startTime ? `darwin-ps:${startTime}` : null;
+    }
+  } catch {
+    // A vanished process or unavailable native reading is not identity evidence.
+  }
+  return null;
+}
+
+function lockOwner(body) {
   const trimmed = body.trim();
   if (!trimmed) return null;
-  if (/^[1-9][0-9]*$/.test(trimmed)) return Number(trimmed);
+  if (/^[1-9][0-9]*$/.test(trimmed)) {
+    return { pid: Number(trimmed), processStartTime: null };
+  }
   try {
     const value = JSON.parse(trimmed);
-    return Number.isInteger(value?.pid) && value.pid > 0 ? value.pid : null;
+    if (!Number.isInteger(value?.pid) || value.pid < 1) return null;
+    const processStartTime = typeof value.processStartTime === 'string'
+      && value.processStartTime.trim()
+      ? value.processStartTime.trim()
+      : null;
+    return { pid: value.pid, processStartTime };
   } catch {
     return null;
   }
 }
 
-async function recoverStaleLock(lockPath, options = {}) {
-  let stat;
-  let body;
+const LOCK_READ_FLAGS = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+
+async function readLockSnapshot(lockPath) {
+  let handle;
   try {
-    stat = await fs.lstat(lockPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0
-        || stat.size > 4096) return false;
-    body = await fs.readFile(lockPath, 'utf8');
+    handle = await fs.open(lockPath, LOCK_READ_FLAGS);
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || (before.mode & 0o077n) !== 0n || before.size > 4096n) {
+      return { valid: false, stat: before };
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    const unchanged = before.dev === after.dev
+      && before.ino === after.ino
+      && before.size === after.size
+      && before.mtimeNs === after.mtimeNs
+      && before.ctimeNs === after.ctimeNs
+      && BigInt(bytes.length) === after.size;
+    if (!unchanged) return { valid: false, stat: after };
+    const body = bytes.toString('utf8');
+    return {
+      valid: true,
+      stat: after,
+      body: bytes,
+      owner: lockOwner(body),
+      mtimeMs: Number(after.mtimeNs / 1_000_000n),
+    };
   } catch (error) {
-    if (error.code === 'ENOENT') return true;
+    if (error.code === 'ENOENT') return null;
+    if (error.code === 'ELOOP') return { valid: false, stat: null };
     throw error;
+  } finally {
+    await handle?.close();
   }
-  const pid = lockPid(body);
-  const alive = pid === null ? false : (options.processAlive ?? processIsAlive)(pid);
-  if (alive) return false;
+}
+
+function sameLockInode(left, right) {
+  return left?.stat && right?.stat
+    && left.stat.dev === right.stat.dev
+    && left.stat.ino === right.stat.ino;
+}
+
+function sameLockOwner(left, right) {
+  return left?.valid === true
+    && right?.valid === true
+    && sameLockInode(left, right)
+    && left.stat.mtimeNs === right.stat.mtimeNs
+    && left.body.equals(right.body);
+}
+
+async function lockIsStale(snapshot, options, nowMs) {
+  if (snapshot?.valid !== true) return false;
+  if (snapshot.owner === null) return nowMs - snapshot.mtimeMs > STALE_LOCK_AGE_MS;
+  const alive = await (options.processAlive ?? processIsAlive)(snapshot.owner.pid);
+  if (!alive) return true;
+  if (snapshot.owner.processStartTime === null) return false;
+  const processStartTime = await (options.processStartTime ?? readProcessStartTime)(snapshot.owner.pid);
+  const normalizedStartTime = typeof processStartTime === 'string' ? processStartTime.trim() : '';
+  return normalizedStartTime !== '' && normalizedStartTime !== snapshot.owner.processStartTime;
+}
+
+async function recoverStaleLock(lockPath, options = {}) {
+  const observed = await readLockSnapshot(lockPath);
+  if (observed === null) return true;
   const nowMs = options.nowMs ?? Date.now();
-  const stale = body.length === 0 || pid !== null || nowMs - stat.mtimeMs > STALE_LOCK_AGE_MS;
-  if (!stale) return false;
-  const base = `${lockPath}.stale-${new Date(nowMs).toISOString()}`;
-  let stalePath = base;
-  for (let suffix = 1; ; suffix += 1) {
+  if (!await lockIsStale(observed, options, nowMs)) return false;
+
+  // The inode modification time makes the recovery name stable across contenders,
+  // so only one hard link can elect a reaper for this exact lock.
+  const base = `${lockPath}.stale-${new Date(observed.mtimeMs).toISOString()}`;
+  let stalePath;
+  for (let suffix = 0; ; suffix += 1) {
+    const candidate = suffix === 0 ? base : `${base}-${suffix}`;
     try {
-      await fs.access(stalePath);
-      stalePath = `${base}-${suffix}`;
+      await fs.link(lockPath, candidate);
+      stalePath = candidate;
+      break;
     } catch (error) {
-      if (error.code === 'ENOENT') break;
+      if (error.code === 'ENOENT') return true;
+      if (error.code === 'EEXIST') {
+        const existing = await readLockSnapshot(candidate);
+        if (sameLockInode(existing, observed)) return false;
+        continue;
+      }
       throw error;
     }
   }
-  await fs.rename(lockPath, stalePath);
-  return true;
+
+  const removeRecoveryLink = async () => {
+    await fs.unlink(stalePath).catch((error) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+  };
+  const [linked, current] = await Promise.all([
+    readLockSnapshot(stalePath),
+    readLockSnapshot(lockPath),
+  ]);
+  const safeToRetire = sameLockOwner(linked, observed)
+    && sameLockOwner(current, observed)
+    && await lockIsStale(current, options, nowMs);
+  if (!safeToRetire) {
+    await removeRecoveryLink();
+    return false;
+  }
+
+  // Re-read immediately before retirement so a replacement inode or owner is
+  // never removed based on an earlier pathname observation.
+  const finalCurrent = await readLockSnapshot(lockPath);
+  if (!sameLockOwner(finalCurrent, observed)
+      || !await lockIsStale(finalCurrent, options, nowMs)) {
+    await removeRecoveryLink();
+    return false;
+  }
+  try {
+    await fs.unlink(lockPath);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return true;
+    await removeRecoveryLink();
+    throw error;
+  }
 }
 
 export async function acquireDispatchLock(statePath, timeoutMs, options = {}) {
   await ensurePrivateDirectory(statePath);
   const lockPath = path.join(statePath, 'dispatch.lock');
   const lockId = crypto.randomUUID();
+  const processStartTime = await (options.processStartTime ?? readProcessStartTime)(process.pid);
+  if (typeof processStartTime !== 'string' || !processStartTime.trim()) {
+    throw new Error('cannot read this process start time for dispatch lock ownership');
+  }
   const deadline = Date.now() + timeoutMs;
   let recoveryAttempted = false;
   while (true) {
@@ -501,6 +635,7 @@ export async function acquireDispatchLock(statePath, timeoutMs, options = {}) {
           schemaVersion: 1,
           lockId,
           pid: process.pid,
+          processStartTime: processStartTime.trim(),
           acquiredAt: new Date(options.nowMs ?? Date.now()).toISOString(),
         }, null, 2)}\n`);
         await handle.sync();
