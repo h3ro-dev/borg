@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 400,
+  "file_count": 404,
   "files": [
     {
       "bytes": 1914,
@@ -808,9 +808,9 @@
       "sha256": "e59dbdbab95ab3749451d539f8bca3462af6bb79ff6924fec031bc15acefbb77"
     },
     {
-      "bytes": 6629,
+      "bytes": 11367,
       "path": "docs/BLUEPRINT.md",
-      "sha256": "264355fa8af08b6c6f529a35e497da9da746540d11457d2fdccf95fffe27aa98"
+      "sha256": "7315efe823b1dc7a3efaffd494c630a7b94b620c15faf87d7d56d07649108e1f"
     },
     {
       "bytes": 14235,
@@ -1008,9 +1008,9 @@
       "sha256": "4a9edbc2d7704f8d88eb4d797c7d50f411533152cfb44da6b6eae45acc43fe9e"
     },
     {
-      "bytes": 9714,
+      "bytes": 11587,
       "path": "installer/cli.py",
-      "sha256": "cebd7eacfcb53efe76b666bef26beda8a789afb80dc1f2e6f3b53d170056743f"
+      "sha256": "eb784acd24ac37af252c6212313edc2496eae21a97d4ac1bbb5a85e7f2fc5431"
     },
     {
       "bytes": 10302,
@@ -1048,9 +1048,9 @@
       "sha256": "b8573095ab48abf8bede9582452e598afd7118078f6a571d5ee86832f58a7826"
     },
     {
-      "bytes": 19270,
+      "bytes": 20895,
       "path": "installer/health.py",
-      "sha256": "88b70d35ff8e029a90c0ad70a80871a8aa51aff2098e56acdea7213ca9670c2e"
+      "sha256": "f0433a51c99ccf7ceb848ce063945998ccc1014dcafe59373cc4f1a493a9c040"
     },
     {
       "bytes": 14377,
@@ -1088,14 +1088,19 @@
       "sha256": "0d34acd4457a0de2457a2e0b1ce9d29f31e1a4d9dc2db69e358ccae79f9da79c"
     },
     {
-      "bytes": 20705,
+      "bytes": 22256,
       "path": "installer/onboarding.py",
-      "sha256": "02860640403068e6184562161f8e452cbce31746371697b461be16a371edd281"
+      "sha256": "b8bae6cd2e3f971d40c95410d54866fe75d08aafa209fdc75bfd643417271468"
     },
     {
       "bytes": 28468,
       "path": "installer/release_guard.py",
       "sha256": "ee32045bf09da38d41f85eb175e9073b04da6f1a388f983c8f3ae81b8bd16684"
+    },
+    {
+      "bytes": 32347,
+      "path": "installer/remote_memory.py",
+      "sha256": "ffa6c816ef476863523c96223a83d246b5bda0e92ec9e9cb311fecdd80df9832"
     },
     {
       "bytes": 352,
@@ -1168,6 +1173,11 @@
       "sha256": "846c401865704f0cd8a3b62971a957ed12067059db33ea05b09103783d074dc2"
     },
     {
+      "bytes": 45233,
+      "path": "installer/test_remote_memory.py",
+      "sha256": "451874a5d6147a64bbee7dd4630a89b0e3654107b648e1f62330811279ecec93"
+    },
+    {
       "bytes": 1547,
       "path": "installer/test_service_limits.py",
       "sha256": "387ae7d5523e977c9af1e3ae56936c194887661b0df4ad9e377dcf5337bcfeef"
@@ -1186,6 +1196,11 @@
       "bytes": 4557,
       "path": "installer/web.py",
       "sha256": "b5605179c9629848b535aff4a22e840bff7d462443ba28435b0b469dfc64a925"
+    },
+    {
+      "bytes": 3316,
+      "path": "memory/bin/borg_client_config.py",
+      "sha256": "b3fb3319aa32d870475b3cd3716f3749babebe7aad887f7330e792e9b0103826"
     },
     {
       "bytes": 8775,
@@ -1263,14 +1278,14 @@
       "sha256": "26d85a5bcec6c6eeb657cf7402e0a899f548f4a81627a3acc54b7cd018f8f51c"
     },
     {
-      "bytes": 45554,
+      "bytes": 48738,
       "path": "memory/bin/mem0-fleet-configure",
-      "sha256": "6c837bfb9a8288d3ab242971313a2a6b3b629d72db52b4c010608bf72fd85b65"
+      "sha256": "73b237a5126db3e5ffee195806714bd7eb9467b3db479377407ddb7e1d87f1d8"
     },
     {
-      "bytes": 123922,
+      "bytes": 124225,
       "path": "memory/bin/mem0-fleet-hook",
-      "sha256": "dd950dd7dfeb9fc5d9b206a8655b41017d8e721031dc7610a3750c12d1433b59"
+      "sha256": "b005e1022ca34dedaea5ac58c4974e7a7f9d58fb5a1bb22971ed7cb85de3bb3b"
     },
     {
       "bytes": 22952,
@@ -1513,6 +1528,11 @@
       "sha256": "ff928f3e63f28f3fe668bd499172ad20cc8cea71a884a0ae76cf87c1f083ecec"
     },
     {
+      "bytes": 6792,
+      "path": "memory/tests/test_borg_client_config.py",
+      "sha256": "57d0d87bc6adf7b4f90cb19a84d7d393c95f2a363bc811f0a3cf0bfbd0714474"
+    },
+    {
       "bytes": 5921,
       "path": "memory/tests/test_borg_config.py",
       "sha256": "2a2fdb70c86ca2585e3b1b717eb4680030eb5f57b16ad30dbd43dbb6f11eae84"
@@ -1533,9 +1553,9 @@
       "sha256": "2c299e59ec5cef6b77475fb7b345a5288f6f9670af8400cc3b32c64a3288a643"
     },
     {
-      "bytes": 6110,
+      "bytes": 6898,
       "path": "memory/tests/test_mem0_fleet_hook.py",
-      "sha256": "b82f9fa200c6de9ad9e973d54046c7d6d21c357f721877ee9c0fe631f6e0e7f0"
+      "sha256": "a33fbd0e23931651f71e2375265eeae23bfc009db83d1f5a4c9c6b5eacee31dc"
     },
     {
       "bytes": 6709,
@@ -2003,7 +2023,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "927bc4b7fc93fcc354eea91f24337b98d289d616292f38fab72c87a95eb85cac",
+  "inventory_sha256": "dcf01dcb0b8747ad96d829d624ce98c9ed9a9c7adb0e5a0f42f0f0cf89237d5e",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88047043
+  "total_bytes": 88148793
 }

@@ -263,9 +263,23 @@ def status(doc: dict) -> dict:
                 "connector": "authenticated", "inbox": "authenticated", "models": "digest_verified",
                 "capture_hooks": "registered_and_trusted", "brain": "cycle_verified", "watchdog": "running",
                 "graph_llm": "identity_verified"}
+    remote_opt_in = False
     if "conductor" in enabled and not blueprint.full(doc):
-        components["codex_client"] = tools_client_health(doc)
-        expected["codex_client"] = "configured_without_capture"
+        from installer import remote_memory
+        binding = root / "mem0/data/remote-client.json"
+        remote_opt_in = binding.exists() or binding.is_symlink()
+        remote = None
+        if remote_opt_in:
+            try:
+                remote = remote_memory.check(doc)
+                components["remote_memory_client"] = {
+                    key: remote[key] for key in ("state", "route_authenticated", "native_trust_verified", "lifecycle_e2e")}
+            except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+                components["remote_memory_client"] = {"state": "INVALID_BINDING",
+                    "route_authenticated": False, "native_trust_verified": False,
+                    "lifecycle_e2e": "NOT_VERIFIED"}
+        components["codex_client"] = tools_client_health(doc, remote=remote)
+        expected["codex_client"] = "configured_with_remote_capture" if remote_opt_in else "configured_without_capture"
     if doc.get("blueprint") and blueprint.selected(doc, "beads"):
         try:
             probe = subprocess.run([str(root / "bin/bd"), "list", "--limit", "1", "--json"], env=env,
@@ -291,14 +305,17 @@ def status(doc: dict) -> dict:
                        if item["id"] not in {"codex", "inbox", "beads"}]
         result["selected_setup"] = owner_setup
     result["ready"] = (result["local_services_ready"] and not owner_setup
+        and (not remote_opt_in or components["remote_memory_client"]["state"] == "VERIFIED")
         and ("conductor" not in enabled or components["provider_login"]["state"] == "authenticated_and_pinned"))
-    result["state"] = ("ready" if result["ready"] else "selected_setup_required" if result["local_services_ready"] and owner_setup
+    result["state"] = ("ready" if result["ready"] else "remote_memory_setup_required" if result["local_services_ready"]
+                       and remote_opt_in and components["remote_memory_client"]["state"] != "VERIFIED" else
+                       "selected_setup_required" if result["local_services_ready"] and owner_setup
                        else "provider_sign_in_required" if result["local_services_ready"] else "setup_incomplete")
     return result
 
 
-def tools_client_health(doc: dict) -> dict:
-    """Check live isolated Codex configuration; tools nodes must have no memory hooks."""
+def tools_client_health(doc: dict, *, remote: dict | None = None) -> dict:
+    """Check the live isolated client, including only explicitly staged remote capture."""
     root = Path(doc["home"])
     try:
         payload = {"method": "config/read", "params": {"includeLayers": True}, "timeoutMs": 8000}
@@ -315,6 +332,13 @@ def tools_client_health(doc: dict) -> dict:
         stale = any(" hook --home " in hook.get("command", "")
                     for groups in client.get("hooks", {}).values() if isinstance(groups, list)
                     for group in groups for hook in group.get("hooks", []))
-        return {"state": "configured_without_capture" if matched and not stale else "incomplete"}
+        fleet = any("mem0-fleet-hook" in hook.get("command", "")
+                    for groups in client.get("hooks", {}).values() if isinstance(groups, list)
+                    for group in groups for hook in group.get("hooks", []))
+        if not matched or stale:
+            return {"state": "incomplete"}
+        if remote is not None:
+            return {"state": "configured_with_remote_capture" if remote.get("native_trust_verified") is True else "incomplete"}
+        return {"state": "incomplete" if fleet else "configured_without_capture"}
     except (OSError, ValueError, KeyError, TypeError):
         return {"state": "unavailable"}

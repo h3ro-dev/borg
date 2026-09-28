@@ -153,6 +153,23 @@ def plan(doc: dict) -> dict:
          command("doctor", purpose="Verify native hook registration and trust"), install_command],
         ["The receipt describes an earlier configuration action, not today's hook or MCP readiness.",
          "Installer client setup targets only conductors/primary/profile, never a shared global profile."]))
+    if doc.get("blueprint") and not blueprint.full(doc) and blueprint.selected(doc, "codex"):
+        binding_path = root / "mem0/data/remote-client.json"
+        if binding_path.exists() or binding_path.is_symlink():
+            binding, binding_read = _metadata(root, "mem0/data/remote-client.json")
+            bound = (binding_read == "observed" and binding.get("schema") == "borg-memory-client/v1"
+                     and binding.get("home") == str(root) and binding.get("owner") == doc["owner"]
+                     and binding.get("instance_id") == doc["instance_id"]
+                     and binding.get("profile") == profile)
+            steps.append(_step("remote-memory-client", "Verify the opt-in remote memory lifecycle client",
+                "staged" if bound else "incomplete",
+                {"binding": binding_read, "instance_matches": bound, "lifecycle_e2e": "NOT_VERIFIED"},
+                ["Exact scoped Hub grant, authenticated route, four trusted native hooks, and a real capture/recall/replay canary"],
+                [command("memory-client", "check", purpose="Verify the scoped route and native trusted hooks"),
+                 command("memory-client", "enable", purpose="Enable four hooks through the native Codex CAS configurator",
+                         requires=["A matching hash-only Hub grant and native profile write approval"])],
+                ["A staged token digest never proves the Hub grant or route.",
+                 "Trusted configuration does not prove conversation capture, recall or replay."]))
     native_commands = []
     runtime = conductor.get("runtime", {})
     node = runtime.get("nodeBin") if isinstance(runtime, dict) else None
