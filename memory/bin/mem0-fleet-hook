@@ -47,6 +47,12 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+# Native hooks may run directly from an immutable tools/releases/<revision>
+# tree, outside the installer CLI's -B process.  The sibling client config
+# and selector are loaded below with importlib; never create __pycache__ in
+# that reviewed release during an ordinary capture or recall hook.
+sys.dont_write_bytecode = True
+
 CLIENT_CONFIG = importlib.machinery.SourceFileLoader(
     "borg_client_config_fleet_hook", str(Path(__file__).resolve().parent / "borg_client_config.py")
 ).load_module()

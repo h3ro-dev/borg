@@ -1283,9 +1283,9 @@
       "sha256": "73b237a5126db3e5ffee195806714bd7eb9467b3db479377407ddb7e1d87f1d8"
     },
     {
-      "bytes": 123899,
+      "bytes": 124225,
       "path": "memory/bin/mem0-fleet-hook",
-      "sha256": "85b2f3688e32a2f42ea1df6e4afbd64f76d71f5db6b02571faf2318195a6918d"
+      "sha256": "b005e1022ca34dedaea5ac58c4974e7a7f9d58fb5a1bb22971ed7cb85de3bb3b"
     },
     {
       "bytes": 22952,
@@ -1528,9 +1528,9 @@
       "sha256": "ff928f3e63f28f3fe668bd499172ad20cc8cea71a884a0ae76cf87c1f083ecec"
     },
     {
-      "bytes": 3697,
+      "bytes": 5801,
       "path": "memory/tests/test_borg_client_config.py",
-      "sha256": "91fefd794d8d3dfa01c8a708e95717ad47bd4fa6850a050a3ce0aac6d100199e"
+      "sha256": "fe98472396725fdcc256b54a783de896dfa35dbb626744cb5a564ee667254a3c"
     },
     {
       "bytes": 5921,
@@ -2023,7 +2023,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "649a86407326566c03af03cb724442c3b1bd25687542807bba5f70b5ab33a684",
+  "inventory_sha256": "f37b7365bf0fa5fb1cf67f9586ae3f463ba2c4ecaf8dfa15e4b4d4c2bd07c053",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88119325
+  "total_bytes": 88121755
 }

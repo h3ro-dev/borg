@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,41 @@ class ClientConfigSubprocessTests(unittest.TestCase):
         who = self.call("mem0-mcp-curl", "memory_whoami", "{}", env=environment)
         self.assertEqual(who.returncode, 0, who.stderr)
         self.assertEqual(json.loads(who.stdout)["principal"], "bounded-test")
+
+    def test_native_hook_and_curl_leave_reviewed_release_without_bytecode(self):
+        """Direct shebang entry points do not inherit the installer's -B flag."""
+        source_bin = self.home.parent / "reviewed-release" / "memory" / "bin"
+        source_bin.mkdir(parents=True)
+        for name in ("borg_client_config.py", "memory_selection.py",
+                     "mem0-fleet-hook", "mem0-mcp-curl"):
+            shutil.copy2(BIN / name, source_bin / name)
+        environment = dict(self.env)
+        environment.pop("PYTHONDONTWRITEBYTECODE", None)
+        environment.pop("PYTHONPYCACHEPREFIX", None)
+        environment["MEM0_FLEET_TEST_SEARCH_JSON"] = "[]"
+        payload = {"session_id": "direct-hook-test", "turn_id": "turn-1",
+                   "prompt": "What is the Alder paper lantern color?", "cwd": str(self.home)}
+        start = subprocess.run(
+            [sys.executable, str(source_bin / "mem0-fleet-hook"), "start"],
+            input=json.dumps(payload), env=environment, capture_output=True,
+            text=True, timeout=20, check=False,
+        )
+        self.assertEqual(start.returncode, 0, start.stderr)
+        log = self.home / "mem0/data/fleet-hook.log"
+        events = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertTrue(any(row.get("event") == "start" and row.get("status") == "PASS_EMPTY"
+                            for row in events), events)
+        environment["MEM0_FLEET_TEST_CAPTURE_JSON"] = json.dumps({
+            "principal": "bounded-test", "allowed_scopes": ["personal:james"],
+            "write_scope": "personal:james"})
+        who = subprocess.run(
+            [sys.executable, str(source_bin / "mem0-mcp-curl"), "memory_whoami", "{}"],
+            env=environment, capture_output=True, text=True, timeout=20, check=False,
+        )
+        self.assertEqual(who.returncode, 0, who.stderr)
+        self.assertEqual(json.loads(who.stdout)["principal"], "bounded-test")
+        self.assertEqual(list(source_bin.rglob("__pycache__")), [])
+        self.assertEqual(list(source_bin.rglob("*.pyc")), [])
 
     def test_wrong_owner_home_base_or_symlink_refuses_before_client_load(self):
         cases = []
