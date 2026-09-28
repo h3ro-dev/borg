@@ -808,9 +808,9 @@
       "sha256": "e59dbdbab95ab3749451d539f8bca3462af6bb79ff6924fec031bc15acefbb77"
     },
     {
-      "bytes": 10417,
+      "bytes": 11166,
       "path": "docs/BLUEPRINT.md",
-      "sha256": "2849f1fc711105fd21eb4f583af558b95fd15a1b66093b3401487c0f218d8b29"
+      "sha256": "453a51fc58f48571aa23013909fb13577a7bf19c4abf9aec2b7cd5a366a0d787"
     },
     {
       "bytes": 14235,
@@ -1098,9 +1098,9 @@
       "sha256": "ee32045bf09da38d41f85eb175e9073b04da6f1a388f983c8f3ae81b8bd16684"
     },
     {
-      "bytes": 21674,
+      "bytes": 32169,
       "path": "installer/remote_memory.py",
-      "sha256": "ac1eaaa2731d82bb0dc8e12e7df8c0bb3a23dc9ccb7b044cc0522f737330c74f"
+      "sha256": "5768e7ee85041ef18a9533fddd3105d10de69f2913c517470c0f93b9aff0a8a4"
     },
     {
       "bytes": 352,
@@ -1173,9 +1173,9 @@
       "sha256": "846c401865704f0cd8a3b62971a957ed12067059db33ea05b09103783d074dc2"
     },
     {
-      "bytes": 30809,
+      "bytes": 43520,
       "path": "installer/test_remote_memory.py",
-      "sha256": "b4d5dcc55ca3103e293041b8a73c7428187463c8174fa4925e4890dc7a74bc89"
+      "sha256": "092706418ef908f343cc6fbfe34f2e3b0b9b2105e2af823b92be457a2a4d11aa"
     },
     {
       "bytes": 1547,
@@ -2023,7 +2023,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "f37b7365bf0fa5fb1cf67f9586ae3f463ba2c4ecaf8dfa15e4b4d4c2bd07c053",
+  "inventory_sha256": "d868cbc45786a5898c353d174c415242c2554703818985a644eb12986e76173e",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88121755
+  "total_bytes": 88145710
 }

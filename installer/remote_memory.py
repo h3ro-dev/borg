@@ -10,6 +10,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
+import plistlib
+import pwd
 import re
 import secrets
 import stat
@@ -255,9 +258,11 @@ def _read_manifest(doc: dict, paths: dict[str, Path]) -> dict | None:
     return manifest
 
 
-def _safe_result(manifest: dict, state: str, *, route: bool = False, native: bool = False) -> dict:
+def _safe_result(manifest: dict, state: str, *, route: bool = False, native: bool = False,
+                 replay: str = "NOT_VERIFIED") -> dict:
     return {**manifest, "state": state, "route_authenticated": route,
-            "native_trust_verified": native, "lifecycle_e2e": "NOT_VERIFIED"}
+            "native_trust_verified": native, "replay_scheduler_state": replay,
+            "lifecycle_e2e": "NOT_VERIFIED"}
 
 
 def stage(doc: dict, *, machine: str, hub_machine: str, endpoint: str,
@@ -294,6 +299,195 @@ def _environment(doc: dict, paths: dict[str, Path], manifest: dict) -> dict[str,
                 "CODEX_HOME": str(paths["profile"]),
                 "PATH": str(paths["node"].parent) + os.pathsep + env.get("PATH", os.defpath)})
     return env
+
+
+REPLAY_INTERVAL_SECONDS = 300
+REPLAY_ITEM_CAP = 4
+REPLAY_WALL_SECONDS = 30
+
+
+def _launch_agents_dir(home: Path | None = None) -> Path:
+    # HOME is an environment input to the CLI; the native UID database binds
+    # the user domain and the only LaunchAgents directory we may create in it.
+    try:
+        user_home = home or Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except KeyError:
+        raise NativeRefusal("Native user home is unavailable for replay") from None
+    directory = user_home / "Library/LaunchAgents"
+    for parent in (user_home, directory.parent, directory):
+        if not parent.exists() and not parent.is_symlink():
+            if parent == directory:
+                continue
+            raise NativeRefusal("Native LaunchAgent parent is unavailable")
+        info = parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & 0o022):
+            raise NativeRefusal("Native LaunchAgent directory is not owner-controlled")
+    return directory
+
+
+def _replay_definition(doc: dict, paths: dict[str, Path], manifest: dict) -> tuple[Path, bytes, dict]:
+    """One opt-in user job; the installed app and all other services stay untouched."""
+    if platform.system() != "Darwin":
+        raise NativeRefusal("Periodic remote memory replay is unsupported on this platform")
+    root = paths["root"]
+    try:
+        python = config.managed_python(root, root / "mem0/venv/bin/python")
+    except (OSError, ValueError):
+        raise NativeRefusal("Pinned BORG Python runtime is unavailable for replay") from None
+    label = services.label(doc, "memory-replay")
+    directory = _launch_agents_dir()
+    environment = {
+        "BORG_HOME": doc["home"], "BORG_OWNER_ID": doc["owner"],
+        "BORG_LOCAL_MACHINE_ID": manifest["hub_machine"],
+        "MEM0_FLEET_BASE": str(root / "mem0"),
+        "MEM0_FLEET_TOKEN_FILE": str(paths["token"]),
+        "MEM0_FLEET_ENDPOINT_FILE": str(paths["endpoint"]),
+        "MEM0_FLEET_ENDPOINT": "",
+        "MEM0_MACHINE": manifest["machine"], "MEM0_HARNESS": "codex",
+        "MEM0_REPLAY_ITEM_CAP": str(REPLAY_ITEM_CAP),
+        "MEM0_REPLAY_WALL_SECONDS": str(REPLAY_WALL_SECONDS),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PATH": str(Path(python).parent) + ":/usr/bin:/bin",
+    }
+    specification = {
+        "Label": label,
+        "ProgramArguments": ["/usr/bin/env", "-u", "MEM0_FLEET_TEST_CAPTURE_JSON",
+                             "-u", "MEM0_FLEET_TEST_SEARCH_JSON", str(python), "-B",
+                             str(paths["driver"]), "replay"],
+        "WorkingDirectory": str(root),
+        "EnvironmentVariables": environment,
+        "RunAtLoad": True, "StartInterval": REPLAY_INTERVAL_SECONDS,
+        "ProcessType": "Background", "LowPriorityIO": True, "Nice": 5,
+        "Umask": 0o077,
+        "StandardOutPath": "/dev/null", "StandardErrorPath": "/dev/null",
+    }
+    return directory / (label + ".plist"), plistlib.dumps(specification), specification
+
+
+def _launchctl(args: list[str], *, timeout: int = 15) -> subprocess.CompletedProcess:
+    try:
+        result = subprocess.run(["/bin/launchctl", *args], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        raise NativeUncertain("Native memory replay registration timed out; inspect the exact user job") from None
+    except OSError:
+        raise NativeRefusal("Native memory replay registration is unavailable") from None
+    if len(result.stdout) > 128 * 1024:
+        raise NativeRefusal("Native memory replay job response is too large")
+    return result
+
+
+def _launchctl_fields(raw: str) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Parse only the small, stable fields needed to reject a stale loaded job."""
+    fields: dict[str, str] = {}
+    blocks: dict[str, list[str]] = {}
+    lines = raw.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("\t") and not line.startswith("\t\t") and line.endswith(" = {"):
+            name = line.strip()[:-4]
+            values = []
+            index += 1
+            while index < len(lines) and lines[index] != "\t}":
+                if not lines[index].startswith("\t\t"):
+                    raise NativeRefusal("Native memory replay job response is malformed")
+                values.append(lines[index].strip())
+                index += 1
+            if index == len(lines) or name in blocks:
+                raise NativeRefusal("Native memory replay job response is malformed")
+            blocks[name] = values
+        elif line.startswith("\t") and not line.startswith("\t\t") and " = " in line:
+            name, value = line.strip().split(" = ", 1)
+            if name in fields:
+                raise NativeRefusal("Native memory replay job response is malformed")
+            fields[name] = value
+        index += 1
+    return fields, blocks
+
+
+def _replay_state(doc: dict, paths: dict[str, Path], manifest: dict) -> str:
+    target, expected, specification = _replay_definition(doc, paths, manifest)
+    domain = f"gui/{os.getuid()}"
+    loaded = _launchctl(["print", domain + "/" + specification["Label"]])
+    if loaded.returncode not in {0, 113}:
+        raise NativeRefusal("Native memory replay job could not be inspected")
+    if target.exists() or target.is_symlink():
+        try:
+            observed = _owned_regular(target, private=True, limit=64 * 1024)
+        except (OSError, ValueError):
+            raise NativeRefusal("Existing native memory replay job is not an owned private file") from None
+        if observed != expected:
+            raise NativeRefusal("Existing native memory replay job differs; preserve it")
+    elif loaded.returncode == 0:
+        raise NativeRefusal("Loaded native memory replay job has no owned definition")
+    else:
+        return "MISSING"
+    if loaded.returncode == 113:
+        return "MISSING"
+    if not loaded.stdout.startswith(domain + "/" + specification["Label"] + " = {\n"):
+        raise NativeRefusal("Loaded native memory replay job identity differs")
+    fields, blocks = _launchctl_fields(loaded.stdout)
+    if any(fields.get(key) != value for key, value in {
+            "path": str(target), "type": "LaunchAgent",
+            "program": specification["ProgramArguments"][0],
+            "working directory": specification["WorkingDirectory"],
+            "run interval": str(REPLAY_INTERVAL_SECONDS) + " seconds"}.items()):
+        raise NativeRefusal("Loaded native memory replay job differs from its owned definition")
+    if "runatload" not in (fields.get("properties") or "").split(" | "):
+        raise NativeRefusal("Loaded native memory replay job did not retain RunAtLoad")
+    if blocks.get("arguments") != specification["ProgramArguments"]:
+        raise NativeRefusal("Loaded native memory replay command differs")
+    observed_env = {}
+    for row in blocks.get("environment", []):
+        match = re.fullmatch(r"([A-Z][A-Z0-9_]*) => ?(.*)", row)
+        if match is None:
+            raise NativeRefusal("Loaded native memory replay environment is malformed")
+        key, value = match.groups()
+        if key in observed_env:
+            raise NativeRefusal("Loaded native memory replay environment is malformed")
+        observed_env[key] = value
+    expected_env = specification["EnvironmentVariables"]
+    if (any(observed_env.get(key) != value for key, value in expected_env.items())
+            or set(observed_env) - set(expected_env) - {"XPC_SERVICE_NAME"}):
+        raise NativeRefusal("Loaded native memory replay environment differs")
+    return "VERIFIED"
+
+
+def _enable_replay(doc: dict, paths: dict[str, Path], manifest: dict) -> str:
+    state = _replay_state(doc, paths, manifest)
+    if state == "VERIFIED":
+        return state
+    target, body, specification = _replay_definition(doc, paths, manifest)
+    if not target.parent.exists():
+        try:
+            target.parent.mkdir(mode=0o700)
+        except OSError:
+            raise NativeRefusal("Native LaunchAgent directory could not be created") from None
+        _launch_agents_dir()
+    if not target.exists() and not target.is_symlink():
+        try:
+            config.write_private(target, body.decode("utf-8"))
+        except (OSError, ValueError):
+            raise NativeRefusal("Native memory replay definition could not be created") from None
+    try:
+        if _owned_regular(target, private=True, limit=64 * 1024) != body:
+            raise NativeRefusal("Existing native memory replay job differs; preserve it")
+    except (OSError, ValueError):
+        raise NativeRefusal("Existing native memory replay job is not an owned private file") from None
+    # A definite bootstrap refusal leaves the exact owned definition for an
+    # explicit retry. A timeout is uncertain and is never retried in this call.
+    result = _launchctl(["bootstrap", f"gui/{os.getuid()}", str(target)], timeout=30)
+    if result.returncode != 0:
+        raise NativeRefusal("Native memory replay bootstrap refused")
+    try:
+        verified = _replay_state(doc, paths, manifest) == "VERIFIED"
+    except (NativeRefusal, NativeUncertain):
+        verified = False
+    if not verified:
+        raise NativeUncertain("Native memory replay bootstrap completed without exact readback; inspect the user job")
+    return "VERIFIED"
 
 
 def _run(args: list[str], env: dict[str, str], *, timeout: int) -> dict:
@@ -362,8 +556,8 @@ def check(doc: dict) -> dict:
     manifest = _read_manifest(doc, paths)
     if manifest is None:
         return {"schema": SCHEMA, "state": "ABSENT", "instance_id": doc["instance_id"],
-                "route_authenticated": False, "native_trust_verified": False,
-                "lifecycle_e2e": "NOT_VERIFIED"}
+            "route_authenticated": False, "native_trust_verified": False,
+            "replay_scheduler_state": "NOT_VERIFIED", "lifecycle_e2e": "NOT_VERIFIED"}
     route = _whoami(doc, paths, manifest)
     try:
         _, trusted = _plan(doc, paths, manifest, apply=False)
@@ -371,8 +565,20 @@ def check(doc: dict) -> dict:
         return _safe_result(manifest, "NATIVE_UNCERTAIN", route=route)
     except NativeRefusal:
         return _safe_result(manifest, "NATIVE_REFUSAL", route=route)
-    return _safe_result(manifest, "VERIFIED" if route and trusted else "NEEDS_GRANT" if not route else "NEEDS_HOOKS",
-                        route=route, native=trusted)
+    if not route or not trusted:
+        return _safe_result(manifest, "NEEDS_GRANT" if not route else "NEEDS_HOOKS",
+                            route=route, native=trusted)
+    if platform.system() != "Darwin":
+        return _safe_result(manifest, "REPLAY_UNSUPPORTED", route=True, native=True,
+                            replay="UNSUPPORTED")
+    try:
+        replay = _replay_state(doc, paths, manifest)
+    except NativeUncertain:
+        return _safe_result(manifest, "NATIVE_UNCERTAIN", route=True, native=True)
+    except NativeRefusal:
+        return _safe_result(manifest, "NATIVE_REFUSAL", route=True, native=True)
+    return _safe_result(manifest, "VERIFIED" if replay == "VERIFIED" else "NEEDS_REPLAY",
+                        route=True, native=True, replay=replay)
 
 
 def enable(doc: dict) -> dict:
@@ -382,6 +588,9 @@ def enable(doc: dict) -> dict:
         raise ValueError("Stage the owned remote memory client before enabling it")
     if not _whoami(doc, paths, manifest):
         return _safe_result(manifest, "NEEDS_GRANT")
+    if platform.system() != "Darwin":
+        return _safe_result(manifest, "REPLAY_UNSUPPORTED", route=True,
+                            replay="UNSUPPORTED")
     try:
         _, trusted = _plan(doc, paths, manifest, apply=False)
         if not trusted:
@@ -389,9 +598,10 @@ def enable(doc: dict) -> dict:
             if not applied:
                 raise NativeRefusal("Native memory configurator did not trust all owned hooks")
         _, trusted = _plan(doc, paths, manifest, apply=False)
+        replay = _enable_replay(doc, paths, manifest) if trusted else "NOT_VERIFIED"
     except NativeUncertain:
         return _safe_result(manifest, "NATIVE_UNCERTAIN", route=True)
     except NativeRefusal:
         return _safe_result(manifest, "NATIVE_REFUSAL", route=True)
-    return _safe_result(manifest, "VERIFIED" if trusted else "NEEDS_HOOKS",
-                        route=True, native=trusted)
+    return _safe_result(manifest, "VERIFIED" if trusted and replay == "VERIFIED" else "NEEDS_HOOKS",
+                        route=True, native=trusted, replay=replay)

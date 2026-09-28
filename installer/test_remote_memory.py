@@ -66,6 +66,12 @@ class RemoteMemoryTests(unittest.TestCase):
         self.source_patch = patch.object(remote_memory, "_verify_source")
         self.source_patch.start()
         self.addCleanup(self.source_patch.stop)
+        self.replay_check_patch = patch.object(remote_memory, "_replay_state", return_value="VERIFIED")
+        self.replay_check_patch.start()
+        self.addCleanup(self.replay_check_patch.stop)
+        self.replay_enable_patch = patch.object(remote_memory, "_enable_replay", return_value="VERIFIED")
+        self.replay_enable_patch.start()
+        self.addCleanup(self.replay_enable_patch.stop)
 
     def _file(self, relative: str, *, executable: bool = False) -> Path:
         path = self.root / relative
@@ -130,6 +136,200 @@ class RemoteMemoryTests(unittest.TestCase):
                 "driver_path": str(remote_memory._paths(self.doc)["driver"]),
                 "codex": {"selected": 1, "changed": 0 if trusted else 1,
                           "profiles": [profile]}}
+
+    def _replay_fixture(self):
+        self.replay_check_patch.stop()
+        self.replay_enable_patch.stop()
+        native = self._file("runtime/python/bin/python3", executable=True)
+        link = self.root / "mem0/venv/bin/python"
+        link.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        link.symlink_to(native)
+        user_home = self.root.parent / "native user"
+        (user_home / "Library/LaunchAgents").mkdir(mode=0o700, parents=True)
+        return user_home / "Library/LaunchAgents"
+
+    def _native_operation(self, args, env, *, timeout):
+        if Path(args[0]).name == "mem0-mcp-curl":
+            return {"principal": self.args["principal"], "allowed_scopes": self.args["read_scopes"],
+                    "write_scope": self.args["write_scope"]}
+        return self._receipt(apply="--check" not in args, trusted=True)
+
+    @staticmethod
+    def _loaded_replay(target, spec):
+        label = spec["Label"]
+        rows = [f"gui/{os.getuid()}/{label} = {{", "\tactive count = 0",
+                f"\tpath = {target}", "\ttype = LaunchAgent", "\tstate = not running",
+                f"\tprogram = {spec['ProgramArguments'][0]}", "\targuments = {"]
+        rows += ["\t\t" + value for value in spec["ProgramArguments"]]
+        rows += ["\t}", f"\tworking directory = {spec['WorkingDirectory']}",
+                 "\tenvironment = {"]
+        rows += [f"\t\t{key} => {value}" for key, value in spec["EnvironmentVariables"].items()]
+        rows += ["\t}", f"\trun interval = {spec['StartInterval']} seconds",
+                 "\tproperties = runatload | low priority i/o", "}"]
+        return "\n".join(rows) + "\n"
+
+    def test_periodic_replay_registers_once_and_never_claims_e2e(self):
+        directory = self._replay_fixture()
+        self.stage()
+        loaded = False
+        bootstraps = []
+        paths = remote_memory._identity(self.doc)
+        manifest = remote_memory._read_manifest(self.doc, paths)
+        with patch.object(remote_memory, "_launch_agents_dir", return_value=directory), \
+             patch.object(remote_memory.platform, "system", return_value="Darwin"):
+            target, body, spec = remote_memory._replay_definition(self.doc, paths, manifest)
+            token = (self.root / "mem0/data/fleet-token").read_text().strip()
+            self.assertNotIn(token, body.decode())
+            self.assertEqual(spec["ProgramArguments"], ["/usr/bin/env", "-u",
+                "MEM0_FLEET_TEST_CAPTURE_JSON", "-u", "MEM0_FLEET_TEST_SEARCH_JSON",
+                str(self.root / "mem0/venv/bin/python"), "-B", str(paths["driver"]), "replay"])
+            self.assertEqual(spec["EnvironmentVariables"]["MEM0_MACHINE"], self.args["machine"])
+            self.assertEqual(spec["EnvironmentVariables"]["MEM0_FLEET_ENDPOINT"], "")
+            self.assertEqual(spec["StartInterval"], 300)
+            def launchctl(args, *, timeout=15):
+                nonlocal loaded
+                if args[0] == "print":
+                    return subprocess.CompletedProcess(args, 0 if loaded else 113,
+                        self._loaded_replay(target, spec) if loaded else "")
+                bootstraps.append(args)
+                loaded = True
+                return subprocess.CompletedProcess(args, 0, "")
+            with patch.object(remote_memory, "_launchctl", side_effect=launchctl), \
+                 patch.object(remote_memory, "_run", side_effect=self._native_operation):
+                before = remote_memory.check(self.doc)
+                self.assertEqual((before["state"], before["replay_scheduler_state"]),
+                                 ("NEEDS_REPLAY", "MISSING"))
+                enabled = remote_memory.enable(self.doc)
+                self.assertEqual(enabled["state"], "VERIFIED")
+                self.assertEqual(enabled["replay_scheduler_state"], "VERIFIED")
+                self.assertEqual(enabled["lifecycle_e2e"], "NOT_VERIFIED")
+                self.assertEqual(remote_memory.check(self.doc)["state"], "VERIFIED")
+                self.assertEqual(remote_memory.enable(self.doc)["state"], "VERIFIED")
+        self.assertEqual(len(bootstraps), 1)
+        self.assertEqual(target.read_bytes(), body)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def test_replay_rejects_foreign_stale_or_symlinked_job_and_loaded_collision(self):
+        directory = self._replay_fixture()
+        self.stage()
+        paths = remote_memory._identity(self.doc)
+        manifest = remote_memory._read_manifest(self.doc, paths)
+        with patch.object(remote_memory, "_launch_agents_dir", return_value=directory), \
+             patch.object(remote_memory.platform, "system", return_value="Darwin"):
+            target, body, spec = remote_memory._replay_definition(self.doc, paths, manifest)
+            target.write_bytes(body + b"\n")
+            target.chmod(0o600)
+            with patch.object(remote_memory, "_launchctl", return_value=subprocess.CompletedProcess([], 113, "")):
+                with self.assertRaisesRegex(remote_memory.NativeRefusal, "differs"):
+                    remote_memory._enable_replay(self.doc, paths, manifest)
+            self.assertEqual(target.read_bytes(), body + b"\n")
+            target.unlink()
+            target.symlink_to(self.root / "config.json")
+            with patch.object(remote_memory, "_launchctl", return_value=subprocess.CompletedProcess([], 113, "")):
+                with self.assertRaisesRegex(remote_memory.NativeRefusal, "owned private"):
+                    remote_memory._replay_state(self.doc, paths, manifest)
+            target.unlink()
+            with patch.object(remote_memory, "_launchctl", return_value=subprocess.CompletedProcess([], 0,
+                    self._loaded_replay(target, spec))):
+                with self.assertRaisesRegex(remote_memory.NativeRefusal, "no owned definition"):
+                    remote_memory._replay_state(self.doc, paths, manifest)
+            target.write_bytes(body); target.chmod(0o600)
+            wrong = dict(spec, ProgramArguments=[*spec["ProgramArguments"][:-2], "/foreign/driver", "replay"])
+            with patch.object(remote_memory, "_launchctl", return_value=subprocess.CompletedProcess([], 0,
+                    self._loaded_replay(target, wrong))):
+                with self.assertRaisesRegex(remote_memory.NativeRefusal, "command differs"):
+                    remote_memory._enable_replay(self.doc, paths, manifest)
+            wrong_environment = dict(spec, EnvironmentVariables={**spec["EnvironmentVariables"],
+                                        "MEM0_MACHINE": "another-native-machine"})
+            with patch.object(remote_memory, "_launchctl", return_value=subprocess.CompletedProcess([], 0,
+                    self._loaded_replay(target, wrong_environment))):
+                with self.assertRaisesRegex(remote_memory.NativeRefusal, "environment differs"):
+                    remote_memory._replay_state(self.doc, paths, manifest)
+            unexpected_environment = dict(spec, EnvironmentVariables={**spec["EnvironmentVariables"],
+                                           "MEM0_FLEET_TEST_CAPTURE_JSON": "foreign-override"})
+            with patch.object(remote_memory, "_launchctl", return_value=subprocess.CompletedProcess([], 0,
+                    self._loaded_replay(target, unexpected_environment))):
+                with self.assertRaisesRegex(remote_memory.NativeRefusal, "environment differs"):
+                    remote_memory._replay_state(self.doc, paths, manifest)
+
+    def test_replay_release_driver_is_pinned_and_launch_agent_directory_is_owned(self):
+        directory = self._replay_fixture()
+        self.stage()
+        release = self.root / "tools/releases" / ("f" * 40)
+        with patch.object(remote_memory, "SOURCE_ROOT", release):
+            paths = remote_memory._paths(self.doc)
+            self.assertEqual(paths["driver"], release / "memory/bin/mem0-fleet-hook")
+            manifest = remote_memory._read_manifest(self.doc, paths)
+            with patch.object(remote_memory, "_launch_agents_dir", return_value=directory), \
+                 patch.object(remote_memory.platform, "system", return_value="Darwin"):
+                _, _, spec = remote_memory._replay_definition(self.doc, paths, manifest)
+                self.assertIn(str(paths["driver"]), spec["ProgramArguments"])
+                self.assertNotIn(str(paths["installed_driver"]), spec["ProgramArguments"])
+        self.assertEqual(remote_memory._launch_agents_dir(directory.parents[1]), directory)
+        directory.chmod(0o777)
+        with self.assertRaisesRegex(remote_memory.NativeRefusal, "owner-controlled"):
+            remote_memory._launch_agents_dir(directory.parents[1])
+        directory.chmod(0o700)
+        directory.rmdir()
+        directory.symlink_to(self.root / "mem0")
+        with self.assertRaisesRegex(remote_memory.NativeRefusal, "owner-controlled"):
+            remote_memory._launch_agents_dir(directory.parents[1])
+
+    def test_replay_definite_bootstrap_failure_can_retry_exact_file_timeout_stays_uncertain(self):
+        directory = self._replay_fixture()
+        self.stage()
+        paths = remote_memory._identity(self.doc)
+        manifest = remote_memory._read_manifest(self.doc, paths)
+        with patch.object(remote_memory, "_launch_agents_dir", return_value=directory), \
+             patch.object(remote_memory.platform, "system", return_value="Darwin"):
+            target, body, spec = remote_memory._replay_definition(self.doc, paths, manifest)
+            loaded = False
+            attempts = 0
+            def launchctl(args, *, timeout=15):
+                nonlocal loaded, attempts
+                if args[0] == "print":
+                    return subprocess.CompletedProcess(args, 0 if loaded else 113,
+                        self._loaded_replay(target, spec) if loaded else "")
+                attempts += 1
+                if attempts == 1:
+                    return subprocess.CompletedProcess(args, 5, "")
+                if attempts == 2:
+                    raise remote_memory.NativeUncertain("fixture timeout")
+                loaded = True
+                return subprocess.CompletedProcess(args, 0, "")
+            with patch.object(remote_memory, "_launchctl", side_effect=launchctl):
+                with self.assertRaises(remote_memory.NativeRefusal):
+                    remote_memory._enable_replay(self.doc, paths, manifest)
+                self.assertEqual(target.read_bytes(), body)
+                with self.assertRaises(remote_memory.NativeUncertain):
+                    remote_memory._enable_replay(self.doc, paths, manifest)
+                self.assertEqual(attempts, 2)
+                self.assertEqual(remote_memory._enable_replay(self.doc, paths, manifest), "VERIFIED")
+                self.assertEqual(attempts, 3)
+
+    def test_replay_success_without_exact_native_readback_is_uncertain(self):
+        directory = self._replay_fixture()
+        self.stage()
+        paths = remote_memory._identity(self.doc)
+        manifest = remote_memory._read_manifest(self.doc, paths)
+        def launchctl(args, *, timeout=15):
+            return subprocess.CompletedProcess(args, 113 if args[0] == "print" else 0, "")
+        with patch.object(remote_memory, "_launch_agents_dir", return_value=directory), \
+             patch.object(remote_memory.platform, "system", return_value="Darwin"), \
+             patch.object(remote_memory, "_launchctl", side_effect=launchctl):
+            with self.assertRaises(remote_memory.NativeUncertain):
+                remote_memory._enable_replay(self.doc, paths, manifest)
+
+    def test_non_macos_replay_is_explicit_hold_before_native_enable(self):
+        self.stage()
+        with patch.object(remote_memory.platform, "system", return_value="Linux"), \
+             patch.object(remote_memory, "_run", side_effect=self._native_operation) as operation:
+            result = remote_memory.check(self.doc)
+            self.assertEqual((result["state"], result["replay_scheduler_state"]),
+                             ("REPLAY_UNSUPPORTED", "UNSUPPORTED"))
+            count = operation.call_count
+            self.assertEqual(remote_memory.enable(self.doc)["state"], "REPLAY_UNSUPPORTED")
+            self.assertEqual(operation.call_count, count + 1)  # authenticated whoami only
 
     def test_stage_is_private_idempotent_and_never_prints_token(self):
         first = self.stage()
