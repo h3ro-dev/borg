@@ -165,6 +165,9 @@ class RemoteMemoryTests(unittest.TestCase):
                  "\tenvironment = {"]
         rows += [f"\t\t{key} => {value}" for key, value in spec["EnvironmentVariables"].items()]
         rows += ["\t}", f"\trun interval = {spec['StartInterval']} seconds",
+                 f"\tstdout path = {spec['StandardOutPath']}",
+                 f"\tstderr path = {spec['StandardErrorPath']}",
+                 f"\tnice = {spec['Nice']}",
                  "\tproperties = runatload | low priority i/o", "}"]
         return "\n".join(rows) + "\n"
 
@@ -182,7 +185,8 @@ class RemoteMemoryTests(unittest.TestCase):
             self.assertNotIn(token, body.decode())
             self.assertEqual(spec["ProgramArguments"], ["/usr/bin/env", "-u",
                 "MEM0_FLEET_TEST_CAPTURE_JSON", "-u", "MEM0_FLEET_TEST_SEARCH_JSON",
-                str(self.root / "mem0/venv/bin/python"), "-B", str(paths["driver"]), "replay"])
+                str(self.root / "mem0/venv/bin/python"), "-I", "-B", str(paths["driver"]), "replay"])
+            self.assertNotIn("MEM0_CAPTURE_SKIP", spec["ProgramArguments"])
             self.assertEqual(spec["EnvironmentVariables"]["MEM0_MACHINE"], self.args["machine"])
             self.assertEqual(spec["EnvironmentVariables"]["MEM0_FLEET_ENDPOINT"], "")
             self.assertEqual(spec["StartInterval"], 300)
@@ -251,6 +255,28 @@ class RemoteMemoryTests(unittest.TestCase):
                     self._loaded_replay(target, unexpected_environment))):
                 with self.assertRaisesRegex(remote_memory.NativeRefusal, "environment differs"):
                     remote_memory._replay_state(self.doc, paths, manifest)
+
+    def test_replay_rejects_stale_loaded_output_paths_and_nice_without_bootstrap(self):
+        directory = self._replay_fixture()
+        self.stage()
+        paths = remote_memory._identity(self.doc)
+        manifest = remote_memory._read_manifest(self.doc, paths)
+        with patch.object(remote_memory, "_launch_agents_dir", return_value=directory), \
+             patch.object(remote_memory.platform, "system", return_value="Darwin"):
+            target, body, spec = remote_memory._replay_definition(self.doc, paths, manifest)
+            target.write_bytes(body); target.chmod(0o600)
+            for changed in ({"StandardOutPath": "/foreign/capture.log"},
+                            {"StandardErrorPath": "/foreign/error.log"},
+                            {"Nice": 0}):
+                with self.subTest(changed=changed):
+                    loaded_spec={**spec, **changed}
+                    loaded=self._loaded_replay(target, loaded_spec)
+                    with patch.object(remote_memory, "_launchctl", return_value=subprocess.CompletedProcess([],0,loaded)) as native:
+                        with self.assertRaisesRegex(remote_memory.NativeRefusal, "differs"):
+                            remote_memory._enable_replay(self.doc, paths, manifest)
+                        native.assert_called_once()
+                        self.assertEqual(native.call_args.args[0][0], "print")
+                    self.assertEqual(target.read_bytes(), body)
 
     def test_replay_release_driver_is_pinned_and_launch_agent_directory_is_owned(self):
         directory = self._replay_fixture()

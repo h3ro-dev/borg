@@ -353,7 +353,7 @@ def _replay_definition(doc: dict, paths: dict[str, Path], manifest: dict) -> tup
     specification = {
         "Label": label,
         "ProgramArguments": ["/usr/bin/env", "-u", "MEM0_FLEET_TEST_CAPTURE_JSON",
-                             "-u", "MEM0_FLEET_TEST_SEARCH_JSON", str(python), "-B",
+                             "-u", "MEM0_FLEET_TEST_SEARCH_JSON", str(python), "-I", "-B",
                              str(paths["driver"]), "replay"],
         "WorkingDirectory": str(root),
         "EnvironmentVariables": environment,
@@ -433,7 +433,10 @@ def _replay_state(doc: dict, paths: dict[str, Path], manifest: dict) -> str:
             "path": str(target), "type": "LaunchAgent",
             "program": specification["ProgramArguments"][0],
             "working directory": specification["WorkingDirectory"],
-            "run interval": str(REPLAY_INTERVAL_SECONDS) + " seconds"}.items()):
+            "run interval": str(REPLAY_INTERVAL_SECONDS) + " seconds",
+            "stdout path": specification["StandardOutPath"],
+            "stderr path": specification["StandardErrorPath"],
+            "nice": str(specification["Nice"])}.items()):
         raise NativeRefusal("Loaded native memory replay job differs from its owned definition")
     if "runatload" not in (fields.get("properties") or "").split(" | "):
         raise NativeRefusal("Loaded native memory replay job did not retain RunAtLoad")

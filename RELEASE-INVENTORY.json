@@ -808,9 +808,9 @@
       "sha256": "e59dbdbab95ab3749451d539f8bca3462af6bb79ff6924fec031bc15acefbb77"
     },
     {
-      "bytes": 11166,
+      "bytes": 11367,
       "path": "docs/BLUEPRINT.md",
-      "sha256": "453a51fc58f48571aa23013909fb13577a7bf19c4abf9aec2b7cd5a366a0d787"
+      "sha256": "7315efe823b1dc7a3efaffd494c630a7b94b620c15faf87d7d56d07649108e1f"
     },
     {
       "bytes": 14235,
@@ -1098,9 +1098,9 @@
       "sha256": "ee32045bf09da38d41f85eb175e9073b04da6f1a388f983c8f3ae81b8bd16684"
     },
     {
-      "bytes": 32169,
+      "bytes": 32347,
       "path": "installer/remote_memory.py",
-      "sha256": "5768e7ee85041ef18a9533fddd3105d10de69f2913c517470c0f93b9aff0a8a4"
+      "sha256": "ffa6c816ef476863523c96223a83d246b5bda0e92ec9e9cb311fecdd80df9832"
     },
     {
       "bytes": 352,
@@ -1173,9 +1173,9 @@
       "sha256": "846c401865704f0cd8a3b62971a957ed12067059db33ea05b09103783d074dc2"
     },
     {
-      "bytes": 43520,
+      "bytes": 45233,
       "path": "installer/test_remote_memory.py",
-      "sha256": "092706418ef908f343cc6fbfe34f2e3b0b9b2105e2af823b92be457a2a4d11aa"
+      "sha256": "451874a5d6147a64bbee7dd4630a89b0e3654107b648e1f62330811279ecec93"
     },
     {
       "bytes": 1547,
@@ -1528,9 +1528,9 @@
       "sha256": "ff928f3e63f28f3fe668bd499172ad20cc8cea71a884a0ae76cf87c1f083ecec"
     },
     {
-      "bytes": 5801,
+      "bytes": 6792,
       "path": "memory/tests/test_borg_client_config.py",
-      "sha256": "fe98472396725fdcc256b54a783de896dfa35dbb626744cb5a564ee667254a3c"
+      "sha256": "57d0d87bc6adf7b4f90cb19a84d7d393c95f2a363bc811f0a3cf0bfbd0714474"
     },
     {
       "bytes": 5921,
@@ -2023,7 +2023,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "d868cbc45786a5898c353d174c415242c2554703818985a644eb12986e76173e",
+  "inventory_sha256": "dcf01dcb0b8747ad96d829d624ce98c9ed9a9c7adb0e5a0f42f0f0cf89237d5e",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88145710
+  "total_bytes": 88148793
 }

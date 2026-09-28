@@ -55,6 +55,23 @@ class ClientConfigSubprocessTests(unittest.TestCase):
         self.assertEqual(who.returncode, 0, who.stderr)
         self.assertEqual(json.loads(who.stdout)["principal"], "bounded-test")
 
+    def test_isolated_replay_ignores_pythonpath_but_keeps_capture_skip(self):
+        poison = self.home.parent / "unreviewed-pythonpath"
+        poison.mkdir(mode=0o700)
+        (poison / "json.py").write_text("raise RuntimeError('unreviewed import')\n")
+        environment = {**self.env, "PYTHONPATH": str(poison), "MEM0_CAPTURE_SKIP": "1"}
+        replay = subprocess.run(
+            [sys.executable, "-I", "-B", str(BIN / "mem0-fleet-hook"), "replay"],
+            input="{}", env=environment, capture_output=True, text=True, timeout=20, check=False,
+        )
+        self.assertEqual(replay.returncode, 0, replay.stderr)
+        self.assertEqual(replay.stdout, "")
+        inherited = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", "import os; print(os.getenv('MEM0_CAPTURE_SKIP'))"],
+            env=environment, capture_output=True, text=True, timeout=20, check=False,
+        )
+        self.assertEqual((inherited.returncode, inherited.stdout.strip()), (0, "1"))
+
     def test_native_hook_and_curl_leave_reviewed_release_without_bytecode(self):
         """Direct shebang entry points do not inherit the installer's -B flag."""
         source_bin = self.home.parent / "reviewed-release" / "memory" / "bin"
