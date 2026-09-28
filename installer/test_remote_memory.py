@@ -42,6 +42,15 @@ class RemoteMemoryTests(unittest.TestCase):
             target = self.root / "mem0/bin" / name
             shutil.copy2(source / "memory/bin" / name, target)
             target.chmod(0o700)
+        app = self.root / "app"
+        installed_manifest = {}
+        for name in ("mem0-fleet-hook", "mem0-mcp-curl"):
+            relative = "memory/bin/" + name
+            target = app / relative
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            shutil.copy2(self.root / "mem0/bin" / name, target)
+            installed_manifest[relative] = hashlib.sha256(target.read_bytes()).hexdigest()
+        config.write_private(app / "source-manifest.json", json.dumps(installed_manifest))
         config.write_private(self.root / "conductors/config.json", json.dumps({
             "owner": "james", "instance_id": self.doc["instance_id"], "borgHome": str(self.root),
             "runtime": {"nodeBin": str(node)},
@@ -72,7 +81,8 @@ class RemoteMemoryTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1]
         release = self.root / "tools/releases" / ("a" * 40)
         for relative in ("borg.py", "installer/cli.py", "installer/remote_memory.py",
-                         "memory/bin/mem0-fleet-configure", "memory/bin/mem0-fleet-hook",
+                         "memory/bin/borg_client_config.py", "memory/bin/mem0-fleet-configure",
+                         "memory/bin/mem0-fleet-hook",
                          "memory/bin/mem0-mcp-curl"):
             target = release / relative
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -117,6 +127,7 @@ class RemoteMemoryTests(unittest.TestCase):
                    "missing_fields": [] if trusted else ["hooks.SessionStart"],
                    "unrelated_trust_preserved": True}
         return {"status": "PASS" if apply else "CHECK", "machine": self.args["machine"],
+                "driver_path": str(remote_memory._paths(self.doc)["driver"]),
                 "codex": {"selected": 1, "changed": 0 if trusted else 1,
                           "profiles": [profile]}}
 
@@ -169,6 +180,13 @@ class RemoteMemoryTests(unittest.TestCase):
                  "write_scope": self.args["write_scope"]} if Path(args[0]).name == "mem0-mcp-curl"
                 else self._receipt(apply=False, trusted=True))):
             self.assertEqual(remote_memory.check(self.doc)["state"], "NEEDS_GRANT")
+        def wrong_driver(args, env, *, timeout):
+            if Path(args[0]).name == "mem0-mcp-curl":
+                return {"principal": self.args["principal"], "allowed_scopes": self.args["read_scopes"],
+                        "write_scope": self.args["write_scope"]}
+            return {**self._receipt(apply=False, trusted=True), "driver_path": "/foreign/driver"}
+        with patch.object(remote_memory, "_run", side_effect=wrong_driver):
+            self.assertEqual(remote_memory.check(self.doc)["state"], "NATIVE_REFUSAL")
 
     def test_enable_requires_grant_before_native_write_and_reports_refusal(self):
         self.stage()
@@ -260,8 +278,16 @@ class RemoteMemoryTests(unittest.TestCase):
             staged = self.stage()
             self.assertEqual(staged["state"], "STAGED_NEEDS_GRANT")
             self.assertEqual(remote_memory._paths(self.doc)["helper"], release / "memory/bin/mem0-fleet-configure")
+            self.assertEqual(remote_memory._paths(self.doc)["driver"], release / "memory/bin/mem0-fleet-hook")
+            self.assertEqual(remote_memory._paths(self.doc)["curl"], release / "memory/bin/mem0-mcp-curl")
             self.assertNotEqual((self.root / "mem0/bin/mem0-fleet-configure").read_bytes(),
                                 (release / "memory/bin/mem0-fleet-configure").read_bytes())
+            native = runpy.run_path(str(release / "memory/bin/mem0-fleet-configure"))
+            with patch.dict(os.environ, {"BORG_LOCAL_MACHINE_ID": self.args["hub_machine"]}):
+                command = native["command_for"](self.root, self.args["machine"], "codex", "end")
+                self.assertIn(str(release / "memory/bin/mem0-fleet-hook"), command)
+                legacy = native["command_for"](self.root, self.args["machine"], "codex", "end", include_home=False)
+                self.assertIn(str(self.root / "mem0/bin/mem0-fleet-hook"), legacy)
             helper = release / "memory/bin/mem0-fleet-configure"
             original = helper.read_bytes()
             helper.write_bytes(original + b"\n# drift\n")
@@ -283,6 +309,45 @@ class RemoteMemoryTests(unittest.TestCase):
         foreign.mkdir(mode=0o700)
         with patch.object(remote_memory, "SOURCE_ROOT", foreign), self.assertRaisesRegex(ValueError, "reviewed release"):
             remote_memory.check(self.doc)
+
+    def test_source_only_client_preserves_old_installed_sidecars_but_refuses_drift(self):
+        release = self._reviewed_release()
+        self.source_patch.stop()
+        with patch.object(remote_memory, "SOURCE_ROOT", release):
+            self.stage()
+            self.assertEqual(remote_memory._paths(self.doc)["driver"], release / "memory/bin/mem0-fleet-hook")
+            installed = self.root / "mem0/bin/mem0-fleet-hook"
+            installed.write_bytes(installed.read_bytes() + b"\n# unreviewed change\n")
+            with self.assertRaisesRegex(ValueError, "sidecar differs"):
+                remote_memory.check(self.doc)
+
+    def test_source_only_check_refuses_trusted_old_driver_hook(self):
+        release = self._reviewed_release()
+        native = runpy.run_path(str(release / "memory/bin/mem0-fleet-configure"))
+        with patch.dict(os.environ, {"BORG_LOCAL_MACHINE_ID": self.args["hub_machine"]}):
+            old = native["command_for"](self.root, self.args["machine"], "codex", "prime", include_home=False)
+            hook = {"type": "command", "command": old, "timeout": 3}
+            hooks = {"SessionStart": [{"matcher": "startup|resume|clear|compact", "hooks": [hook]}],
+                     "state": {"old-key": {"trusted_hash": "sha256:" + "a" * 64}}}
+            row = {"eventName": "sessionStart", "sourcePath": str(self.profile / "config.toml"),
+                   "command": old, "matcher": "startup|resume|clear|compact",
+                   "key": "old-key", "currentHash": "sha256:" + "a" * 64,
+                   "trustStatus": "trusted"}
+            class RPC:
+                def call(self, method, args):
+                    if method == "config/read":
+                        return {"layers": [{"name": {"type": "user", "file": str(self.profile_path)},
+                                            "config": {"hooks": hooks}, "version": "v1"}]}
+                    if method == "hooks/list":
+                        return {"data": [{"hooks": [row]}]}
+                    raise AssertionError(method)
+                def close(self):
+                    pass
+            RPC.profile_path = self.profile / "config.toml"
+            native["codex_plan"].__globals__["NativeRPC"] = lambda *args: RPC()
+            with self.assertRaisesRegex(Exception, "not pinned to the reviewed staged driver"):
+                native["codex_plan"](self.profile / "config.toml", self.profile,
+                                     self.root, self.args["machine"], False, "codex")
 
     def test_provisioning_environment_discards_route_test_and_policy_overrides(self):
         self.stage()
@@ -388,6 +453,7 @@ class RemoteMemoryTests(unittest.TestCase):
                           if key != "state_upsert_required"}, set(names.values()))
         self.assertFalse(profile_receipt["trust"]["state_upsert_required"])
         wrapped = {"status": "CHECK", "machine": self.args["machine"],
+                   "driver_path": str(self.root / "mem0/bin/mem0-fleet-hook"),
                    "codex": {"selected": 1, "changed": 0, "profiles": [profile_receipt]}}
         paths = remote_memory._identity(self.doc)
         manifest = remote_memory._read_manifest(self.doc, paths)

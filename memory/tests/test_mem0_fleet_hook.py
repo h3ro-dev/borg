@@ -15,7 +15,18 @@ SCRIPT = Path(__file__).resolve().parents[1] / "bin" / "mem0-fleet-hook"
 class FleetHookTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        os.environ["MEM0_FLEET_BASE"] = self.tmp.name
+        self.previous = {name: os.environ.get(name) for name in
+                         ("BORG_HOME", "BORG_OWNER_ID", "MEM0_FLEET_BASE", "MEM0_MACHINE",
+                          "MEM0_HARNESS", "MEM0_FLEET_ENDPOINT")}
+        home = Path(self.tmp.name).resolve()
+        (home / "mem0").mkdir(mode=0o700)
+        config = home / "config.json"
+        config.write_text(json.dumps({"schema": "borg-install/v1", "home": str(home),
+            "owner": "example-owner", "instance_id": "00000000-0000-4000-8000-000000000001"}))
+        config.chmod(0o600)
+        os.environ["BORG_HOME"] = str(home)
+        os.environ["BORG_OWNER_ID"] = "example-owner"
+        os.environ["MEM0_FLEET_BASE"] = str(home / "mem0")
         os.environ["MEM0_MACHINE"] = "test-studio"
         os.environ["MEM0_HARNESS"] = "codex"
         os.environ["MEM0_FLEET_ENDPOINT"] = "http://127.0.0.1:18765/mcp"
@@ -23,7 +34,11 @@ class FleetHookTests(unittest.TestCase):
         self.mod = importlib.machinery.SourceFileLoader(name, str(SCRIPT)).load_module()
 
     def tearDown(self):
-        os.environ.pop("MEM0_FLEET_ENDPOINT", None)
+        for name, value in self.previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         self.tmp.cleanup()
 
     def payload(self, **extra):

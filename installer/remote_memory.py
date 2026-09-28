@@ -39,6 +39,10 @@ class NativeUncertain(NativeRefusal):
 
 def _paths(doc: dict) -> dict[str, Path]:
     root = Path(doc["home"])
+    staged = (SOURCE_ROOT.parent == root / "tools/releases"
+              and re.fullmatch(r"[0-9a-f]{40}", SOURCE_ROOT.name) is not None)
+    installed_curl = root / "mem0/bin/mem0-mcp-curl"
+    installed_driver = root / "mem0/bin/mem0-fleet-hook"
     return {"root": root, "data": root / "mem0/data",
             "manifest": root / "mem0/data/remote-client.json",
             "token": root / "mem0/data/fleet-token",
@@ -46,8 +50,9 @@ def _paths(doc: dict) -> dict[str, Path]:
             "profile": root / "conductors/primary/profile",
             "config": root / "conductors/primary/profile/config.toml",
             "helper": SOURCE_ROOT / "memory/bin/mem0-fleet-configure",
-            "curl": root / "mem0/bin/mem0-mcp-curl",
-            "driver": root / "mem0/bin/mem0-fleet-hook",
+            "curl": SOURCE_ROOT / "memory/bin/mem0-mcp-curl" if staged else installed_curl,
+            "driver": SOURCE_ROOT / "memory/bin/mem0-fleet-hook" if staged else installed_driver,
+            "installed_curl": installed_curl, "installed_driver": installed_driver,
             "source_curl": SOURCE_ROOT / "memory/bin/mem0-mcp-curl",
             "source_driver": SOURCE_ROOT / "memory/bin/mem0-fleet-hook",
             "codex": root / "runtime/npm/node_modules/.bin/codex"}
@@ -119,7 +124,7 @@ def _verify_source(doc: dict) -> None:
     if findings:
         raise ValueError("Memory client release failed its exact source inventory")
     expected = {"borg.py", "installer/cli.py", "installer/remote_memory.py",
-                "memory/bin/mem0-fleet-configure", "memory/bin/mem0-fleet-hook",
+                "memory/bin/borg_client_config.py", "memory/bin/mem0-fleet-configure", "memory/bin/mem0-fleet-hook",
                 "memory/bin/mem0-mcp-curl"}
     if not expected <= {str(row["path"]) for row in files}:
         raise ValueError("Memory client release is missing a required source file")
@@ -128,6 +133,29 @@ def _verify_source(doc: dict) -> None:
         if (info.st_uid != os.getuid() or info.st_mode & 0o022
                 or (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)):
             raise ValueError("Memory client release ownership differs")
+
+
+def _verify_installed_sidecars(paths: dict[str, Path]) -> None:
+    """A source-only client never overwrites the immutable installed app."""
+    app = paths["root"] / "app"
+    config.managed_directory(app)
+    info = app.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise ValueError("Installed BORG app directory differs")
+    try:
+        manifest = json.loads(_owned_regular(app / "source-manifest.json", limit=128 * 1024))
+    except (ValueError, TypeError):
+        raise ValueError("Installed BORG app manifest is invalid") from None
+    if not isinstance(manifest, dict):
+        raise ValueError("Installed BORG app manifest is invalid")
+    for name in ("curl", "driver"):
+        relative = "memory/bin/mem0-mcp-curl" if name == "curl" else "memory/bin/mem0-fleet-hook"
+        expected = manifest.get(relative)
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise ValueError("Installed memory sidecar manifest is incomplete")
+        for path in (app / relative, paths["installed_" + name]):
+            if hashlib.sha256(_owned_regular(path, limit=2 * 1024 * 1024)).hexdigest() != expected:
+                raise ValueError("Installed memory sidecar differs from its app manifest")
 
 
 def _identity(doc: dict) -> dict[str, Path]:
@@ -150,15 +178,19 @@ def _identity(doc: dict) -> dict[str, Path]:
             or conductor.get("borgHome") != str(root) or len(primary) != 1
             or primary[0].get("codexHome") != str(paths["profile"])):
         raise ValueError("BORG primary conductor identity differs")
-    for name in ("helper", "curl", "driver", "source_curl", "source_driver"):
+    for name in ("helper", "curl", "driver", "source_curl", "source_driver",
+                 "installed_curl", "installed_driver"):
         _owned_regular(paths[name], limit=2 * 1024 * 1024)
     if any(not os.access(paths[name], os.X_OK) for name in ("helper", "curl", "driver")):
         raise ValueError("BORG memory client executables are not available")
-    for name in ("curl", "driver"):
-        installed = hashlib.sha256(_owned_regular(paths[name], limit=2 * 1024 * 1024)).digest()
-        bundled = hashlib.sha256(_owned_regular(paths["source_" + name], limit=2 * 1024 * 1024)).digest()
-        if installed != bundled:
-            raise ValueError("Installed memory client runtime differs from the reviewed release")
+    if paths["driver"] != paths["installed_driver"]:
+        _verify_installed_sidecars(paths)
+    else:
+        for name in ("curl", "driver"):
+            installed = hashlib.sha256(_owned_regular(paths[name], limit=2 * 1024 * 1024)).digest()
+            bundled = hashlib.sha256(_owned_regular(paths["source_" + name], limit=2 * 1024 * 1024)).digest()
+            if installed != bundled:
+                raise ValueError("Installed memory client runtime differs from the reviewed release")
     binary = paths["codex"].resolve(strict=True)
     if (not binary.is_relative_to(root / "runtime/npm") or not binary.is_file()
             or binary.stat().st_uid != os.getuid() or binary.stat().st_mode & 0o022):
@@ -305,6 +337,7 @@ def _plan(doc: dict, paths: dict[str, Path], manifest: dict, *, apply: bool) -> 
     codex = receipt.get("codex")
     profiles = codex.get("profiles") if isinstance(codex, dict) else None
     if (receipt.get("status") != ("PASS" if apply else "CHECK") or receipt.get("machine") != manifest["machine"]
+            or receipt.get("driver_path") != str(paths["driver"])
             or not isinstance(profiles, list) or len(profiles) != 1 or codex.get("selected") != 1
             or not isinstance(profiles[0], dict) or profiles[0].get("path") != str(paths["config"])):
         raise NativeRefusal("Native memory configurator receipt differs from the owned primary profile")

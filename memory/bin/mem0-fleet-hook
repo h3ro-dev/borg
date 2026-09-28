@@ -47,13 +47,13 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-CONFIG = importlib.machinery.SourceFileLoader(
-    "borg_config_fleet_hook", str(Path(__file__).resolve().parent / "borg_config.py")
-).load_module().CONFIG
+CLIENT_CONFIG = importlib.machinery.SourceFileLoader(
+    "borg_client_config_fleet_hook", str(Path(__file__).resolve().parent / "borg_client_config.py")
+).load_module()
 
 os.umask(0o077)
 
-BASE = Path(os.environ.get("MEM0_FLEET_BASE", str(CONFIG.mem0_root)))
+BASE = CLIENT_CONFIG.mem0_root()
 DATA = BASE / "data"
 STATE = DATA / "hook-runs" / "fleet"
 LOG = DATA / "fleet-hook.log"

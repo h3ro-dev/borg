@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 402,
+  "file_count": 404,
   "files": [
     {
       "bytes": 1914,
@@ -808,9 +808,9 @@
       "sha256": "e59dbdbab95ab3749451d539f8bca3462af6bb79ff6924fec031bc15acefbb77"
     },
     {
-      "bytes": 10117,
+      "bytes": 10417,
       "path": "docs/BLUEPRINT.md",
-      "sha256": "7cb56803faad3f9e40971e1cc5a76cdf958249dbefda171ae2faa11b1bff3b9b"
+      "sha256": "2849f1fc711105fd21eb4f583af558b95fd15a1b66093b3401487c0f218d8b29"
     },
     {
       "bytes": 14235,
@@ -1098,9 +1098,9 @@
       "sha256": "ee32045bf09da38d41f85eb175e9073b04da6f1a388f983c8f3ae81b8bd16684"
     },
     {
-      "bytes": 19665,
+      "bytes": 21674,
       "path": "installer/remote_memory.py",
-      "sha256": "36273fa78c7078205a13da8730387275b29b83c3c1fbcb24b322895aa042f795"
+      "sha256": "ac1eaaa2731d82bb0dc8e12e7df8c0bb3a23dc9ccb7b044cc0522f737330c74f"
     },
     {
       "bytes": 352,
@@ -1173,9 +1173,9 @@
       "sha256": "846c401865704f0cd8a3b62971a957ed12067059db33ea05b09103783d074dc2"
     },
     {
-      "bytes": 26250,
+      "bytes": 30809,
       "path": "installer/test_remote_memory.py",
-      "sha256": "0cc4fe64df27fbe81216410bee5d43744f4c05315d2524af9b996c16cffbfb2f"
+      "sha256": "b4d5dcc55ca3103e293041b8a73c7428187463c8174fa4925e4890dc7a74bc89"
     },
     {
       "bytes": 1547,
@@ -1196,6 +1196,11 @@
       "bytes": 4557,
       "path": "installer/web.py",
       "sha256": "b5605179c9629848b535aff4a22e840bff7d462443ba28435b0b469dfc64a925"
+    },
+    {
+      "bytes": 3316,
+      "path": "memory/bin/borg_client_config.py",
+      "sha256": "b3fb3319aa32d870475b3cd3716f3749babebe7aad887f7330e792e9b0103826"
     },
     {
       "bytes": 8775,
@@ -1273,14 +1278,14 @@
       "sha256": "26d85a5bcec6c6eeb657cf7402e0a899f548f4a81627a3acc54b7cd018f8f51c"
     },
     {
-      "bytes": 46802,
+      "bytes": 48738,
       "path": "memory/bin/mem0-fleet-configure",
-      "sha256": "31d0d4773e40625f878462e50ba689ea8b553d80e78c3ac19b60558cbb4c794d"
+      "sha256": "73b237a5126db3e5ffee195806714bd7eb9467b3db479377407ddb7e1d87f1d8"
     },
     {
-      "bytes": 123922,
+      "bytes": 123899,
       "path": "memory/bin/mem0-fleet-hook",
-      "sha256": "dd950dd7dfeb9fc5d9b206a8655b41017d8e721031dc7610a3750c12d1433b59"
+      "sha256": "85b2f3688e32a2f42ea1df6e4afbd64f76d71f5db6b02571faf2318195a6918d"
     },
     {
       "bytes": 22952,
@@ -1523,6 +1528,11 @@
       "sha256": "ff928f3e63f28f3fe668bd499172ad20cc8cea71a884a0ae76cf87c1f083ecec"
     },
     {
+      "bytes": 3697,
+      "path": "memory/tests/test_borg_client_config.py",
+      "sha256": "91fefd794d8d3dfa01c8a708e95717ad47bd4fa6850a050a3ce0aac6d100199e"
+    },
+    {
       "bytes": 5921,
       "path": "memory/tests/test_borg_config.py",
       "sha256": "2a2fdb70c86ca2585e3b1b717eb4680030eb5f57b16ad30dbd43dbb6f11eae84"
@@ -1543,9 +1553,9 @@
       "sha256": "2c299e59ec5cef6b77475fb7b345a5288f6f9670af8400cc3b32c64a3288a643"
     },
     {
-      "bytes": 6110,
+      "bytes": 6898,
       "path": "memory/tests/test_mem0_fleet_hook.py",
-      "sha256": "b82f9fa200c6de9ad9e973d54046c7d6d21c357f721877ee9c0fe631f6e0e7f0"
+      "sha256": "a33fbd0e23931651f71e2375265eeae23bfc009db83d1f5a4c9c6b5eacee31dc"
     },
     {
       "bytes": 6709,
@@ -2013,7 +2023,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "4fb095bf761e5597f5ece8baf0a6e30f11cc91d4623d3a8afce15b0e0f9409c1",
+  "inventory_sha256": "649a86407326566c03af03cb724442c3b1bd25687542807bba5f70b5ab33a684",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88102743
+  "total_bytes": 88119325
 }

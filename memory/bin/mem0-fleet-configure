@@ -71,8 +71,31 @@ def explicit_owned_dir(raw: str, allowed: list[Path], label: str) -> Path:
     raise ProvisionError(f"{label} is outside owned roots")
 
 
-def installed_driver(home: Path) -> Path:
-    return home / "mem0/bin/mem0-fleet-hook"
+def installed_driver(home: Path, *, legacy: bool = False) -> Path:
+    """Use the reviewed sibling client only from this home's staged release.
+
+    The older installed command remains recognizable for native preimage
+    review, but a new source-only tools enrollment pins the bundled driver.
+    """
+    original = home / "mem0/bin/mem0-fleet-hook"
+    if legacy:
+        return original
+    script = Path(__file__).absolute()
+    source = script.parents[2]
+    if (source.parent != home / "tools/releases"
+            or not re.fullmatch(r"[0-9a-f]{40}", source.name)):
+        return original
+    if script != source / "memory/bin/mem0-fleet-configure" or script.resolve() != script:
+        raise ProvisionError("Bundled memory helper source path differs")
+    driver = script.with_name("mem0-fleet-hook")
+    try:
+        info = driver.lstat()
+    except OSError as exc:
+        raise ProvisionError("Bundled memory driver is unavailable") from exc
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_nlink != 1 or info.st_mode & 0o022 or not info.st_mode & 0o111):
+        raise ProvisionError("Bundled memory driver is not an owned executable")
+    return driver
 
 
 def shell_value(value: str | Path) -> str:
@@ -109,7 +132,7 @@ def command_for(home: Path, machine: str, harness: str, mode: str, *, include_ho
     env.extend([f"MEM0_MACHINE={shell_value(machine)}", f"MEM0_HARNESS={harness}"])
     clean_test_env = ("-u MEM0_FLEET_TEST_CAPTURE_JSON -u MEM0_FLEET_TEST_SEARCH_JSON "
                       if include_home and not is_local_machine(machine) else "")
-    return "env " + clean_test_env + " ".join(env) + " " + shell_value(installed_driver(home)) + " " + mode
+    return "env " + clean_test_env + " ".join(env) + " " + shell_value(installed_driver(home, legacy=not include_home)) + " " + mode
 
 
 def claude_guard(command: str) -> str:
@@ -244,7 +267,7 @@ def reviewed_recall(command: str, event: str, harness: str, home: Path, machine:
         return True
     if not is_local_machine(machine):
         prefix = ["env", f"MEM0_MACHINE={machine}", f"MEM0_HARNESS={harness}"]
-        if same_command_tokens(tokens, prefix + [str(installed_driver(home)), mode]):
+        if same_command_tokens(tokens, prefix + [str(installed_driver(home, legacy=True)), mode]):
             return True
     for include_home in (True, False):
         generated = command_for(home, machine, harness, mode, include_home=include_home)
@@ -287,7 +310,7 @@ def reviewed_capture(command: str, event: str, harness: str, home: Path, machine
             "env",
             f"MEM0_MACHINE={machine}",
             f"MEM0_HARNESS={harness}",
-            str(installed_driver(home)),
+            str(installed_driver(home, legacy=True)),
             "end",
         ]
         if same_command_tokens(tokens, driver_default):
@@ -804,6 +827,15 @@ def codex_plan(config: Path, codex_home: Path, user_home: Path, machine: str, ap
             row = rows[0]
             if not reviewed_hook(str(row.get("command", "")), event, "codex", user_home, machine):
                 raise ProvisionError(f"unreviewed native {event} command")
+            if installed_driver(user_home) != installed_driver(user_home, legacy=True):
+                # A source-only client may recognize an old owned hook while
+                # reviewing the preimage, but cannot report it as ready: that
+                # hook would still execute the old model-dependent driver.
+                expected = command_tokens(command_for(user_home, machine, "codex", event_mode(event) or ""))
+                actual = command_tokens(str(row.get("command", "")))
+                if (expected is None or actual is None or expected[1] != actual[1]
+                        or not same_command_tokens(actual[0], expected[0])):
+                    raise ProvisionError("native BORG hook is not pinned to the reviewed staged driver")
             if event == "SessionStart" and "compact" not in str(row.get("matcher", "")) and (apply or "hooks.SessionStart" not in hook_changes):
                 raise ProvisionError("native SessionStart recall omits compact")
             selected.append(row)
