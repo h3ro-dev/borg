@@ -61,6 +61,15 @@ def parser() -> argparse.ArgumentParser:
     fleet.add_argument("--instance-id")
     fleet.add_argument("--label")
     fleet.add_argument("--role", action="append", default=[])
+    memory_client = commands.add_parser("memory-client", help="stage and verify this tools node's scoped remote memory lifecycle client")
+    memory_client.add_argument("operation", choices=["stage", "check", "enable"])
+    memory_client.add_argument("--home", type=Path, default=Path(os.environ.get("BORG_HOME", Path.home() / ".borg")))
+    memory_client.add_argument("--machine")
+    memory_client.add_argument("--hub-machine")
+    memory_client.add_argument("--endpoint")
+    memory_client.add_argument("--principal")
+    memory_client.add_argument("--read-scope", action="append", default=[])
+    memory_client.add_argument("--write-scope")
     return cli
 
 
@@ -124,6 +133,22 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "fleet":
             from installer.fleet import manage
             print(json.dumps(manage(doc, args), indent=2))
+        elif args.command == "memory-client":
+            from installer import remote_memory
+            if args.operation == "stage":
+                if not all((args.machine, args.hub_machine, args.endpoint, args.principal,
+                            args.read_scope, args.write_scope)):
+                    raise ValueError("memory-client stage requires machine, hub-machine, endpoint, principal, read-scope and write-scope")
+                result = remote_memory.stage(doc, machine=args.machine, hub_machine=args.hub_machine,
+                    endpoint=args.endpoint, principal=args.principal, read_scopes=args.read_scope,
+                    write_scope=args.write_scope)
+            else:
+                if any((args.machine, args.hub_machine, args.endpoint, args.principal,
+                        args.read_scope, args.write_scope)):
+                    raise ValueError("memory-client check/enable use the existing instance-bound stage; no route arguments")
+                result = remote_memory.check(doc) if args.operation == "check" else remote_memory.enable(doc)
+            print(json.dumps(result, sort_keys=True))
+            return 0 if args.operation != "enable" or result["state"] == "VERIFIED" else 1
         elif args.command == "start":
             from installer import services
             result = services.start(doc, args.components or None)

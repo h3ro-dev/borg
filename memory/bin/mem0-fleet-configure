@@ -79,7 +79,7 @@ def shell_value(value: str | Path) -> str:
     return shlex.quote(str(value))
 
 
-def command_for(home: Path, machine: str, harness: str, mode: str) -> str:
+def command_for(home: Path, machine: str, harness: str, mode: str, *, include_home: bool = True) -> str:
     if is_local_machine(machine):
         token = home / "mem0/data/mcp-token"
         endpoint = os.environ.get("BORG_MEMORY_ENDPOINT")
@@ -96,8 +96,20 @@ def command_for(home: Path, machine: str, harness: str, mode: str) -> str:
             f"MEM0_FLEET_TOKEN_FILE={shell_value(token)}",
             f"MEM0_FLEET_ENDPOINT_FILE={shell_value(endpoint)}",
         ]
+        if include_home:
+            # The driver checks this override before the file. Empty it so a
+            # direct Codex launch cannot redirect the owned token to a stale
+            # inherited endpoint.
+            env.append("MEM0_FLEET_ENDPOINT=")
+            env.append(f"MEM0_FLEET_BASE={shell_value(home / 'mem0')}")
+    # Hooks can also run from a direct CODEX_HOME launch, outside the BORG
+    # conductor's inherited environment. Bind the driver to its owned home.
+    if include_home:
+        env.append(f"BORG_HOME={shell_value(home)}")
     env.extend([f"MEM0_MACHINE={shell_value(machine)}", f"MEM0_HARNESS={harness}"])
-    return "env " + " ".join(env) + " " + shell_value(installed_driver(home)) + " " + mode
+    clean_test_env = ("-u MEM0_FLEET_TEST_CAPTURE_JSON -u MEM0_FLEET_TEST_SEARCH_JSON "
+                      if include_home and not is_local_machine(machine) else "")
+    return "env " + clean_test_env + " ".join(env) + " " + shell_value(installed_driver(home)) + " " + mode
 
 
 def claude_guard(command: str) -> str:
@@ -114,7 +126,11 @@ def unguard(command: str) -> str:
 
 
 def is_memory_hook(value: Any) -> bool:
-    return isinstance(value, dict) and isinstance(value.get("command"), str) and bool(re.search(r"(?:^|[\s/])mem0-[A-Za-z0-9_-]+(?:\s|$)", unguard(value["command"])))
+    # A private BORG home may contain spaces. shlex.quote then leaves a closing
+    # quote directly after the executable name; still classify it for strict
+    # native review instead of appending an ambiguous second writer.
+    return isinstance(value, dict) and isinstance(value.get("command"), str) and bool(
+        re.search(r"(?:^|[\s/'\"])mem0-[A-Za-z0-9_-]+(?:[\s/'\";]|$)", unguard(value["command"])))
 
 
 RECALL_EVENTS = ("SessionStart", "UserPromptSubmit")
@@ -230,14 +246,17 @@ def reviewed_recall(command: str, event: str, harness: str, home: Path, machine:
         prefix = ["env", f"MEM0_MACHINE={machine}", f"MEM0_HARNESS={harness}"]
         if same_command_tokens(tokens, prefix + [str(installed_driver(home)), mode]):
             return True
-    generated = command_for(home, machine, harness, mode)
-    if harness == "claude":
-        generated = claude_guard(generated)
-    generated_tokens = command_tokens(generated)
-    if generated_tokens is None:
-        return False
-    expected_tokens, expected_guard = generated_tokens
-    return same_command_tokens(tokens, expected_tokens) and guarded == expected_guard
+    for include_home in (True, False):
+        generated = command_for(home, machine, harness, mode, include_home=include_home)
+        if harness == "claude":
+            generated = claude_guard(generated)
+        generated_tokens = command_tokens(generated)
+        if generated_tokens is None:
+            continue
+        expected_tokens, expected_guard = generated_tokens
+        if same_command_tokens(tokens, expected_tokens) and guarded == expected_guard:
+            return True
+    return False
 
 
 def reviewed_capture(command: str, event: str, harness: str, home: Path, machine: str) -> bool:
@@ -253,14 +272,15 @@ def reviewed_capture(command: str, event: str, harness: str, home: Path, machine
     if harness != "claude" and guarded:
         return False
 
-    generated = command_for(home, machine, harness, "end")
-    if harness == "claude":
-        generated = claude_guard(generated)
-    generated_tokens = command_tokens(generated)
-    if generated_tokens is not None:
-        expected_tokens, expected_guard = generated_tokens
-        if same_command_tokens(tokens, expected_tokens) and guarded == expected_guard:
-            return True
+    for include_home in (True, False):
+        generated = command_for(home, machine, harness, "end", include_home=include_home)
+        if harness == "claude":
+            generated = claude_guard(generated)
+        generated_tokens = command_tokens(generated)
+        if generated_tokens is not None:
+            expected_tokens, expected_guard = generated_tokens
+            if same_command_tokens(tokens, expected_tokens) and guarded == expected_guard:
+                return True
 
     if harness in {"claude", "codex"} and not is_local_machine(machine) and capture_skip:
         driver_default = [

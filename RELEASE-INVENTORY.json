@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 400,
+  "file_count": 402,
   "files": [
     {
       "bytes": 1914,
@@ -808,9 +808,9 @@
       "sha256": "e59dbdbab95ab3749451d539f8bca3462af6bb79ff6924fec031bc15acefbb77"
     },
     {
-      "bytes": 6629,
+      "bytes": 10117,
       "path": "docs/BLUEPRINT.md",
-      "sha256": "264355fa8af08b6c6f529a35e497da9da746540d11457d2fdccf95fffe27aa98"
+      "sha256": "7cb56803faad3f9e40971e1cc5a76cdf958249dbefda171ae2faa11b1bff3b9b"
     },
     {
       "bytes": 14235,
@@ -1008,9 +1008,9 @@
       "sha256": "4a9edbc2d7704f8d88eb4d797c7d50f411533152cfb44da6b6eae45acc43fe9e"
     },
     {
-      "bytes": 9714,
+      "bytes": 11587,
       "path": "installer/cli.py",
-      "sha256": "cebd7eacfcb53efe76b666bef26beda8a789afb80dc1f2e6f3b53d170056743f"
+      "sha256": "eb784acd24ac37af252c6212313edc2496eae21a97d4ac1bbb5a85e7f2fc5431"
     },
     {
       "bytes": 10302,
@@ -1048,9 +1048,9 @@
       "sha256": "b8573095ab48abf8bede9582452e598afd7118078f6a571d5ee86832f58a7826"
     },
     {
-      "bytes": 19270,
+      "bytes": 20895,
       "path": "installer/health.py",
-      "sha256": "88b70d35ff8e029a90c0ad70a80871a8aa51aff2098e56acdea7213ca9670c2e"
+      "sha256": "f0433a51c99ccf7ceb848ce063945998ccc1014dcafe59373cc4f1a493a9c040"
     },
     {
       "bytes": 14377,
@@ -1088,14 +1088,19 @@
       "sha256": "0d34acd4457a0de2457a2e0b1ce9d29f31e1a4d9dc2db69e358ccae79f9da79c"
     },
     {
-      "bytes": 20705,
+      "bytes": 22256,
       "path": "installer/onboarding.py",
-      "sha256": "02860640403068e6184562161f8e452cbce31746371697b461be16a371edd281"
+      "sha256": "b8bae6cd2e3f971d40c95410d54866fe75d08aafa209fdc75bfd643417271468"
     },
     {
       "bytes": 28468,
       "path": "installer/release_guard.py",
       "sha256": "ee32045bf09da38d41f85eb175e9073b04da6f1a388f983c8f3ae81b8bd16684"
+    },
+    {
+      "bytes": 19665,
+      "path": "installer/remote_memory.py",
+      "sha256": "36273fa78c7078205a13da8730387275b29b83c3c1fbcb24b322895aa042f795"
     },
     {
       "bytes": 352,
@@ -1166,6 +1171,11 @@
       "bytes": 9510,
       "path": "installer/test_release_guard.py",
       "sha256": "846c401865704f0cd8a3b62971a957ed12067059db33ea05b09103783d074dc2"
+    },
+    {
+      "bytes": 26250,
+      "path": "installer/test_remote_memory.py",
+      "sha256": "0cc4fe64df27fbe81216410bee5d43744f4c05315d2524af9b996c16cffbfb2f"
     },
     {
       "bytes": 1547,
@@ -1263,9 +1273,9 @@
       "sha256": "26d85a5bcec6c6eeb657cf7402e0a899f548f4a81627a3acc54b7cd018f8f51c"
     },
     {
-      "bytes": 45554,
+      "bytes": 46802,
       "path": "memory/bin/mem0-fleet-configure",
-      "sha256": "6c837bfb9a8288d3ab242971313a2a6b3b629d72db52b4c010608bf72fd85b65"
+      "sha256": "31d0d4773e40625f878462e50ba689ea8b553d80e78c3ac19b60558cbb4c794d"
     },
     {
       "bytes": 123922,
@@ -2003,7 +2013,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "927bc4b7fc93fcc354eea91f24337b98d289d616292f38fab72c87a95eb85cac",
+  "inventory_sha256": "4fb095bf761e5597f5ece8baf0a6e30f11cc91d4623d3a8afce15b0e0f9409c1",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88047043
+  "total_bytes": 88102743
 }
