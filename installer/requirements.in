@@ -1,5 +1,6 @@
 # Exact direct versions accepted by the BORG runtime; transitive hashes live in requirements.lock.
-mem0ai==2.0.18
+mem0ai[nlp]==2.0.18
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 graphiti-core[falkordb]==0.29.3
 fastmcp==3.4.7
 httpx==0.28.1

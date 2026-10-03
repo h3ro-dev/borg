@@ -1098,14 +1098,14 @@
       "sha256": "ee32045bf09da38d41f85eb175e9073b04da6f1a388f983c8f3ae81b8bd16684"
     },
     {
-      "bytes": 352,
+      "bytes": 493,
       "path": "installer/requirements.in",
-      "sha256": "72eb26b66e894dd6ba376fa7580185bde60afebb584eaef4d7257bebf5169951"
+      "sha256": "23ada7898365882dc10c7c0c30d0e110f7b8537e4de261e308137456c57d71b2"
     },
     {
-      "bytes": 139687,
+      "bytes": 195401,
       "path": "installer/requirements.lock",
-      "sha256": "a87d2ca779ddf00726588aa9d6a7313ec60452e70b77dc6833126132c11cc0e1"
+      "sha256": "af01fbefa8aabd6bb744d01dd0ac6b4b1dfcb9ed6715e1f571a2ca7d490fce70"
     },
     {
       "bytes": 7100,
@@ -2003,7 +2003,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "927bc4b7fc93fcc354eea91f24337b98d289d616292f38fab72c87a95eb85cac",
+  "inventory_sha256": "c9fc99cf20150daf3e3fdddb43273d207b2ca064ccd17ead4e4418160d62bd73",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88047043
+  "total_bytes": 88102898
 }
