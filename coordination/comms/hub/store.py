@@ -918,7 +918,8 @@ class Store:
                                        "recipient_lifecycle": self._recipient_lifecycle(conn, row["assignee"])}
 
     def _later_instruction_refs(
-        self, conn: sqlite3.Connection, actor: str, message: sqlite3.Row, *, pending_only: bool = False
+        self, conn: sqlite3.Connection, actor: str, message: sqlite3.Row, *, pending_only: bool = False,
+        same_work_only: bool = False
     ) -> tuple[list[dict[str, Any]], bool]:
         """Bounded references to later live instructions, never inferred cancellations."""
         rows = conn.execute(
@@ -927,11 +928,11 @@ class Store:
             "AND m.kind = 'instruction' AND m.rowid > (SELECT rowid FROM messages WHERE id = ?) "
             "AND d.state IN ('queued', 'leased', 'acknowledged', 'resolved') "
             "AND (? = 0 OR d.state IN ('queued','leased')) "
-            "AND (m.work_id = ? OR m.work_id IS NULL OR ? IS NULL OR m.scope != ?) "
+            "AND (m.work_id = ? OR m.work_id IS NULL OR (? = 0 AND (? IS NULL OR m.scope != ?))) "
             "AND (m.scope = '/' OR ? = '/' OR instr(? || '/', m.scope || '/') = 1 "
             "OR instr(m.scope || '/', ? || '/') = 1) "
             "ORDER BY m.rowid DESC LIMIT ?",
-            (actor, message["id"], pending_only, message["work_id"], message["work_id"],
+            (actor, message["id"], pending_only, message["work_id"], same_work_only, message["work_id"],
              message["scope"], message["scope"], message["scope"], message["scope"], MAX_LIMIT + 1),
         ).fetchall()
         refs: list[dict[str, Any]] = []
@@ -1395,6 +1396,10 @@ class Store:
         if not isinstance(active_work, dict):
             raise HubError("invalid_input", "active_work must be an object")
         active_work = {key: active_work[key] for key in ("work_id", "assignment_version") if key in active_work}
+        work_id = _text(params.get("work_id"), "work_id", required=False, max_chars=512)
+        peek = params.get("peek", False)
+        if not isinstance(peek, bool):
+            raise HubError("invalid_input", "peek must be a boolean")
         lease_seconds = params.get("lease_seconds", DEFAULT_LEASE_SECONDS)
         if (
             isinstance(lease_seconds, bool)
@@ -1405,18 +1410,19 @@ class Store:
             raise HubError("invalid_input", "lease_seconds must be greater than zero and bounded")
         now_epoch = time.time()
         now_iso = _iso_now()
-        conn.execute(
-            "UPDATE deliveries SET state = 'queued', lease_id = NULL, lease_until = NULL "
-            "WHERE recipient = ? AND state = 'leased' AND lease_until <= ?",
-            (actor, now_epoch),
-        )
-        conn.execute(
-            "UPDATE deliveries SET state = 'expired', lease_id = NULL, lease_until = NULL "
-            "WHERE recipient = ? AND state IN ('queued', 'leased') AND EXISTS ("
-            "SELECT 1 FROM messages m WHERE m.id = deliveries.message_id AND m.expires_at IS NOT NULL "
-            "AND m.expires_at <= ?)",
-            (actor, now_iso),
-        )
+        if not peek:
+            conn.execute(
+                "UPDATE deliveries SET state = 'queued', lease_id = NULL, lease_until = NULL "
+                "WHERE recipient = ? AND state = 'leased' AND lease_until <= ?",
+                (actor, now_epoch),
+            )
+            conn.execute(
+                "UPDATE deliveries SET state = 'expired', lease_id = NULL, lease_until = NULL "
+                "WHERE recipient = ? AND state IN ('queued', 'leased') AND EXISTS ("
+                "SELECT 1 FROM messages m WHERE m.id = deliveries.message_id AND m.expires_at IS NOT NULL "
+                "AND m.expires_at <= ?)",
+                (actor, now_iso),
+            )
         result: list[dict[str, Any]] = []
         # One bounded transaction, not a drain loop. Native reconciliation
         # may re-present this same actor's live instruction lease, never
@@ -1427,11 +1433,14 @@ class Store:
         candidate_rows = conn.execute(
             "SELECT m.id FROM messages m JOIN deliveries d ON d.message_id = m.id "
             "WHERE d.recipient = ? AND (d.state = 'queued' OR "
-            "(? AND m.kind = 'instruction' AND d.state = 'leased')) "
+            "(? AND m.kind = 'instruction' AND d.state = 'leased') OR "
+            "(? AND d.state = 'leased' AND d.lease_until IS NOT NULL AND d.lease_until <= ?)) "
+            "AND (? OR m.expires_at IS NULL OR m.expires_at > ?) "
+            "AND (? IS NULL OR m.work_id = ?) "
             "ORDER BY CASE WHEN m.kind = 'instruction' THEN 0 ELSE 1 END, "
             "CASE WHEN m.kind = 'instruction' THEN m.rowid END DESC, "
             "COALESCE(d.last_attempt_at, m.created_at), m.created_at, m.id LIMIT ?",
-            (actor, reconcile, MAX_LIMIT),
+            (actor, reconcile, peek, now_epoch, not peek, now_iso, work_id, work_id, MAX_LIMIT),
         ).fetchall()
         if limit:
             for candidate in candidate_rows:
@@ -1449,15 +1458,31 @@ class Store:
                     authority is None or not authority["allowed"] or binding_mismatch
                 ):
                     reason = (authority or {}).get("reason", "assignment notice recipient is not current")
-                    conn.execute(
-                        "UPDATE deliveries SET state = 'rejected', rejection_reason = ?, lease_id = NULL, "
-                        "lease_until = NULL WHERE message_id = ? AND recipient = ? AND state IN ('queued','leased')",
-                        (reason, message_id, actor),
-                    )
+                    if not peek:
+                        conn.execute(
+                            "UPDATE deliveries SET state = 'rejected', rejection_reason = ?, lease_id = NULL, "
+                            "lease_until = NULL WHERE message_id = ? AND recipient = ? AND state IN ('queued','leased')",
+                            (reason, message_id, actor),
+                        )
                     continue
                 delivery = conn.execute(
                     "SELECT * FROM deliveries WHERE message_id = ? AND recipient = ?", (message_id, actor)
                 ).fetchone()
+                if peek and delivery is not None:
+                    item = self._message_dict(message)
+                    self._add_routing_context(conn, actor, message, item)
+                    item["delivery"] = self._delivery_dict(delivery)
+                    item["delivery"]["lease_id"] = None
+                    item["delivery"]["effective_state"] = (
+                        "queued" if delivery["state"] == "queued" else
+                        "expired_lease" if delivery["lease_until"] is not None
+                        and delivery["lease_until"] <= now_epoch else "live_lease")
+                    item["delivery"]["recipient_lifecycle"] = self._recipient_lifecycle(conn, actor)
+                    item["authority"] = authority
+                    item["peeked"] = True
+                    self._add_instruction_order_context(conn, actor, message, item)
+                    result.append(item)
+                    continue
                 if reconcile and delivery is not None and delivery["state"] == "leased":
                     item = self._message_dict(message)
                     self._add_routing_context(conn, actor, message, item)
@@ -1489,12 +1514,14 @@ class Store:
                 item["authority"] = authority
                 self._add_instruction_order_context(conn, actor, message, item)
                 result.append(item)
-        return {"messages": result, "resume_reconciliation": self._resume_checkpoint(conn, actor, active_work)}
+        return {"messages": result, "resume_reconciliation": self._resume_checkpoint(conn, actor, active_work),
+                "poll_mode": {"work_id": work_id, "peek": peek}}
 
     def _op_messages_ack(
         self, conn: sqlite3.Connection, actor: str, params: dict[str, Any]
     ) -> dict[str, Any]:
         message_id = _text(params.get("message_id"), "message_id", max_chars=256)
+        work_id = _text(params.get("work_id"), "work_id", required=False, max_chars=512)
         state = _text(params.get("state"), "state", max_chars=32)
         assert message_id is not None and state is not None
         if state not in {"acknowledged", "resolved"}:
@@ -1529,17 +1556,20 @@ class Store:
                         (message_id, actor),
                     )
                 raise HubError("stale_lease", "lease is stale or no longer owned", 409)
+        message = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        if message is None:
+            raise HubError("not_found", "message not found", 404)
+        if work_id is not None and work_id != message["work_id"]:
+            raise HubError("invalid_input", "work_id must match the message")
         if current_state == "resolved":
             if state == "resolved":
                 return {"delivery": self._delivery_dict(delivery)}
             raise HubError("invalid_transition", "resolved delivery cannot move backward", 409)
         if current_state in {"expired", "rejected", "superseded"}:
             raise HubError("invalid_transition", "delivery is no longer actionable", 409)
-        message = conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
-        if message is None:
-            raise HubError("not_found", "message not found", 404)
         if message["kind"] == "instruction" and current_state in {"queued", "leased"}:
-            later, truncated = self._later_instruction_refs(conn, actor, message, pending_only=True)
+            later, truncated = self._later_instruction_refs(conn, actor, message, pending_only=True,
+                                                              same_work_only=work_id is not None)
             if later or truncated:
                 raise HubError(
                     "instruction_reconciliation_required",
@@ -2594,6 +2624,10 @@ class Store:
             request_id = self._validate_request_id(request_id)
         params_hash = _hash_params(params)
         write = operation in self._MUTATIONS
+        # Peek is read-only, including when reusing a mutation request_id: it
+        # neither replays nor conflict-checks or inserts a mutation receipt.
+        if operation == "messages.poll" and params.get("peek") is True:
+            write = False
         with self._transaction(write) as conn:
             if write and request_id is not None:
                 receipt = conn.execute(

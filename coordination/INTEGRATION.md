@@ -106,6 +106,25 @@ Use the returned `client_config` with the unchanged native CLI:
 Native mutation request IDs are idempotency keys. A delivery lease ID returned
 by `messages.poll` is required while acknowledging a leased delivery.
 
+`messages.poll` accepts explicit `work_id` to lease only that work, including
+its binding notices. `active_work.work_id` alone does not filter. The pending
+instruction head stays actor-wide. The response echoes `poll_mode` with
+`work_id` and `peek`, so clients can detect an older hub.
+
+`peek: true` previews without changing leases, attempts, expired deliveries or
+request receipts. Items have `peeked: true`, `delivery.lease_id: null`, and
+`delivery.effective_state` of `queued`, `expired_lease`, or `live_lease` (the
+last only for instructions with `reconcile: true`). Reusing a mutation request
+ID for a peek neither replays nor conflict-checks that receipt. Non-peek polls
+retain normal idempotency and conflict checking. `reconcile` defaults to false.
+
+`messages.ack` accepts an optional `work_id` that must match its message. This
+narrows the newer-instruction guard to that work and unscoped (NULL-work) holds;
+same-work corrections and overlapping unscoped holds still block. Residual
+risk: a hold issued under a foreign work ID no longer blocks a work-scoped ack.
+Omitting these parameters preserves the original polling and acknowledgment
+rules; informational later-instruction references remain unfiltered.
+
 ## Beads install and init
 
 The supported upstream release is `gastownhall/beads` v1.2.2, commit

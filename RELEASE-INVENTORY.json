@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 410,
+  "file_count": 411,
   "files": [
     {
       "bytes": 1914,
@@ -513,9 +513,9 @@
       "sha256": "c36b023658bb8611b647b70b1427cc5c8198a5bf649046c515b8100fe6e7ce56"
     },
     {
-      "bytes": 5884,
+      "bytes": 7104,
       "path": "coordination/INTEGRATION.md",
-      "sha256": "1b9445f1b97952e4281e47fd8c90701332769245f5e56482d92b6ec647112775"
+      "sha256": "0dc08c31c3d05e7a36062f9868cefe8852c4546ee65ee0bb3164ae68bff1ef58"
     },
     {
       "bytes": 1065,
@@ -525,7 +525,7 @@
     {
       "bytes": 13284,
       "path": "coordination/PROVENANCE.json",
-      "sha256": "f8826cee18dbb78e2d58771cc2960a427a2592169b49581c85e7aa7c76797a63"
+      "sha256": "60b79ebde3385f60822f2e2eb36676fcc0495296020eb11b2fdf9ec31a6e45b0"
     },
     {
       "bytes": 1355,
@@ -588,9 +588,9 @@
       "sha256": "470eca9ee5f8c35492df2b4463c22f095758e3963c417a98b7a5e664e6a39769"
     },
     {
-      "bytes": 30329,
+      "bytes": 30885,
       "path": "coordination/comms/hub/cli.py",
-      "sha256": "be0d0925f66b47d544cb6368526c48630de1117149ee0c9532375b9e0c704826"
+      "sha256": "94456e50138b357dfd2441650c0daec1cd14f5c832dc3be170f7e13fbafe0034"
     },
     {
       "bytes": 27913,
@@ -658,9 +658,9 @@
       "sha256": "17b556e0cbd1f10858696626b0969d319c2dd32b7a24bd90b4c03fd4b9baafc8"
     },
     {
-      "bytes": 123809,
+      "bytes": 126098,
       "path": "coordination/comms/hub/store.py",
-      "sha256": "94f13404ae69ef68d853bacad983dc105eeda63a03e1848e97818b52b0b98483"
+      "sha256": "ae6ab22fd3f324290166cba9e92e504ddb0de4e956c12047d4b6ed1c980a3575"
     },
     {
       "bytes": 13136,
@@ -676,6 +676,11 @@
       "bytes": 6587,
       "path": "coordination/comms/hub/tests/test_inbox_estate.py",
       "sha256": "33471c5b8f196cfcf1db99dc6498f7bb5bf77808de38b1b183e2802238460a4a"
+    },
+    {
+      "bytes": 8066,
+      "path": "coordination/comms/hub/tests/test_messages_poll_scoping.py",
+      "sha256": "779f4f3abc48a8581a3abcd5d147181c3a4f41afba67d4e02376e796db71cf40"
     },
     {
       "bytes": 1209,
@@ -2053,7 +2058,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "3d724df937b54c24b8936d7e10143deaac0e158734d0428df67b860a99f2ad84",
+  "inventory_sha256": "3750055fb37afdfd055d524fc1db6f216f534a3ad9c9dd54d428bd2f97756f87",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88199793
+  "total_bytes": 88211924
 }

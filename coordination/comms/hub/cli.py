@@ -101,12 +101,16 @@ def _operation_schema(operation: str) -> dict[str, Any]:
             "limit": {"type": "integer", "minimum": 1, "maximum": 100},
             "lease_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 86400,
                               "description": "Effective lease duration; low-level default is 60 seconds."},
-            "reconcile": {"type": "boolean", "default": True},
+            "reconcile": {"type": "boolean", "default": False,
+                          "description": "Set true at work checkpoints to re-present live instruction leases."},
+            "work_id": {"type": "string", "description": "Lease only deliveries carrying this work_id; omit for the whole queue."},
+            "peek": {"type": "boolean", "description": "Read-only preview: no lease, no attempts, no receipt."},
             "active_work": {"type": "object", "properties": {
                 "work_id": text, "assignment_version": {"type": "integer", "minimum": 1}},
                 "additionalProperties": False},
         }, []),
         "messages.ack": ({
+            "work_id": {"type": "string", "description": "Narrow the newer-instruction guard to this work and unscoped holds."},
             "message_id": text, "state": {"enum": ["acknowledged", "resolved"]},
             "lease_id": {"type": "string", "description": "Required while leased; omit after acknowledgment."},
             "receipt_ref": text, "work_outcome_ref": text,
@@ -302,7 +306,7 @@ def _mcp_tools() -> list[dict[str, Any]]:
     })
     descriptions = {
         "messages.send": "Send a durable work message. Use verified recipient IDs, or current-owner routing with work/version. Supersession is explicit for passive status only.",
-        "messages.poll": "Lease your pending deliveries. Use reconcile=true and incorporate newer instructions first. A current lease is required for acknowledgment.",
+        "messages.poll": "Lease your pending deliveries. Use reconcile=true and incorporate newer instructions first. A current lease is required for acknowledgment. work_id scopes the lease to one work; peek previews without leasing.",
         "messages.ack": "Record incorporation (acknowledged) or later delivery completion (resolved). Example: message_id, state='acknowledged', lease_id=current lease. Work acceptance needs its own evidence.",
         "messages.get": "Read a message and current delivery/authority evidence by its ID.",
         "messages.list": "Read without leasing. Follow page.next_cursor for full coverage. Own pending summary example: view='pending_metadata', limit=10; no other business fields.",

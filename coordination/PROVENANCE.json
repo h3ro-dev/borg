@@ -35,7 +35,7 @@
     },
     {
       "change": "generic product naming and policy reference",
-      "packaged_sha256": "be0d0925f66b47d544cb6368526c48630de1117149ee0c9532375b9e0c704826",
+      "packaged_sha256": "94456e50138b357dfd2441650c0daec1cd14f5c832dc3be170f7e13fbafe0034",
       "path": "comms/hub/cli.py",
       "status": "portable_patch",
       "upstream_sha256": "fab204be0abfc3c8b9f81aa5123148c6c7c09bd6ec9527d9793bf9f2f8c13333"
@@ -125,7 +125,7 @@
     },
     {
       "change": "generic owner documentation",
-      "packaged_sha256": "94f13404ae69ef68d853bacad983dc105eeda63a03e1848e97818b52b0b98483",
+      "packaged_sha256": "ae6ab22fd3f324290166cba9e92e504ddb0de4e956c12047d4b6ed1c980a3575",
       "path": "comms/hub/store.py",
       "status": "portable_patch",
       "upstream_sha256": "bcbfb20d2865cddc61ab4bcb53da743a5bf8a94b2916a1a3f0c3007822551895"
