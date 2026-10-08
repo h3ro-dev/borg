@@ -400,11 +400,12 @@ class BlueprintTests(unittest.TestCase):
         self.assertNotIn("provider_launches", before["components"])
         active = self.root / "private/provider-launches/active"
         active.mkdir(parents=True)
-        for name in ("first", "second"):
+        for name, runtime in (("first", "claude"), ("second", "gemini")):
             (active / (name + ".json")).write_text(json.dumps({
-                "launchedAt": datetime.now(timezone.utc).isoformat()}))
+                "launchedAt": datetime.now(timezone.utc).isoformat(), "runtime": runtime}))
         after = self.health(doc)
         self.assertEqual(after["components"]["provider_launches"]["active"], 2)
+        self.assertEqual(after["components"]["provider_launches"]["by_runtime"], {"claude": 1, "gemini": 1})
         self.assertGreaterEqual(after["components"]["provider_launches"]["oldest_active_hours"], 0)
         for key in ("ready", "local_services_ready"):
             self.assertEqual(before[key], after[key])

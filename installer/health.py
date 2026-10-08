@@ -222,12 +222,16 @@ def status(doc: dict) -> dict:
         try:
             active = root / "private/provider-launches/active"
             if not active.exists():
-                components["provider_launches"] = {"active": 0}
+                components["provider_launches"] = {"active": 0, "by_runtime": {}}
             else:
                 records = [json.loads(p.read_text()) for p in active.glob("*.json")]
                 ages = [(datetime.now(timezone.utc) - datetime.fromisoformat(
                     row["launchedAt"].replace("Z", "+00:00"))).total_seconds() / 3600 for row in records]
-                components["provider_launches"] = {"active": len(records),
+                by_runtime = {}
+                for row in records:
+                    runtime = row.get("runtime") or "unknown"
+                    by_runtime[runtime] = by_runtime.get(runtime, 0) + 1
+                components["provider_launches"] = {"active": len(records), "by_runtime": by_runtime,
                     "oldest_active_hours": round(max([0, *ages]), 2)}
         except (OSError, ValueError, KeyError, TypeError):
             components["provider_launches"] = {"state": "unavailable"}

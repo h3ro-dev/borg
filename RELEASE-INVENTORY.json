@@ -1083,9 +1083,9 @@
       "sha256": "b8573095ab48abf8bede9582452e598afd7118078f6a571d5ee86832f58a7826"
     },
     {
-      "bytes": 20088,
+      "bytes": 20335,
       "path": "installer/health.py",
-      "sha256": "9e3a990cf038d7fc8b061f1c3f836bcb7a1e2323a2a7718248aa7b17fd23097c"
+      "sha256": "a09ca15deadef1ceb1e7068891183768d7e15354ed0f55ae2bf515d01d12d98d"
     },
     {
       "bytes": 14377,
@@ -1163,9 +1163,9 @@
       "sha256": "737a4d11806110b88cf94719972f4224adee99139e7d04db1048f610329795c6"
     },
     {
-      "bytes": 24115,
+      "bytes": 24277,
       "path": "installer/test_blueprint.py",
-      "sha256": "bdcbb7509fa3d9d43154b2c2026b447ff0d83231adcd0aba96e20b1b6315180b"
+      "sha256": "af9f1e3a81c09c9f2ce48eb51fad773b507cb862705c831682e011fbd8ecdef8"
     },
     {
       "bytes": 7063,
@@ -2058,7 +2058,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "3750055fb37afdfd055d524fc1db6f216f534a3ad9c9dd54d428bd2f97756f87",
+  "inventory_sha256": "d4f88cdece6ec1128258359ba4ac61ba3913bafe7cb913f2e9a1b88fa248db72",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88211924
+  "total_bytes": 88212333
 }
