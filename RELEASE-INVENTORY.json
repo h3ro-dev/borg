@@ -968,9 +968,9 @@
       "sha256": "7233df41ebc3d84167e3de1444fbcb6403ec4d24ca4cc31be45c1ac6b36f15d3"
     },
     {
-      "bytes": 7218,
+      "bytes": 20453,
       "path": "graph/tests/test_state_checkpoint.py",
-      "sha256": "87ea12e7f08e1b0822c1de2ea987606f26d20ca32ba7c7b236958a8715674281"
+      "sha256": "11c65e95d67f0b234713812345bf8fb972689359c483b74334626ac8867b9919"
     },
     {
       "bytes": 13361,
@@ -1143,9 +1143,9 @@
       "sha256": "54cfbfaa6dfa7a6e72bd7fbfc1c99501e0c66e2ae972db2c13522a1a9e44de49"
     },
     {
-      "bytes": 15816,
+      "bytes": 23986,
       "path": "installer/state_checkpoint.py",
-      "sha256": "1fe041a544d2840b414468fbc5feff5d7d7994b0d9241549853ebd48d630dee6"
+      "sha256": "bc9dc2cc6ef4f8224c78cdac1225f1b07c75e76c50bd59386818f4e8da3b99d5"
     },
     {
       "bytes": 1354,
@@ -2048,7 +2048,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "5cb019a40fa7d3487536f842831210f3d6304d044d2928d9671697305f00c2a5",
+  "inventory_sha256": "b77625f759f0785fb701b25462a44176f0cf91d7e206242d865ee21b1376e356",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88183617
+  "total_bytes": 88205022
 }
