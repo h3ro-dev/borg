@@ -394,6 +394,22 @@ class BlueprintTests(unittest.TestCase):
         self.assertNotIn("capture_hooks", result["components"])
         self.assertFalse(self.health(doc, hub_ready=False)["local_services_ready"])
 
+    def test_brain_skip_counts_are_filesystem_only_and_do_not_change_state(self):
+        doc = self.initialize()
+        doc["memory"] = {"collection": "fixture"}
+        before = health.brain_health(doc, False)
+        self.assertEqual(before, {"state": "stopped", "skipped_retries": 0, "dropped_retries": 0})
+        path = self.root / "graphiti/data/graph-feed-last-receipt.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema": "graph-feed/2", "collection": "fixture",
+            "auto_skipped_retries": 1, "operator_dropped_retries": 2}))
+        path.chmod(0o600)
+        with patch.object(health, "get_json", side_effect=AssertionError("network probe")):
+            result = health.brain_health(doc, False)
+        self.assertEqual(result, {"state": "stopped", "skipped_retries": 1, "dropped_retries": 2})
+        path.write_text(json.dumps({"schema": "graph-feed/2", "collection": "wrong", "auto_skipped_retries": 99}))
+        self.assertEqual(health.brain_health(doc, False), before)
+
     def test_external_selections_cannot_be_reported_ready(self):
         doc = self.initialize(components=["grok"], integrations=["github"])
         result = self.health(doc)

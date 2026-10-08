@@ -77,6 +77,56 @@ class ReconcileTests(unittest.TestCase):
         options.update(kwargs)
         return asyncio.run(b.reconcile_unproven(**options))
 
+    def bounded_entry(self, status="ungrounded_skipped"):
+        state = b.load_state(self.state)
+        state["retry"][self.key].update(status=status, retryable=False, attempts=10, same_error_streak=3)
+        b.save_state_atomic(self.state, state)
+        self.sha = hashlib.sha256(self.state.read_bytes()).hexdigest()
+        return state["retry"][self.key]["rows"]
+
+    def test_explicit_requeue_skipped_and_dropped_then_attempts_original(self):
+        for status in ("ungrounded_skipped", "operator_dropped"):
+            with self.subTest(status=status):
+                # Start a new retained entry for each disposition, with no processed facts.
+                self.state.write_bytes(self.original)
+                rows = self.bounded_entry(status)
+                receipt = self.run_reconcile(requeue=True, episodes=[self.key],
+                    writer_factory=lambda: self.fail("state-only requeue must not open or delete graph data"))
+                entry = b.load_state(self.state)["retry"][self.key]
+                self.assertEqual((entry["status"], entry["retryable"], entry["attempts"], entry["same_error_streak"]),
+                                 ("retryable", True, 0, 0))
+                self.assertEqual(entry["rows"], rows)
+                self.assertEqual((receipt["action"], receipt["status"], receipt["removed_uuids"]), ("requeue", "complete", []))
+                writer = RecordingWriter()
+                result = asyncio.run(b.run_once(Source([self.source]), writer, state_path=self.state, scope_map_path=self.map))
+                self.assertEqual(writer.calls[0]["episode_id"], self.key)
+                self.assertEqual(result["pending_graph_retries"], 0)
+
+    def test_drop_skipped_preserves_graph_and_rows(self):
+        rows = self.bounded_entry()
+        receipt = self.run_reconcile(drop=True, episodes=[self.key], reason="reviewed projection skip",
+            writer_factory=lambda: self.fail("skip-to-drop must not open graph data"))
+        entry = b.load_state(self.state)["retry"][self.key]
+        self.assertEqual(entry["status"], "operator_dropped")
+        self.assertEqual(entry["rows"], rows)
+        self.assertEqual(receipt["removed_uuids"], [])
+
+    def test_explicit_requeue_refuses_live_brain_bad_hash_unknown_and_missing_episode(self):
+        self.bounded_entry()
+        before = self.state.read_bytes()
+        self.brain.write_text(json.dumps({"pid": os.getpid()}))
+        with self.assertRaisesRegex(b.ReconcileRefused, "brain_running"):
+            self.run_reconcile(requeue=True, episodes=[self.key])
+        self.brain.unlink()
+        with self.assertRaisesRegex(b.ReconcileRefused, "state_hash_mismatch"):
+            self.run_reconcile(requeue=True, episodes=[self.key], expected_sha256="0"*64)
+        with self.assertRaisesRegex(b.ReconcileRefused, "no_matching_terminal_entry"):
+            self.run_reconcile(requeue=True, episodes=["unknown"])
+        with self.assertRaisesRegex(b.ReconcileRefused, "requeue_requires_one_episode"):
+            self.run_reconcile(requeue=True)
+        self.assertEqual(self.state.read_bytes(), before)
+        self.assertEqual(self.graph.removed, [])
+
     def test_requeue_then_native_recovery_clears_without_resetting_counters(self):
         receipt = self.run_reconcile()
         self.assertEqual(self.graph.removed, [self.recovery, self.key])

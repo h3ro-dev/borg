@@ -72,8 +72,18 @@ def brain_health(doc: dict, is_running: bool, *, now: float | None = None) -> di
     from installer.config import read_private
     from installer.brain_service import CYCLE_MAX_SECONDS, SUCCESS_MAX_AGE_SECONDS
     root = Path(doc["home"])
+    counts = {"skipped_retries": 0, "dropped_retries": 0}
+    try:
+        feed = read_private(root / "graphiti/data/graph-feed-last-receipt.json")
+        if feed.get("schema") == "graph-feed/2" and feed.get("collection") == doc["memory"]["collection"]:
+            for target, source in (("skipped_retries", "auto_skipped_retries"), ("dropped_retries", "operator_dropped_retries")):
+                value = feed.get(source, 0)
+                if type(value) is int and value >= 0:
+                    counts[target] = value
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
     if not is_running:
-        return {"state": "stopped"}
+        return {"state": "stopped", **counts}
     try:
         receipt = read_private(root / "graphiti/data/brain-state.json")
         if (receipt.get("schema") != "borg-brain-cycle/v1" or receipt.get("instance_id") != doc["instance_id"]
@@ -91,9 +101,9 @@ def brain_health(doc: dict, is_running: bool, *, now: float | None = None) -> di
                     or state == "running" and current_age <= CYCLE_MAX_SECONDS))
         return {"state": "cycle_verified" if good else "stale_or_failed", "cycle_state": state,
                 "success_age_seconds": round(age, 1), "exit_codes": receipt.get("exit_codes"),
-                "last_success": success, "started_at": receipt["started_at"]}
+                "last_success": success, "started_at": receipt["started_at"], **counts}
     except (OSError, ValueError, KeyError, TypeError):
-        return {"state": "unverified"}
+        return {"state": "unverified", **counts}
 
 
 def graph_llm_health(doc: dict) -> dict:

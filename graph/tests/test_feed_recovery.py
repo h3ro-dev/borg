@@ -119,6 +119,61 @@ class FeedRecoveryTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def content_failures(self, messages):
+        class FailingWriter(RecordingWriter):
+            async def add_episode(writer, group):
+                writer.calls.append(group)
+                raise ValueError(messages[len(writer.calls) - 1])
+        writer = FailingWriter()
+        source = Source([point("content", scope="team:content", run_id="content")])
+        receipts = []
+        with mock.patch.object(backfill, "LOG_F", self.root / "feed.log"):
+            for _ in messages:
+                receipts.append(asyncio.run(backfill.run_once(source, writer,
+                    state_path=self.state, scope_map_path=self.scope_map)))
+        return writer, source, receipts
+
+    def test_three_same_errors_skip_with_receipt_and_block_unchanged_source(self):
+        import hashlib
+        writer, source, receipts = self.content_failures(["shortened identifier"] * 3)
+        state = backfill.load_state(self.state)
+        key, entry = next(iter(state["retry"].items()))
+        self.assertEqual((entry["status"], entry["retryable"], entry["same_error_streak"]),
+                         ("ungrounded_skipped", False, 3))
+        self.assertEqual(entry["skip_reason"], "same_content_error_x3")
+        path = self.root / "reconcile" / (entry["auto_skip_receipt_id"] + ".json")
+        receipt = json.loads(path.read_text())
+        self.assertEqual(receipt["schema"], "graph-reconcile/1")
+        self.assertEqual((receipt["action"], receipt["status"]), ("auto_skip", "complete"))
+        self.assertEqual(receipt["episodes"], [key])
+        self.assertEqual(receipt["point_ids"], ["content"])
+        self.assertIn("shortened identifier", receipt["error_message"])
+        self.assertEqual(receipt["state_sha256_after"], hashlib.sha256(self.state.read_bytes()).hexdigest())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(receipts[-1]["retry_count"], 0)
+        self.assertEqual(receipts[-1]["outcome"], "PASS")
+        result = asyncio.run(backfill.run_once(source, writer, state_path=self.state, scope_map_path=self.scope_map))
+        self.assertEqual(len(writer.calls), 3)
+        self.assertEqual(result["pending_graph_retries"], 0)
+        self.assertEqual(result["auto_skipped_retries"], 1)
+        self.assertEqual(result["operator_dropped_retries"], 0)
+        self.assertEqual(result["retry_status_counts"], {"ungrounded_skipped": 1})
+        self.assertEqual(backfill.load_state(self.state)["retry"][key]["rows"], entry["rows"])
+        self.assertEqual(state["graph_processed"], {})
+        self.assertEqual(json.loads((self.root / "graph-feed-last-receipt.json").read_text())["auto_skipped_retries"], 1)
+
+    def test_changed_error_resets_streak(self):
+        self.content_failures(["first", "first", "different"])
+        entry = next(iter(backfill.load_state(self.state)["retry"].values()))
+        self.assertEqual((entry["status"], entry["same_error_streak"], entry["attempts"]), ("retryable", 1, 3))
+        self.assertFalse((self.root / "reconcile").exists())
+
+    def test_varying_errors_stop_at_attempt_cap(self):
+        self.content_failures(["failure " + str(i) for i in range(10)])
+        entry = next(iter(backfill.load_state(self.state)["retry"].values()))
+        self.assertEqual((entry["status"], entry["skip_reason"], entry["attempts"]),
+                         ("ungrounded_skipped", "attempt_cap", 10))
+
     def test_never_returning_add_times_out_retryably_and_later_group_runs(self):
         writer = RecordingWriter(hang_runs={"run-hung"})
         points = [

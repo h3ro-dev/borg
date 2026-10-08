@@ -863,9 +863,9 @@
       "sha256": "727a626ea92499793e35fa3f21927528db05d7fa2b689784b0408e597e45d853"
     },
     {
-      "bytes": 120428,
+      "bytes": 124454,
       "path": "graph/backfill.py",
-      "sha256": "81f7a44a02bfeec512c720b0bd6bdfe3bb26b93d5d7a87f1732a5731b0e91257"
+      "sha256": "9498d07185663113682ea8c5ca15224966921265fd8e5fcb99a6a7092da446f2"
     },
     {
       "bytes": 881,
@@ -923,9 +923,9 @@
       "sha256": "88605a964622a044bdb0834b70c6b1eb86552e8f0e50aa16db23ecd8f08ec5b2"
     },
     {
-      "bytes": 30388,
+      "bytes": 33780,
       "path": "graph/tests/test_feed_recovery.py",
-      "sha256": "2d74751bce999e5fc82e1253313dbd7677e3329409aa7f2236c4eb291ed80797"
+      "sha256": "8b8695b86be5279b23a2b4a191f243c56fa0e36f63ced3f82af7ed234cfade30"
     },
     {
       "bytes": 10746,
@@ -973,9 +973,9 @@
       "sha256": "87ea12e7f08e1b0822c1de2ea987606f26d20ca32ba7c7b236958a8715674281"
     },
     {
-      "bytes": 13361,
+      "bytes": 16526,
       "path": "graph/tests/test_unproven_reconcile.py",
-      "sha256": "19d4cd828c8953da8909fe253b02614113e76868db24d543594b3d6532687028"
+      "sha256": "431c4c47b23e5a41683cbc5bacb5b400ebc56287ec3445beccc53b3fbefc436b"
     },
     {
       "bytes": 1308,
@@ -1073,9 +1073,9 @@
       "sha256": "b8573095ab48abf8bede9582452e598afd7118078f6a571d5ee86832f58a7826"
     },
     {
-      "bytes": 19270,
+      "bytes": 19894,
       "path": "installer/health.py",
-      "sha256": "88b70d35ff8e029a90c0ad70a80871a8aa51aff2098e56acdea7213ca9670c2e"
+      "sha256": "b35e54dddaf0ae7adab000b7a3966f9af4d76c6d2f74cb57eabda61270d2763d"
     },
     {
       "bytes": 14377,
@@ -1153,9 +1153,9 @@
       "sha256": "737a4d11806110b88cf94719972f4224adee99139e7d04db1048f610329795c6"
     },
     {
-      "bytes": 23295,
+      "bytes": 24345,
       "path": "installer/test_blueprint.py",
-      "sha256": "43e497a602697ac523d653d69a9be1db4aadd5ab9246cdb987a6cca0b5293b98"
+      "sha256": "3790554528324bd1338659ec2e3154651205e7e6af86332442ddad5b244a8d48"
     },
     {
       "bytes": 7063,
@@ -2048,7 +2048,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "5cb019a40fa7d3487536f842831210f3d6304d044d2928d9671697305f00c2a5",
+  "inventory_sha256": "0308276517077221543a38975268211f406d0c76533298a3b4dcda814e685b94",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88183617
+  "total_bytes": 88195874
 }
