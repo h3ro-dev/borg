@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 406,
+  "file_count": 409,
   "files": [
     {
       "bytes": 1914,
@@ -1583,6 +1583,21 @@
       "sha256": "e7fbafcf0df3bf3aabbc70593a11145206b532cc69d83231d9ae295e13c63bd3"
     },
     {
+      "bytes": 4830,
+      "path": "ops/local-patches/20261008-worker-binding-and-backlog.patch",
+      "sha256": "76ebedd98dd764be0ad70a1746917ed42a6883492f129bbb680a937a210c52c5"
+    },
+    {
+      "bytes": 986,
+      "path": "ops/local-patches/README.md",
+      "sha256": "decf9b3aa5d3043935bec4c9147d0fd973ad27c346c179ebb56c52e8d05fc19d"
+    },
+    {
+      "bytes": 6427,
+      "path": "ops/tests/test_local_worker_patches.py",
+      "sha256": "2e83d4204d658c8caa0432b3a1846d70bca9f5f5b633f6388912b3e3d0fb4ade"
+    },
+    {
       "bytes": 46093,
       "path": "platform/catalog.json",
       "sha256": "ecfbb532a854e3552351c48489c7b43e3907e9aefa52183449b7aca250884afa"
@@ -2033,7 +2048,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "ffae3228483f1435a0f1090f1e3a52c8114234e69a589ec2d7adfbd29447d883",
+  "inventory_sha256": "5cb019a40fa7d3487536f842831210f3d6304d044d2928d9671697305f00c2a5",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88171374
+  "total_bytes": 88183617
 }
