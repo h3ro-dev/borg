@@ -19,6 +19,7 @@ import subprocess
 import time
 import urllib.request
 import tarfile
+import tempfile
 
 
 def digest(path):
@@ -75,6 +76,81 @@ def graph_counts(client):
         rows = client.execute_command('GRAPH.RO_QUERY', key, 'MATCH (n) RETURN count(n)')
         result[key] = int(rows[1][0][0])
     return result
+
+
+def checkpoint_beads(home, destination, stage, proof):
+    """Seal a native Dolt backup; a raw embedded database copy is advisory only."""
+    workspace = home / 'beads'
+    target = stage / '.borg/beads'
+    target.mkdir(parents=True, mode=0o700)
+    backup = destination / 'beads-dolt-backup'
+    executable = str(home / 'bin/bd') if (home / 'bin/bd').exists() else 'bd'
+
+    def bd(cwd, *args, check=True):
+        env = dict(os.environ, BEADS_DIR=str(cwd / '.beads'), BD_NON_INTERACTIVE='1')
+        # An inherited database override must not redirect the isolated restore.
+        env.pop('BEADS_DB', None)
+        result = subprocess.run([executable, '--actor', 'codex-primary', *args],
+                                cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=180)
+        if check and result.returncode:
+            raise RuntimeError('beads_' + '_'.join(args[:2]) + '_failed')
+        return result
+
+    def count(cwd):
+        rows = json.loads(bd(cwd, 'list', '--all', '--limit', '0', '--json',
+                             '--include-infra', '--include-templates', '--include-gates').stdout)
+        if not isinstance(rows, list):
+            raise RuntimeError('beads_invalid_issue_list')
+        return len(rows)
+
+    bd(workspace, 'backup', 'init', str(backup))
+    proof['beads_backup_destination'] = str(backup)
+    bd(workspace, 'backup', 'sync', '--quiet')
+    before = file_map(backup)
+    if not before:
+        raise RuntimeError('beads_native_backup_empty')
+    copy_tree(backup, target / 'dolt-backup')
+    if before != file_map(backup) or before != file_map(target / 'dolt-backup'):
+        raise RuntimeError('beads_native_backup_changed_during_copy')
+    proof['beads_native_backup_sha256'] = before
+    exported = target / 'export.jsonl'
+    bd(workspace, 'export', '--all', '-o', str(exported))
+    exported.chmod(0o600)
+    with exported.open() as stream:
+        export_count = sum(1 for line in stream if line.strip() and json.loads(line))
+    live_count = count(workspace)
+    proof.update(beads_live_issue_count=live_count, beads_export_issue_count=export_count)
+    if export_count != live_count:
+        raise RuntimeError('beads_export_count_mismatch')
+
+    # Keep the isolated restored database as evidence; never overwrite live Beads.
+    restored = Path(tempfile.mkdtemp(prefix=stage.name + '.beads-restore-', dir=destination))
+    proof['beads_restore_directory'] = str(restored)
+    initialized = bd(restored, 'init', '--non-interactive', '--prefix', 'checkpoint',
+                     '--skip-hooks', '--skip-agents', check=False)
+    if initialized.returncode:
+        proof.update(beads_restore_proof='not_run',
+                     beads_restore_reason='noninteractive_init_exit_' + str(initialized.returncode),
+                     beads_restored_issue_count=None)
+    else:
+        bd(restored, 'backup', 'restore', str(target / 'dolt-backup'), '--force')
+        restored_count = count(restored)
+        proof['beads_restored_issue_count'] = restored_count
+        if restored_count != live_count:
+            raise RuntimeError('beads_restore_count_mismatch')
+        proof['beads_restore_proof'] = 'PASS'
+
+    raw = workspace / '.beads'
+    proof['beads_raw_copy'] = 'changed_during_copy'
+    try:
+        before = file_map(raw)
+        copy_tree(raw, target / 'raw')
+        if before == file_map(raw) == file_map(target / 'raw'):
+            proof['beads_raw_copy'] = 'stable'
+    except (OSError, shutil.Error) as exc:
+        # Raw files may rotate/disappear while embedded Dolt is in use.
+        proof['beads_raw_copy_error_type'] = type(exc).__name__
 
 
 def verify_archive(archive, manifest):
@@ -171,14 +247,11 @@ def checkpoint(home, destination, stem, restore_port, expected_retries, *, leave
         copy_tree(data, stage / '.borg/graphiti/data')
         if matched != file_map(data) or matched != file_map(stage / '.borg/graphiti/data'):
             raise RuntimeError('graph_store_changed_during_copy')
-        for relative in ('coordination/data', 'beads', 'policies', 'ops',
+        checkpoint_beads(home, destination, stage, proof)
+        for relative in ('coordination/data', 'policies', 'ops',
                          'projects/shared-memory-repair/finish-20261008'):
             source = home / relative
-            before = file_map(source) if relative == 'beads' else None
             copy_tree(source, stage / '.borg' / relative)
-            if before is not None and (before != file_map(source) or
-                                      before != file_map(stage / '.borg' / relative)):
-                raise RuntimeError('beads_changed_during_copy')
         for profile in sorted((home / 'conductors').glob('*/profile')):
             target = stage / '.borg' / profile.relative_to(home)
             target.mkdir(parents=True, mode=0o700)
