@@ -2,7 +2,7 @@
 // Provider launch bus retained from the supplied Grok conductor. Every path
 // and provider is resolved from this BORG installation; it owns no global queue.
 
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -137,7 +137,7 @@ async function dispatchGrok(packet, text, config) {
   return { threadId: thread.threadId, turnId: turn.turnId, channel: base };
 }
 
-function dispatchClaude(packet, text, config) {
+function dispatchClaude(packet, text, config, attempt) {
   const provider = config.providers.claude;
   if (provider.enabled !== true) throw new Error('Claude provider is disabled');
   const binary = canonicalAbsolute(provider.binary, 'Claude binary');
@@ -150,6 +150,25 @@ function dispatchClaude(packet, text, config) {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' },
   });
+  let closed = false;
+  const record = { ...attempt, pid: child.pid, logFile, channel: 'claude-code-headless' };
+  const finish = (code, signal, error = null) => {
+    if (closed) return;
+    closed = true;
+    const result = resultFor(config, record);
+    closeLaunch(config, record, {
+      ...result,
+      state: code === 0 && result.outcome === 'RESULT_WRITTEN' ? 'FINISHED' : 'FAILED',
+      outcome: error ? `EXIT_${error.code || 'ERROR'}` : signal ? `SIGNAL_${signal}`
+        : code !== 0 ? `EXIT_${code}` : result.outcome,
+      exitCode: code, finishedAt: new Date().toISOString(), finishedAtSource: 'exit',
+      closedBy: 'launch-bus exit',
+    });
+  };
+  child.on('error', (error) => finish(null, null, error));
+  child.on('close', (code, signal) => finish(code, signal));
+  // A spawn failure or early exit may close stdin before the prompt is written.
+  child.stdin.on('error', () => {});
   child.stdin.end(text);
   const output = fs.createWriteStream(logFile, { flags: 'a', mode: 0o600 });
   child.stdout.pipe(output);
@@ -183,6 +202,116 @@ function dispatchCodex(packet, text, config) {
   return { pid: child.pid, logFile, channel: 'borg-conductor-route' };
 }
 
+export function resultFor(config, record) {
+  const resultFile = path.join(config.launchRoot, 'done', `${record.workId}.md`);
+  try {
+    const stat = fs.statSync(resultFile);
+    if (stat.isFile() && stat.mtimeMs >= Date.parse(record.launchedAt) - 1000) {
+      return { outcome: 'RESULT_WRITTEN', resultFile,
+        resultSha256: crypto.createHash('sha256').update(fs.readFileSync(resultFile)).digest('hex'),
+        priorResult: false, finishedAt: stat.mtime.toISOString() };
+    }
+    return { outcome: 'NO_RESULT', priorResult: true, resultFile: null, resultSha256: null };
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return { outcome: 'NO_RESULT', priorResult: false, resultFile: null, resultSha256: null };
+  }
+}
+
+export function closeLaunch(config, record, closure) {
+  ensureLaunchDirs(config);
+  // The exit error and close events, or a later reconcile, must not double-close.
+  for (const folder of ['done', 'failed']) {
+    const target = path.join(config.launchRoot, folder, `${record.workId}.json`);
+    try {
+      const previous = JSON.parse(fs.readFileSync(target, 'utf8'));
+      if (previous.launchedAt === record.launchedAt && previous.closedBy) return previous;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  const row = { schemaVersion: 1, workId: record.workId, runtime: record.runtime,
+    launchedBy: record.launchedBy, launchedAt: record.launchedAt, notifyId: record.notifyId,
+    pid: record.pid ?? null, exitCode: null, ...closure };
+  const closed = { ...record, ...row };
+  privateWrite(path.join(config.launchRoot, closure.state === 'FINISHED' ? 'done' : 'failed',
+    `${record.workId}.json`), JSON.stringify(closed, null, 2));
+  const ledger = path.join(config.launchRoot, 'ledger.jsonl');
+  fs.appendFileSync(ledger, `${JSON.stringify(row)}\n`, { mode: 0o600 });
+  fs.chmodSync(ledger, 0o600);
+  const active = path.join(config.launchRoot, 'active', `${record.workId}.json`);
+  try {
+    if (JSON.parse(fs.readFileSync(active, 'utf8')).launchedAt === record.launchedAt) fs.unlinkSync(active);
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  appendNotification(config, record.runtime, `work ${record.workId} ${closure.state.toLowerCase()}`);
+  return closed;
+}
+
+export function processState(record, config) {
+  if (!Number.isInteger(record.pid) || record.pid <= 0) return 'unknown';
+  try { process.kill(record.pid, 0); }
+  catch (error) { if (error.code === 'ESRCH') return 'gone'; }
+  let observed;
+  try {
+    observed = execFileSync('/bin/ps', ['-o', 'lstart=,args=', '-p', String(record.pid)],
+      { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } }).trim();
+  } catch (error) {
+    // ps returns 1 with no output if a process disappears between the probes.
+    if (error.status === 1 && !String(error.stdout || '').trim()) return 'gone';
+    return 'unknown';
+  }
+  if (!observed) return 'gone';
+  const match = observed.match(/^(\w+\s+\w+\s+\d+\s+\d+:\d+:\d+\s+\d+)\s+(.+)$/);
+  if (!match) return 'unknown';
+  const started = Date.parse(match[1]);
+  const launched = Date.parse(record.launchedAt);
+  if (!Number.isFinite(started) || !Number.isFinite(launched)) return 'unknown';
+  return Math.abs(started - launched) > 120000 || !match[2].includes(config.providers.claude.binary)
+    ? 'other' : 'running';
+}
+
+export function reconcileLaunches(options = {}) {
+  const product = options.config || loadProductConfig(options.configPath
+    || path.join(canonicalAbsolute(process.env.BORG_HOME, 'BORG_HOME'), 'conductors/config.json'));
+  const config = resolveLaunchBusConfig(product);
+  const summary = { scanned: 0, closed: { FINISHED: 0, FAILED: 0 }, live: 0,
+    unknown: 0, skipped: 0, dryRun: !!options.dryRun, workIds: { closed: [], live: [], unknown: [] } };
+  const active = path.join(config.launchRoot, 'active');
+  if (!fs.existsSync(active)) return summary;
+  for (const name of fs.readdirSync(active).filter((name) => name.endsWith('.json')).sort()) {
+    const record = JSON.parse(fs.readFileSync(path.join(active, name), 'utf8'));
+    if (options.workId && record.workId !== options.workId) continue;
+    summary.scanned++;
+    if (record.runtime !== 'claude') { summary.skipped++; continue; }
+    const state = (options.processState || processState)(record, config);
+    if (!['gone', 'other'].includes(state)) {
+      const key = state === 'running' ? 'live' : 'unknown';
+      summary[key]++; summary.workIds[key].push(record.workId); continue;
+    }
+    const result = resultFor(config, record);
+    const finished = result.outcome === 'RESULT_WRITTEN';
+    const closure = { ...result, state: finished ? 'FINISHED' : 'FAILED',
+      finishedAt: result.finishedAt || new Date().toISOString(),
+      finishedAtSource: finished ? 'result_mtime' : 'reconciled', closedBy: 'launch-bus reconcile' };
+    if (!finished) {
+      try { closure.lastLogLine = fs.readFileSync(record.logFile, 'utf8').trimEnd().split('\n').at(-1).slice(-200); }
+      catch { closure.lastLogLine = ''; }
+    }
+    if (!options.dryRun) closeLaunch(config, record, closure);
+    summary.closed[closure.state]++; summary.workIds.closed.push(record.workId);
+  }
+  return summary;
+}
+
+export function reconcileCLI(args) {
+  const options = {};
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === '--dry-run') options.dryRun = true;
+    else if (args[index] === '--json') continue;
+    else if (args[index] === '--work-id' && args[index + 1]) options.workId = args[++index];
+    else throw new Error(`unknown reconcile option: ${args[index]}`);
+  }
+  return reconcileLaunches(options);
+}
+
 export async function launchWork(raw, options = {}) {
   const packet = readLaunchPacket(raw);
   const product = options.config || loadProductConfig(options.configPath
@@ -190,21 +319,16 @@ export async function launchWork(raw, options = {}) {
   const config = resolveLaunchBusConfig(product);
   ensureLaunchDirs(config);
   const text = wrapPrompt(packet, config);
-  let handle;
-  if (packet.runtime === 'grok') handle = await dispatchGrok(packet, text, config);
-  else if (packet.runtime === 'claude') handle = dispatchClaude(packet, text, config);
-  else handle = dispatchCodex(packet, text, config);
-  const receipt = {
-    schemaVersion: 1,
-    workId: packet.workId,
-    runtime: packet.runtime,
-    launchedBy: packet.launchedBy,
-    launchedAt: new Date().toISOString(),
-    cwd: packet.cwd,
-    state: 'STARTED',
-    notifyId: crypto.randomUUID(),
-    ...handle,
+  const attempt = {
+    schemaVersion: 1, workId: packet.workId, runtime: packet.runtime,
+    launchedBy: packet.launchedBy, launchedAt: new Date().toISOString(),
+    cwd: packet.cwd, state: 'STARTED', notifyId: crypto.randomUUID(),
   };
+  let handle;
+  if (packet.runtime === 'grok') handle = await dispatchGrok(packet, text, config, attempt);
+  else if (packet.runtime === 'claude') handle = dispatchClaude(packet, text, config, attempt);
+  else handle = dispatchCodex(packet, text, config, attempt);
+  const receipt = { ...attempt, ...handle };
   privateWrite(path.join(config.launchRoot, 'unread', `${packet.workId}.json`), JSON.stringify(receipt, null, 2));
   privateWrite(path.join(config.launchRoot, 'active', `${packet.workId}.json`), JSON.stringify(receipt, null, 2));
   fs.appendFileSync(path.join(config.launchRoot, 'ledger.jsonl'), `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
@@ -215,7 +339,10 @@ export async function launchWork(raw, options = {}) {
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   const file = process.argv[2];
-  if (!file) {
+  if (file === 'reconcile') {
+    try { process.stdout.write(`${JSON.stringify(reconcileCLI(process.argv.slice(3)), null, 2)}\n`); }
+    catch (error) { process.stderr.write(`${error.message}\n`); process.exitCode = 1; }
+  } else if (!file) {
     process.stderr.write('usage: node launch-bus.mjs <packet.json>\n');
     process.exitCode = 2;
   } else {

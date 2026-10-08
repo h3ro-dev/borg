@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 409,
+  "file_count": 410,
   "files": [
     {
       "bytes": 1914,
@@ -203,9 +203,14 @@
       "sha256": "0057efc77a81c1ad534feecf5d299cec3a051838b0d50bc04e69a9db2ae3eafe"
     },
     {
-      "bytes": 9266,
+      "bytes": 16075,
       "path": "conductor/providers/launch-bus.mjs",
-      "sha256": "cc348f3156b0ad45cd1e0acc7cedd5455882c05effedc13137f86b3f0ad829d2"
+      "sha256": "761a4de819587886a218495d2950fb6ffd46524804337e0ecfd222dcf416fc5a"
+    },
+    {
+      "bytes": 6241,
+      "path": "conductor/providers/launch-bus.reconcile.test.mjs",
+      "sha256": "884346e55057a4cb3f001602b08dbdb5737a7aec14b1ccd66d5e16e22cb50ed7"
     },
     {
       "bytes": 1709,
@@ -813,9 +818,9 @@
       "sha256": "264355fa8af08b6c6f529a35e497da9da746540d11457d2fdccf95fffe27aa98"
     },
     {
-      "bytes": 14235,
+      "bytes": 14979,
       "path": "docs/COMPONENTS.md",
-      "sha256": "db77beecf6b73621691566f759414c3e62a4e85218a71e341ded9c560fe1330b"
+      "sha256": "c697dc2599abda7ce5d06484b869d5888e665bd3c4577c3447525abdcd139cf5"
     },
     {
       "bytes": 8807,
@@ -848,9 +853,9 @@
       "sha256": "4647078516660d9da47f1838ed35b7f94755d28c552ede5c8e2858b0f8d87aa5"
     },
     {
-      "bytes": 15395,
+      "bytes": 16139,
       "path": "docs/SETUP.md",
-      "sha256": "44c1a6066eb0db50f0968538b871c0d6369e9003f4229577a126fe490c958741"
+      "sha256": "4236a02b73a27c51836c9eb69823f100356bbd312501f407f03eec366d2a976a"
     },
     {
       "bytes": 5816,
@@ -1073,9 +1078,9 @@
       "sha256": "b8573095ab48abf8bede9582452e598afd7118078f6a571d5ee86832f58a7826"
     },
     {
-      "bytes": 19270,
+      "bytes": 20088,
       "path": "installer/health.py",
-      "sha256": "88b70d35ff8e029a90c0ad70a80871a8aa51aff2098e56acdea7213ca9670c2e"
+      "sha256": "9e3a990cf038d7fc8b061f1c3f836bcb7a1e2323a2a7718248aa7b17fd23097c"
     },
     {
       "bytes": 14377,
@@ -1153,9 +1158,9 @@
       "sha256": "737a4d11806110b88cf94719972f4224adee99139e7d04db1048f610329795c6"
     },
     {
-      "bytes": 23295,
+      "bytes": 24115,
       "path": "installer/test_blueprint.py",
-      "sha256": "43e497a602697ac523d653d69a9be1db4aadd5ab9246cdb987a6cca0b5293b98"
+      "sha256": "bdcbb7509fa3d9d43154b2c2026b447ff0d83231adcd0aba96e20b1b6315180b"
     },
     {
       "bytes": 7063,
@@ -2048,7 +2053,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "5cb019a40fa7d3487536f842831210f3d6304d044d2928d9671697305f00c2a5",
+  "inventory_sha256": "3d724df937b54c24b8936d7e10143deaac0e158734d0428df67b860a99f2ad84",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88183617
+  "total_bytes": 88199793
 }

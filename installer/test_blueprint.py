@@ -394,6 +394,21 @@ class BlueprintTests(unittest.TestCase):
         self.assertNotIn("capture_hooks", result["components"])
         self.assertFalse(self.health(doc, hub_ready=False)["local_services_ready"])
 
+    def test_provider_launch_count_does_not_change_readiness(self):
+        doc = self.initialize(components=["inbox"])
+        before = self.health(doc)
+        self.assertNotIn("provider_launches", before["components"])
+        active = self.root / "private/provider-launches/active"
+        active.mkdir(parents=True)
+        for name in ("first", "second"):
+            (active / (name + ".json")).write_text(json.dumps({
+                "launchedAt": datetime.now(timezone.utc).isoformat()}))
+        after = self.health(doc)
+        self.assertEqual(after["components"]["provider_launches"]["active"], 2)
+        self.assertGreaterEqual(after["components"]["provider_launches"]["oldest_active_hours"], 0)
+        for key in ("ready", "local_services_ready"):
+            self.assertEqual(before[key], after[key])
+
     def test_external_selections_cannot_be_reported_ready(self):
         doc = self.initialize(components=["grok"], integrations=["github"])
         result = self.health(doc)

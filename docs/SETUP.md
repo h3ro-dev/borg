@@ -308,3 +308,16 @@ BORG uses its own browser profile; it does not import another person's session.
 Finish by checking `borg doctor`, a real BORG tool call in your selected client and,
 if used, web OAuth and a remote job receipt. The onboarding plan intentionally leaves
 those live acceptance gates visible after configuration is present.
+
+### Claude launch closure and reconciliation
+
+The launch bus writes FINISHED/RESULT_WRITTEN only when Claude exits zero and
+writes a fresh result for that attempt. Other exits write FAILED with an exit,
+signal or NO_RESULT outcome. Closure rows preserve launchedAt and the result
+SHA256; unread notifications remain intact. A launch receipt alone is not
+completed work, and result existence does not replace review of its contents.
+
+Use `node launch-bus.mjs reconcile --dry-run --json` to inspect stale launches,
+then omit `--dry-run` to close dead or reused PIDs. `--work-id <id>` limits the
+operation. Running and unknown processes remain untouched. Doctor reports
+`provider_launches.active` and oldest age without changing readiness gates.

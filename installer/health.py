@@ -218,6 +218,19 @@ def status(doc: dict) -> dict:
                                              "next_command": "borg auth codex"}
         except (OSError, ValueError, subprocess.SubprocessError):
             components["provider_login"] = {"state": "unavailable", "next_command": "borg auth codex"}
+    if "conductor" in enabled or (root / "private/provider-launches").exists():
+        try:
+            active = root / "private/provider-launches/active"
+            if not active.exists():
+                components["provider_launches"] = {"active": 0}
+            else:
+                records = [json.loads(p.read_text()) for p in active.glob("*.json")]
+                ages = [(datetime.now(timezone.utc) - datetime.fromisoformat(
+                    row["launchedAt"].replace("Z", "+00:00"))).total_seconds() / 3600 for row in records]
+                components["provider_launches"] = {"active": len(records),
+                    "oldest_active_hours": round(max([0, *ages]), 2)}
+        except (OSError, ValueError, KeyError, TypeError):
+            components["provider_launches"] = {"state": "unavailable"}
     if "conductor" in enabled and blueprint.full(doc):
         try:
             payload = {"method": "hooks/list", "params": {"cwd": str(root / "projects")}, "timeoutMs": 8000}

@@ -255,3 +255,16 @@ The connector's `credential_list`, `credential_status` and `credential_handoff` 
 Configure optional fleet-context sources in your own embedding and qualify their freshness and coverage. There is no included universal deployment of private fleet collectors, operational dashboards or historic schedules. Use an external workflow service such as n8n when its documented capabilities fit your work.
 
 For each connected service, verify its current identity and intended scope, an authorized read, and a reversible action before relying on it. Retain the native receipt. BORG's source is MIT; third-party runtimes, services, model bases and tools keep their own [licenses and terms](../THIRD_PARTY_NOTICES.md). The catalog records individual license boundaries.
+
+### Claude launch closure and reconciliation
+
+The launch bus writes FINISHED/RESULT_WRITTEN only when Claude exits zero and
+writes a fresh result for that attempt. Other exits write FAILED with an exit,
+signal or NO_RESULT outcome. Closure rows preserve launchedAt and the result
+SHA256; unread notifications remain intact. A launch receipt alone is not
+completed work, and result existence does not replace review of its contents.
+
+Use `node launch-bus.mjs reconcile --dry-run --json` to inspect stale launches,
+then omit `--dry-run` to close dead or reused PIDs. `--work-id <id>` limits the
+operation. Running and unknown processes remain untouched. Doctor reports
+`provider_launches.active` and oldest age without changing readiness gates.
