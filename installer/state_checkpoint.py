@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import socket
 import sqlite3
 import subprocess
@@ -223,28 +224,62 @@ def graph_counts(client):
     return result
 
 
+def native_bd(home):
+    """Resolve the native executable, never the live-store rebinding wrapper."""
+    binary = home / 'runtime/beads/bd'
+    wrapper = home / 'bin/bd'
+    try:
+        if wrapper.exists():
+            with wrapper.open('rb') as stream:
+                scripted = stream.read(2) == b'#!'
+            if scripted:
+                contents = wrapper.read_text()
+                if '--bd' in contents:
+                    line = next(line for line in contents.splitlines() if line.strip().startswith('exec '))
+                    tokens = shlex.split(line)
+                    binary = Path(tokens[tokens.index('--bd') + 1])
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            return None
+        with binary.open('rb') as stream:
+            if stream.read(2) == b'#!':
+                return None
+        return binary
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+def isolated_beads_env(workspace):
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(('BEADS_', 'BD_', 'DOLT_'))}
+    env.update(BEADS_DIR=str(workspace / '.beads'), BD_NON_INTERACTIVE='1',
+               BD_DISABLE_METRICS='1', BD_DOLT_MODE='embedded', BD_DOLT_HOST='127.0.0.1',
+               BD_DOLT_SHARED_SERVER='false', BD_DOLT_AUTO_PUSH='false')
+    return env
+
+
 def checkpoint_beads(home, destination, stage, proof):
     """Seal a native Dolt backup; a raw embedded database copy is advisory only."""
     workspace = home / 'beads'
+    live_metadata = workspace / '.beads/metadata.json'
+    live_meta = digest(live_metadata)
+    live_project = json.loads(live_metadata.read_text())['project_id']
     target = stage / '.borg/beads'
     target.mkdir(parents=True, mode=0o700)
     backup = destination / 'beads-dolt-backup'
     executable = str(home / 'bin/bd') if (home / 'bin/bd').exists() else 'bd'
 
-    def bd(cwd, *args, check=True):
-        env = dict(os.environ, BEADS_DIR=str(cwd / '.beads'), BD_NON_INTERACTIVE='1')
-        # An inherited database override must not redirect the isolated restore.
-        env.pop('BEADS_DB', None)
-        result = subprocess.run([executable, '--actor', 'codex-primary', *args],
+    def bd(cwd, *args, check=True, native=None):
+        env = isolated_beads_env(cwd)
+        result = subprocess.run([str(native) if native else executable, '--actor', 'codex-primary', *args],
                                 cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=180)
         if check and result.returncode:
             raise RuntimeError('beads_' + '_'.join(args[:2]) + '_failed')
         return result
 
-    def count(cwd):
+    def count(cwd, native=None):
         rows = json.loads(bd(cwd, 'list', '--all', '--limit', '0', '--json',
-                             '--include-infra', '--include-templates', '--include-gates').stdout)
+                             '--include-infra', '--include-templates', '--include-gates', native=native).stdout)
         if not isinstance(rows, list):
             raise RuntimeError('beads_invalid_issue_list')
         return len(rows)
@@ -272,19 +307,47 @@ def checkpoint_beads(home, destination, stage, proof):
     # Keep the isolated restored database as evidence; never overwrite live Beads.
     restored = Path(tempfile.mkdtemp(prefix=stage.name + '.beads-restore-', dir=destination))
     proof['beads_restore_directory'] = str(restored)
-    initialized = bd(restored, 'init', '--non-interactive', '--prefix', 'checkpoint',
-                     '--skip-hooks', '--skip-agents', check=False)
-    if initialized.returncode:
-        proof.update(beads_restore_proof='not_run',
-                     beads_restore_reason='noninteractive_init_exit_' + str(initialized.returncode),
-                     beads_restored_issue_count=None)
+    isolated = restored / '.beads'
+    isolated.mkdir(mode=0o700)
+    config = isolated / 'config.yaml'
+    config.write_text('dolt:\n  mode: embedded\n  shared-server: false\n  host: 127.0.0.1\n')
+    config.chmod(0o600)
+    native = native_bd(home)
+    proof.update(beads_restore_proof='not_run', beads_restored_issue_count=None)
+    if native is None:
+        proof['beads_restore_reason'] = 'native_binary_missing'
     else:
-        bd(restored, 'backup', 'restore', str(target / 'dolt-backup'), '--force')
-        restored_count = count(restored)
-        proof['beads_restored_issue_count'] = restored_count
-        if restored_count != live_count:
-            raise RuntimeError('beads_restore_count_mismatch')
-        proof['beads_restore_proof'] = 'PASS'
+        initialized = bd(restored, 'init', '--non-interactive', '--skip-hooks', '--skip-agents',
+                         '--prefix', 'checkpoint', check=False, native=native)
+        if initialized.returncode:
+            proof.update(beads_restore_reason='noninteractive_init_exit_' + str(initialized.returncode),
+                         beads_restore_stderr_tail=initialized.stderr[-200:])
+        else:
+            detail = None
+            try:
+                project = json.loads((isolated / 'metadata.json').read_text()).get('project_id')
+                if not project or project == live_project:
+                    detail = 'project_id_missing_or_matches_live'
+                elif not (isolated / 'embeddeddolt').is_dir():
+                    detail = 'embedded_directory_missing'
+                elif digest(live_metadata) != live_meta:
+                    detail = 'live_metadata_changed'
+            except (OSError, ValueError, AttributeError):
+                detail = 'isolated_metadata_invalid'
+            if detail:
+                proof.update(beads_restore_reason='isolation_unproven', beads_restore_detail=detail)
+            else:
+                try:
+                    bd(restored, 'backup', 'restore', str(target / 'dolt-backup'), '--force', native=native)
+                    restored_count = count(restored, native=native)
+                finally:
+                    if digest(live_metadata) != live_meta:
+                        raise RuntimeError('beads_live_store_touched')
+                proof['beads_restored_issue_count'] = restored_count
+                if restored_count != live_count:
+                    raise RuntimeError('beads_restore_count_mismatch')
+                proof.update(beads_restore_proof='PASS', beads_restore_binary=str(native),
+                             beads_restore_project_id=project)
 
     raw = workspace / '.beads'
     proof['beads_raw_copy'] = 'changed_during_copy'

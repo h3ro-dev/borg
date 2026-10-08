@@ -25,15 +25,15 @@ class StateCheckpointTests(unittest.TestCase):
         home = root / 'home'
         (home / 'beads/.beads').mkdir(parents=True)
         (home / 'beads/.beads/journal.idx').write_text('original')
+        (home / 'beads/.beads/metadata.json').write_text('{"project_id": "live-project"}')
         destination = root / 'backups'
         destination.mkdir()
         stage = destination / 'checkpoint.stage'
         stage.mkdir()
-        binary = root / 'bin'
-        binary.mkdir()
+        binary = home / 'runtime/beads'
+        binary.mkdir(parents=True)
         stub = binary / 'bd'
-        stub.write_text('''#!/bin/sh
-set -eu
+        stub.write_text('''set -eu
 test "$1" = --actor && test "$2" = codex-primary
 shift 2
 test "$BEADS_DIR" = "$PWD/.beads"
@@ -45,13 +45,37 @@ case "$1 $2" in
     if test -f "$BEADS_DIR/restored" && test -n "${STUB_RESTORED_LIST:-}"; then
       printf '%s' "$STUB_RESTORED_LIST"
     else printf '[{"id":"one"},{"id":"two"}]'; fi ;;
-  'init --non-interactive') test "${STUB_INIT_FAIL:-0}" = 0 || exit 9; mkdir -p "$BEADS_DIR" ;;
+  'init --non-interactive')
+    test "${STUB_INIT_FAIL:-0}" = 0 || exit 9
+    test -f "$BEADS_DIR/config.yaml"
+    test ! -f "$BEADS_DIR/metadata.json"
+    printf '{"project_id":"%s"}' "${STUB_INIT_PROJECT_ID:-fresh-project}" > "$BEADS_DIR/metadata.json"
+    mkdir "$BEADS_DIR/embeddeddolt" ;;
   'backup restore') test "$4" = --force; test -f "$3/database"; touch "$BEADS_DIR/restored" ;;
   *) exit 2 ;;
 esac
 ''')
         stub.chmod(0o700)
-        self.enterContext(patch.dict(os.environ, {'PATH': str(binary) + os.pathsep + os.environ['PATH']}))
+        (home / 'bin').mkdir()
+        wrapper = home / 'bin/bd'
+        wrapper.write_text('#!/bin/sh\nexec /bin/sh ' + str(root / 'wrapper.sh') + ' --bd ' + str(stub) + ' "$@"\n')
+        wrapper.chmod(0o700)
+        (root / 'wrapper.sh').write_text('''set -eu
+shift 2
+export BEADS_DIR="''' + str(home / 'beads/.beads') + '''"
+cd "''' + str(home / 'beads') + '''"
+if test "$3" = init; then touch "$BEADS_DIR/wrapper-init"; exit 1; fi
+exec /bin/sh "''' + str(stub) + '''" "$@"
+''')
+        # The fixture models a native executable without requiring a compiler:
+        # only its OS invocation is adapted to the shell; resolution and all
+        # workspace, argv, environment and disk guards are production code.
+        run = subprocess.run
+        def fixture_run(argv, **kwargs):
+            if argv[0] == str(stub):
+                argv = ['/bin/sh', *argv]
+            return run(argv, **kwargs)
+        self.enterContext(patch.object(checkpoint.subprocess, 'run', side_effect=fixture_run))
         return home, destination, stage
 
     def test_native_beads_backup_restore_and_private_export(self):
@@ -65,6 +89,50 @@ esac
             self.assertEqual(proof['beads_raw_copy'], 'stable')
             self.assertEqual((stage / '.borg/beads/export.jsonl').stat().st_mode & 0o777, 0o600)
             self.assertFalse((home / 'beads/.beads/restored').exists())
+            self.assertFalse((home / 'beads/.beads/wrapper-init').exists())
+            self.assertEqual(proof['beads_restore_binary'], str(home / 'runtime/beads/bd'))
+
+    def test_native_missing_never_restores_through_wrapper(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, destination, stage = self.beads_fixture(Path(temp))
+            # Live wrapper remains usable; only native resolution is unavailable.
+            with patch.object(checkpoint, 'native_bd', return_value=None):
+                proof = {}
+                checkpoint.checkpoint_beads(home, destination, stage, proof)
+            self.assertEqual(proof['beads_restore_reason'], 'native_binary_missing')
+            self.assertFalse((home / 'beads/.beads/wrapper-init').exists())
+            self.assertFalse((Path(proof['beads_restore_directory']) / '.beads/restored').exists())
+
+    def test_matching_project_id_refuses_restore(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, destination, stage = self.beads_fixture(Path(temp))
+            with patch.dict(os.environ, STUB_INIT_PROJECT_ID='live-project'):
+                proof = {}
+                checkpoint.checkpoint_beads(home, destination, stage, proof)
+            self.assertEqual(proof['beads_restore_reason'], 'isolation_unproven')
+            self.assertFalse((Path(proof['beads_restore_directory']) / '.beads/restored').exists())
+
+    def test_native_resolution_rejects_scripts_missing_and_nonexecutable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home, _, _ = self.beads_fixture(Path(temp))
+            native = home / 'runtime/beads/bd'
+            self.assertEqual(checkpoint.native_bd(home), native)
+            native.chmod(0o600)
+            self.assertIsNone(checkpoint.native_bd(home))
+            native.chmod(0o700)
+            native.write_text('#!/bin/sh\nexit 0\n')
+            self.assertIsNone(checkpoint.native_bd(home))
+            native.unlink()
+            self.assertIsNone(checkpoint.native_bd(home))
+
+    def test_isolated_environment_discards_all_database_overrides(self):
+        with patch.dict(os.environ, BEADS_DB='live', BD_OTHER='live', DOLT_SERVER='live', KEEP_ME='yes'):
+            env = checkpoint.isolated_beads_env(Path('/fixture'))
+        self.assertNotIn('BEADS_DB', env)
+        self.assertNotIn('BD_OTHER', env)
+        self.assertNotIn('DOLT_SERVER', env)
+        self.assertEqual(env['KEEP_ME'], 'yes')
+        self.assertEqual(env['BEADS_DIR'], '/fixture/.beads')
 
     def test_changed_raw_beads_is_label_not_failure(self):
         with tempfile.TemporaryDirectory() as temp:
