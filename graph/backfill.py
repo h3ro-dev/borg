@@ -2565,9 +2565,28 @@ async def reconcile_unproven(*, state_path: Path, scope_map_path: Path,
         raise ReconcileRefused("drop_requires_one_episode_and_reason")
     state = json.loads(original)
     registry = ScopeRegistry(scope_map_path)
+    def droppable_requeued(key: str, entry: dict[str, Any]) -> bool:
+        # Extraction failures now clean their stubs. They therefore remain in
+        # needs_native_reconciliation instead of becoming completion_unproven.
+        # Allow the explicit drop fallback only for a proven operator requeue.
+        if not drop or entry.get("status") != "needs_native_reconciliation" or entry.get("operator_action") != "requeue":
+            return False
+        receipt_id = entry.get("operator_receipt_id", "")
+        if not isinstance(receipt_id, str) or not re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", receipt_id):
+            return False
+        if not entry.get("recovery_last_error_message"):
+            return False
+        try:
+            prior = json.loads((state_path.parent / 'reconcile' / (receipt_id + '.json')).read_text())
+        except (OSError, ValueError):
+            return False
+        return (isinstance(prior, dict) and prior.get("schema") == "graph-reconcile/1"
+                and prior.get("receipt_id") == receipt_id and prior.get("status") == "complete"
+                and prior.get("action") == "requeue" and key in prior.get("episodes", []))
+
     eligible = {key: entry for key, entry in state["retry"].items()
         if isinstance(entry, dict) and entry.get("kind") != "projection"
-        and entry.get("status") == "recovery_completion_unproven"
+        and (entry.get("status") == "recovery_completion_unproven" or droppable_requeued(key, entry))
         and entry.get("retryable") is False and _retry_row(entry)}
     selected = list(dict.fromkeys(episodes)) if episodes else sorted(eligible)
     if not selected or any(key not in eligible for key in selected):

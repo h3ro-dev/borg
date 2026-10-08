@@ -92,6 +92,46 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(result['pending_graph_retries'], 0)
         self.assertTrue(self.writer.closed)
 
+    def requeued_failure(self):
+        receipt = self.run_reconcile()
+        state = b.load_state(self.state)
+        state['retry'][self.key].update(recovery_attempts=3,
+            recovery_last_error_message='ValueError: exact_identifier_source_grounding_missing')
+        b.save_state_atomic(self.state, state)
+        self.sha = hashlib.sha256(self.state.read_bytes()).hexdigest()
+        return receipt
+
+    def test_drop_requeued_failure_after_cleanup_preserves_rows(self):
+        self.requeued_failure()
+        rows = b.load_state(self.state)['retry'][self.key]['rows']
+        result = self.run_reconcile(drop=True, episodes=[self.key], reason='same content error twice')
+        self.assertEqual(result['removed_uuids'], [])
+        entry = b.load_state(self.state)['retry'][self.key]
+        self.assertEqual(entry['status'], 'operator_dropped')
+        self.assertEqual(entry['rows'], rows)
+        self.assertEqual(entry['recovery_attempts'], 3)
+
+    def test_requeued_drop_requires_completed_matching_operator_receipt(self):
+        receipt = self.requeued_failure()
+        path = Path(receipt['receipt_path'])
+        original = path.read_text()
+        for changes in ({'status': 'dry_run'}, {'episodes': []}, {'action': 'drop'}):
+            path.write_text(json.dumps({**json.loads(original), **changes}))
+            with self.assertRaisesRegex(b.ReconcileRefused, 'no_matching_terminal_entry'):
+                self.run_reconcile(drop=True, episodes=[self.key], reason='content error twice')
+        path.unlink()
+        with self.assertRaisesRegex(b.ReconcileRefused, 'no_matching_terminal_entry'):
+            self.run_reconcile(drop=True, episodes=[self.key], reason='content error twice')
+
+    def test_requeued_drop_still_refuses_populated_graph_and_requeue_mode(self):
+        self.requeued_failure()
+        with self.assertRaisesRegex(b.ReconcileRefused, 'no_matching_terminal_entry'):
+            self.run_reconcile()
+        self.graph.records[self.recovery] = dict(group_id=self.group['group_id'],
+            completion_token='proven', entity_edges=[], mentions=0, content_size=25)
+        with self.assertRaises(b.ReconcileRefused):
+            self.run_reconcile(drop=True, episodes=[self.key], reason='content error twice')
+
     def test_dry_run_writes_only_receipt(self):
         receipt = self.run_reconcile(dry_run=True)
         self.assertEqual(receipt['status'], 'dry_run')

@@ -863,9 +863,9 @@
       "sha256": "727a626ea92499793e35fa3f21927528db05d7fa2b689784b0408e597e45d853"
     },
     {
-      "bytes": 119209,
+      "bytes": 120428,
       "path": "graph/backfill.py",
-      "sha256": "ee212cad4637ea8734bf7797102f7a46bf66a1a08f2822cc5c201b315a755595"
+      "sha256": "81f7a44a02bfeec512c720b0bd6bdfe3bb26b93d5d7a87f1732a5731b0e91257"
     },
     {
       "bytes": 881,
@@ -973,9 +973,9 @@
       "sha256": "87ea12e7f08e1b0822c1de2ea987606f26d20ca32ba7c7b236958a8715674281"
     },
     {
-      "bytes": 11095,
+      "bytes": 13361,
       "path": "graph/tests/test_unproven_reconcile.py",
-      "sha256": "4eb77d39472b5b684a90dbdb2bd0a0a28b02a5b7d682beda4693a58d9171e348"
+      "sha256": "19d4cd828c8953da8909fe253b02614113e76868db24d543594b3d6532687028"
     },
     {
       "bytes": 1308,
@@ -2033,7 +2033,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "74436a5b0cec39532553498d880e2c1e83d3b0fea5b5e396bbc07df4d4503aab",
+  "inventory_sha256": "12b88d8c064325082a1064de385d5dcb1b74a68069ca5e0698541affa4642fab",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88166882
+  "total_bytes": 88170367
 }
