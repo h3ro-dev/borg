@@ -1039,7 +1039,7 @@ export async function dispatch(configInput, options = {}) {
       schemaVersion: 1, attemptId: crypto.randomUUID(), workId: options.workId.trim(), cwd,
       laneId: null, machineId: null, state: 'ATTEMPTING', phase: 'PREPARING',
       attemptedAt: clock(), dispatchedAt: null, threadId: null, turnId: null,
-      errorClass: null, nativeStartAttempted: false, stageTimeoutMs,
+      errorClass: null, errorMessage: null, nativeStartAttempted: false, stageTimeoutMs,
       promptSha256: sha256(options.prompt), events: [{ phase: 'PREPARING', at: clock() }],
     };
     // Persist the work intent BEFORE reconciliation and every admission scan.
@@ -1111,7 +1111,9 @@ export async function dispatch(configInput, options = {}) {
     return { receipt, receiptPath: paths.receiptPath, snapshot: final };
   } catch (error) {
     if (paths && !nativeAttempted) {
-      await progress(receipt.phase, { state: 'PRE_START_FAILED', nativeStartAttempted: false, errorClass: error.code || error.name || 'Error' });
+      await progress(receipt.phase, { state: 'PRE_START_FAILED', nativeStartAttempted: false,
+        errorClass: error.code || error.name || 'Error',
+        errorMessage: String(error.message || error).replace(/\s+/g, ' ').trim().slice(0, 500) });
       error.receiptPath = paths.receiptPath;
       error.message += `; receipt: ${paths.receiptPath}`;
     }

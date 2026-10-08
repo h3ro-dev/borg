@@ -98,10 +98,28 @@ test('admission failure leaves a status receipt with no native start', async (t)
   assert.equal(typeof router.inspectDispatch, 'function', 'restart-safe status lookup must exist');
   const result = await router.inspectDispatch(f.config, { cwd: f.root, workId: 'repair' });
   assert.equal(result.receipt.state, 'PRE_START_FAILED');
+  assert.match(result.receipt.errorMessage, /CAPACITY_UNKNOWN/);
   assert.equal(result.receipt.threadId, null);
   assert.equal(result.noStartProven, true);
   assert.equal(result.completionVerified, false);
   assert.ok(result.receipt.events.some(event => event.phase === 'ADMISSION'));
+});
+test('pre-start receipt retains a bounded single-line reason after restart', async (t) => {
+  const f = fixture(t);
+  const reason = 'status probe failed\n' + 'x'.repeat(900);
+  await assert.rejects(router.dispatch(f.config, { ...f.options,
+    conductorProvider: async (lane, op) => {
+      if (op.kind === 'status') throw new Error(reason);
+      return f.native(lane, op);
+    },
+  }));
+  const result = await router.inspectDispatch(f.config, { cwd: f.root, workId: 'repair' });
+  assert.equal(result.receipt.state, 'PRE_START_FAILED');
+  assert.ok(result.receipt.errorMessage.length <= 500);
+  assert.ok(!result.receipt.errorMessage.includes('\n'));
+  assert.match(result.receipt.errorMessage, /status probe failed/);
+  assert.equal(result.noStartProven, true);
+  assert.ok(!f.calls.includes('thread-start'));
 });
 test('stalled admission is bounded and records its exact stage', async (t) => {
   const f = fixture(t);

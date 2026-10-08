@@ -223,9 +223,9 @@
       "sha256": "6a6e00355c1635f9057d5744553ad9adf562134f43ddc15e97d694d4888053e8"
     },
     {
-      "bytes": 47501,
+      "bytes": 47625,
       "path": "conductor/router/router.mjs",
-      "sha256": "a162d59f963a63a6d16b87466eeb6e477851ea8042fa321d4cc4484e9862109b"
+      "sha256": "2d4857dd6ded88504ae1e71f213dadb7376c9e656e4217217f85dd0ca33eb92f"
     },
     {
       "bytes": 7600,
@@ -278,9 +278,9 @@
       "sha256": "300c2d5bf9b26ffbe1690c0c3af35325007a1622baf15530053f212b345a39d3"
     },
     {
-      "bytes": 12400,
+      "bytes": 13283,
       "path": "conductor/tests/router-reliability.test.mjs",
-      "sha256": "0d6d76b2af5b57a83a82d8a7584a5a4c1015c8cacc4d2370d0bda327872ebea4"
+      "sha256": "15414d2baecb4e52949feb40fd261f1e39472bf98a97fb6aab6ba4ec6c12e25b"
     },
     {
       "bytes": 10470,
@@ -2033,7 +2033,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "12b88d8c064325082a1064de385d5dcb1b74a68069ca5e0698541affa4642fab",
+  "inventory_sha256": "ffae3228483f1435a0f1090f1e3a52c8114234e69a589ec2d7adfbd29447d883",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88170367
+  "total_bytes": 88171374
 }
