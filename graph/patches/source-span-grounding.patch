@@ -1,0 +1,91 @@
+--- a/node_operations.py
++++ b/node_operations.py
+@@ -638,6 +638,23 @@
+ 
+ 
+ 
++def _relative_document_path(text: str) -> bool:
++    """Recognize conservative relative tokens with a document-bearing segment.
++
++    No URL, escaping, traversal, empty segment or punctuation repair is inferred.
++    A slash alone is not evidence of a document identifier.
++    """
++    segment = r'[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*'
++    return (
++        '/' in text
++        and re.fullmatch(segment + r'(?:/' + segment + r')+', text) is not None
++        and any(re.fullmatch(
++            segment + r'[.](?:md|txt|pdf|json|ya?ml|csv|docx?|rst|py|js|ts|tsx|sha256)',
++            part, re.I,
++        ) for part in text.split('/'))
++    )
++
++
+ def _exact_identifier_key(name: str) -> tuple[str, str] | None:
+     """Recognize literal identifiers; paths retain case and full specificity."""
+     text = name.strip()
+@@ -646,7 +663,7 @@
+         return ('hash', match.group(1).lower())
+     if re.fullmatch(r"(?i)[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", text):
+         return ('uuid', text.lower())
+-    if text.startswith(('/', './', '../', '~/')) or re.fullmatch(
++    if _relative_document_path(text) or text.startswith(('/', './', '../', '~/')) or re.fullmatch(
+         r"[^\n]+[.](?:md|txt|pdf|json|ya?ml|csv|docx?|rst|py|js|ts|tsx|sha256)", text, re.I
+     ):
+         return ('document', text)
+@@ -655,6 +672,46 @@
+     ):
+         return ('work', text)
+     return None
++
++
++def _normalize_source_document_prefix(node: EntityNode, episode: EpisodicNode | None) -> None:
++    """Copy a unique complete source token, never a candidate's proposed name.
++
++    Already grounded names and the explicit-node interface retain their names.
++    Only a literal relative document prefix ending in a document extension is
++    eligible. Competing continuations (even unsupported ones) fail closed.
++    """
++    if episode is None or episode.group_id != node.group_id:
++        return
++    prefix = node.name
++    segment = r'[A-Za-z0-9_-]+(?:[.][A-Za-z0-9_-]+)*'
++    if re.fullmatch(
++        r'(?:' + segment + r'/)*' + segment
++        + r'[.](?:md|txt|pdf|json|ya?ml|csv|docx?|rst|py|js|ts|tsx|sha256)',
++        prefix, re.I,
++    ) is None:
++        return
++    try:
++        _exact_identifier_resolution(node, [], episode)
++        return
++    except ValueError:
++        pass  # The unchanged guard still rejects a direct partial-path match.
++    # Read maximal delimiter-bounded source tokens, not regex substrings of paths.
++    tokens = set(re.findall(r'''[^\s`"'<>()\[\]{},;]+''', episode.content))
++    continuations = {token for token in tokens if token.startswith(prefix + '/')}
++    if not continuations:
++        raise ValueError('exact_identifier_source_grounding_missing')
++    if len(continuations) != 1:
++        raise ValueError('exact_identifier_source_normalization_nonunique')
++    complete = next(iter(continuations))
++    if not _relative_document_path(complete):
++        raise ValueError('exact_identifier_source_normalization_unsupported_token')
++    probe = node.model_copy(update={'name': complete})
++    if _exact_identifier_key(complete) != ('document', complete):
++        raise ValueError('exact_identifier_source_normalization_not_document')
++    _exact_identifier_resolution(probe, [], episode)
++    # Preserve UUID, labels, summary and attributes; edge pointers keep identity.
++    node.name = complete
+ 
+ 
+ def _exact_identifier_resolution(node, candidates, episode):
+@@ -700,6 +757,8 @@
+     existing_nodes_override: list[EntityNode] | None = None,
+ ) -> tuple[list[EntityNode], dict[str, str], list[tuple[EntityNode, EntityNode]]]:
+     """Resolve nodes with semantic retrieval first, then deterministic and LLM dedup."""
++    for node in extracted_nodes:
++        _normalize_source_document_prefix(node, episode)
+     llm_client = clients.llm_client
+     candidate_nodes_by_extracted = await _collect_candidate_nodes(
+         clients,

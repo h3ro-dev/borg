@@ -130,7 +130,7 @@ def restore_graph(archive, root, port):
                     process.wait(timeout=5)
 
 
-def checkpoint(home, destination, stem, restore_port, expected_retries):
+def checkpoint(home, destination, stem, restore_port, expected_retries, *, leave_brain_stopped=False):
     import redis
     os.umask(0o077)
     config = json.loads((home / 'config.json').read_text())
@@ -227,12 +227,14 @@ def checkpoint(home, destination, stem, restore_port, expected_retries):
                      error_code=str(exc) if isinstance(exc, RuntimeError) else 'inspect_local_failure')
         raise
     finally:
-        if stopped:
+        if stopped and not leave_brain_stopped:
             result = subprocess.run(borg + ['start', '--home', str(home), 'brain'],
                                     capture_output=True, timeout=45)
             proof['brain_restart_exit'] = result.returncode
             if result.returncode:
                 proof['status'] = 'FAIL'
+        elif stopped:
+            proof['brain_left_stopped'] = True
         write_json(proof_path, proof)
     print(json.dumps({'status': proof['status'], 'proof': str(proof_path),
                       'graphs': len(counts), 'retry_entries': restored_retries}))
@@ -246,12 +248,13 @@ def main():
     parser.add_argument('--stem', required=True)
     parser.add_argument('--restore-port', type=int, required=True)
     parser.add_argument('--expected-retries', type=int, required=True)
+    parser.add_argument('--leave-brain-stopped', action='store_true', help='Keep explicit maintenance hold after checkpoint')
     args = parser.parse_args()
     if Path(args.stem).name != args.stem or args.stem in ('.', '..'):
         parser.error('stem must be one filename')
     try:
         return checkpoint(args.home.resolve(), args.destination.resolve(), args.stem,
-                          args.restore_port, args.expected_retries)
+                          args.restore_port, args.expected_retries, leave_brain_stopped=args.leave_brain_stopped)
     except Exception as exc:
         print(json.dumps({'status': 'FAIL', 'error_type': type(exc).__name__}))
         return 1

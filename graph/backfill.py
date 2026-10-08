@@ -125,6 +125,13 @@ class EpisodeCompletionUnproven(RuntimeError):
     """A deterministic physical episode exists without completion proof."""
 
 
+def _error_text(exc: BaseException, limit: int = 300) -> str:
+    text = f"{type(exc).__name__}: {exc}"
+    if exc.__cause__ is not None:
+        text += f"; caused by {type(exc.__cause__).__name__}: {exc.__cause__}"
+    return " ".join(text.split())[:limit]
+
+
 def env_flag(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     if value is None:
@@ -381,9 +388,13 @@ def load_state(path: str | Path = STATE_F) -> dict[str, Any]:
 
 def save_state_atomic(path: str | Path, state: dict[str, Any]) -> None:
     """Write state through a same-directory fsynced temp file and replace."""
+    _save_json_atomic(path, migrate_state(state))
+
+
+def _save_json_atomic(path: str | Path, state: dict[str, Any]) -> None:
+    """Write private JSON without applying feed-state migration to receipts."""
 
     target = Path(path)
-    state = migrate_state(state)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
         prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
@@ -1220,6 +1231,9 @@ def _candidate_facts(
         rows = _retry_row(retry_entry)
         if not rows:
             continue
+        if retry_entry.get("status") == "operator_dropped":
+            blocked_pairs.update((str(row["point_id"]), str(row["payload_digest"])) for row in rows)
+            continue
         if any(
             _processed_digest(state["graph_processed"].get(str(row["point_id"])))
             == str(row["payload_digest"])
@@ -1346,6 +1360,9 @@ def _apply_worker_results(
                             "recovery_episode_id": episode_id,
                             "recovery_attempts": recovery_attempts,
                             "recovery_last_error": outcome["error_type"],
+                            "recovery_last_error_message": outcome.get("error_message", ""),
+                            "last_error_message": outcome.get("error_message", ""),
+                            "first_error_message": previous_retry.get("first_error_message", outcome.get("error_message", "")),
                             "recovery_last_attempt_mdt": now_mdt_text(),
                         }
                     )
@@ -1366,6 +1383,8 @@ def _apply_worker_results(
                     "rows": [_row_for_retry(row) for row in group["rows"]],
                     "attempts": attempts,
                     "last_error": outcome["error_type"],
+                    "last_error_message": outcome.get("error_message", ""),
+                    "first_error_message": previous_retry.get("first_error_message", outcome.get("error_message", "")),
                     "last_attempt_mdt": now_mdt_text(),
                     "status": (
                         "needs_native_reconciliation"
@@ -1583,11 +1602,13 @@ async def _run_worker(
                     stats["attempts_done"] += 1
                     stats["failed"] += 1
                     stats["progress_changed_epoch"] = int(time.time())
+                    log(f"EPISODE-FAIL episode={group['episode_id']} error_type={type(exc).__name__} message={_error_text(exc)}", echo=emit_progress)
                     await publish(
                         {
                             "group": group,
                             "ok": False,
                             "error_type": type(exc).__name__,
+                            "error_message": _error_text(exc),
                         }
                     )
                     progress()
@@ -1606,10 +1627,18 @@ async def _run_worker(
                         )
                     except Exception as exc:  # noqa: BLE001 - retry at next pass
                         stats["failed"] += 1
+                        log(f"EPISODE-FAIL episode={group['episode_id']} error_type={type(exc).__name__} message={_error_text(exc)}", echo=emit_progress)
+                        cleanup = getattr(writer, "cleanup_empty_stub", None)
+                        if cleanup is not None and not isinstance(exc, EpisodeCompletionUnproven):
+                            try:
+                                await asyncio.wait_for(cleanup(group), timeout=cleanup_margin_s)
+                            except Exception as cleanup_exc:
+                                log(f"STUB-CLEANUP-REFUSED episode={group['episode_id']} message={_error_text(cleanup_exc)}", echo=emit_progress)
                         outcome = {
                             "group": group,
                             "ok": False,
                             "error_type": type(exc).__name__,
+                            "error_message": _error_text(exc),
                         }
                     else:
                         stats["episodes_done"] += 1
@@ -1893,9 +1922,8 @@ async def _run_coordinated(
     for entry in graph_retry_entries:
         status = str(entry.get("status") or "retryable")
         retry_status_counts[status] = retry_status_counts.get(status, 0) + 1
-    unresolved_reconciliation = sum(
-        entry.get("retryable") is False for entry in graph_retry_entries
-    )
+    pending_retries = [entry for entry in graph_retry_entries if entry.get("status") != "operator_dropped"]
+    unresolved_reconciliation = sum(entry.get("retryable") is False for entry in pending_retries)
     pass_elapsed_s = round(max(time.monotonic() - pass_started, 0.0), 3)
     receipt = {
         "schema": "graph-feed/2",
@@ -1933,7 +1961,8 @@ async def _run_coordinated(
         },
         "checkpoint_batch_size": CHECKPOINT_BATCH_SIZE,
         "max_uncheckpointed_successes": worker_count,
-        "pending_graph_retries": len(graph_retry_entries),
+        "pending_graph_retries": len(pending_retries),
+        "operator_dropped_retries": len(graph_retry_entries) - len(pending_retries),
         "unresolved_reconciliation": unresolved_reconciliation,
         "retry_status_counts": retry_status_counts,
         "worker_stats": [
@@ -1949,7 +1978,7 @@ async def _run_coordinated(
             "FAIL"
             if counters["retry_count"]
             else "PARTIAL"
-            if graph_retry_entries or unattempted_episodes
+            if pending_retries or unattempted_episodes
             else "PASS"
         ),
     }
@@ -2157,6 +2186,7 @@ class GraphitiWriter:
         native_max_retries: int | None = None,
         client_close_timeout_s: float = DEFAULT_CLIENT_CLOSE_TIMEOUT_S,
     ):
+        os.environ.setdefault("SEMAPHORE_LIMIT", str(env_int("GRAPH_LLM_CONCURRENCY", 1)))
         from openai import AsyncOpenAI
         from graphiti_core import Graphiti
         from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
@@ -2394,6 +2424,16 @@ class GraphitiWriter:
             "already_present": False,
         }
 
+    async def cleanup_empty_stub(self, group: dict[str, Any]) -> None:
+        graph = self._graph(group["group_id"])
+        inspection = await inspect_empty_stub(graph, group["episode_id"], group["group_id"])
+        if inspection["state"] == "empty_stub":
+            before = await physical_node_count(graph)
+            await graph.remove_episode(group["episode_id"])
+            after = await inspect_empty_stub(graph, group["episode_id"], group["group_id"])
+            if after["state"] != "absent" or await physical_node_count(graph) != before - 1:
+                raise RuntimeError("stub_cleanup_count_mismatch")
+
     async def close(self) -> None:
         errors: list[BaseException] = []
         graphs = list(self._graphs.values())
@@ -2443,6 +2483,168 @@ def acquire_lock(path: str | Path = LOCK_F) -> bool:
 
 def release_lock(path: str | Path = LOCK_F) -> None:
     Path(path).unlink(missing_ok=True)
+
+
+class ReconcileRefused(ValueError):
+    """Operator preconditions failed; never continue with partial admission."""
+
+
+async def _inspection_records(graph: Any, query: str, **params: Any) -> list[dict[str, Any]]:
+    result = await graph.driver.execute_query(query, **params)
+    records = result[0] if isinstance(result, tuple) else result
+    if not isinstance(records, list) or any(not isinstance(row, dict) for row in records):
+        raise ReconcileRefused("unexpected_graph_response")
+    return records
+
+
+async def physical_node_count(graph: Any) -> int:
+    records = await _inspection_records(graph, "MATCH (n) RETURN count(n) AS nodes")
+    if len(records) != 1 or not isinstance(records[0].get("nodes"), int):
+        raise ReconcileRefused("unexpected_node_count")
+    return records[0]["nodes"]
+
+
+async def inspect_empty_stub(graph: Any, episode_uuid: str, group_id: str) -> dict[str, Any]:
+    records = await _inspection_records(graph,
+        "MATCH (e:Episodic {uuid: $episode_uuid}) "
+        "OPTIONAL MATCH (e)-[:MENTIONS]->(n) "
+        "RETURN e.group_id AS group_id, e.graph_feed_completion_token AS completion_token, "
+        "e.entity_edges AS entity_edges, count(n) AS mentions, size(e.content) AS content_size",
+        episode_uuid=episode_uuid)
+    result = {"uuid": episode_uuid, "group_id": group_id, "records": records}
+    if not records:
+        return {**result, "state": "absent"}
+    if len(records) != 1:
+        raise ReconcileRefused("duplicate_episode_uuid")
+    row = records[0]
+    required = {"group_id", "completion_token", "entity_edges", "mentions", "content_size"}
+    if not required <= row.keys() or row["group_id"] != group_id or row["completion_token"] is not None or row["entity_edges"] not in (None, []) or row["mentions"] != 0:
+        raise ReconcileRefused("episode_not_empty_stub")
+    # Protect relationships other than MENTIONS as well: remove_episode must
+    # never cascade into graph evidence from a partially successful extraction.
+    relations = await _inspection_records(graph,
+        "MATCH (e:Episodic {uuid: $episode_uuid}) OPTIONAL MATCH (e)-[r]-() "
+        "RETURN count(r) AS relationships", episode_uuid=episode_uuid)
+    if len(relations) != 1 or relations[0].get("relationships") != 0:
+        raise ReconcileRefused("episode_has_relationships")
+    return {**result, "state": "empty_stub", "relationships": 0}
+
+
+def _require_stopped_brain(path: Path) -> None:
+    if not path.exists():
+        return
+    pid = json.loads(path.read_text()).get("pid")
+    if pid is None:
+        return
+    if not isinstance(pid, int) or pid <= 0:
+        raise ReconcileRefused("invalid_brain_pid")
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        pass
+    raise ReconcileRefused("brain_running")
+
+
+async def reconcile_unproven(*, state_path: Path, scope_map_path: Path,
+        brain_state_path: Path, expected_sha256: str, episodes: list[str] | None = None,
+        drop: bool = False, reason: str = "", dry_run: bool = False,
+        writer_factory: Callable[[], Any] = GraphitiWriter) -> dict[str, Any]:
+    """Reconcile only authenticated source identities and demonstrably empty stubs.
+
+    Caller owns the native feed PID lock. Admission inspects every target before
+    any deletion. A crash retains the receipt; absent targets permit safe retry.
+    """
+    _require_stopped_brain(brain_state_path)
+    original = state_path.read_bytes()
+    before_sha = hashlib.sha256(original).hexdigest()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256 or "") or before_sha != expected_sha256:
+        raise ReconcileRefused("state_hash_mismatch")
+    if drop and (len(episodes or []) != 1 or not reason.strip()):
+        raise ReconcileRefused("drop_requires_one_episode_and_reason")
+    state = json.loads(original)
+    registry = ScopeRegistry(scope_map_path)
+    eligible = {key: entry for key, entry in state["retry"].items()
+        if isinstance(entry, dict) and entry.get("kind") != "projection"
+        and entry.get("status") == "recovery_completion_unproven"
+        and entry.get("retryable") is False and _retry_row(entry)}
+    selected = list(dict.fromkeys(episodes)) if episodes else sorted(eligible)
+    if not selected or any(key not in eligible for key in selected):
+        raise ReconcileRefused("no_matching_terminal_entry")
+    groups = []
+    for key in selected:
+        entry = eligible[key]
+        rows = _retry_row(entry)
+        group_id = registry.get(rows[0]["scope"])
+        if group_id is None:
+            raise ReconcileRefused("scope_not_registered")
+        group = _group_from_rows(rows, registry, falkor_prefix="", expected_episode_id=key, group_id=group_id)
+        recovery_id = recovery_episode_id_for(key, rows)
+        if entry.get("recovery_episode_id") != recovery_id:
+            raise ReconcileRefused("recovery_identity_mismatch")
+        groups.append((key, group_id, [recovery_id, key]))
+    receipt_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + uuid.uuid4().hex[:12]
+    receipt_path = state_path.parent / 'reconcile' / (receipt_id + '.json')
+    receipt = {"schema": "graph-reconcile/1", "receipt_id": receipt_id,
+        "receipt_path": str(receipt_path), "action": "drop" if drop else "requeue",
+        "reason": reason, "state_sha256_before": before_sha, "state_sha256_after": before_sha,
+        "inspection": [], "removed_uuids": [], "node_counts_before": {}, "node_counts_after": {},
+        "episodes": selected, "status": "inspecting"}
+    writer = writer_factory()
+    try:
+        for key, group_id, targets in groups:
+            graph = writer._graph(group_id)
+            receipt["node_counts_before"][group_id] = await physical_node_count(graph)
+            for target in targets:
+                receipt["inspection"].append(await inspect_empty_stub(graph, target, group_id))
+        if state_path.read_bytes() != original:
+            raise ReconcileRefused("state_changed_before_removal")
+        _require_stopped_brain(brain_state_path)
+        receipt["status"] = "dry_run" if dry_run else "admitted"
+        _save_json_atomic(receipt_path, receipt)
+        if dry_run:
+            return receipt
+        removed_by_group: dict[str, int] = {}
+        for item in receipt["inspection"]:
+            group_id, target = item["group_id"], item["uuid"]
+            graph = writer._graph(group_id)
+            # Re-check immediately before removal in case another graph writer ran.
+            current = await inspect_empty_stub(graph, target, group_id)
+            if current["state"] != item["state"]:
+                raise ReconcileRefused("stub_changed_after_inspection")
+            if current["state"] == "empty_stub":
+                await graph.remove_episode(target)
+                receipt["removed_uuids"].append(target)
+                removed_by_group[group_id] = removed_by_group.get(group_id, 0) + 1
+                receipt["status"] = "removing"
+                _save_json_atomic(receipt_path, receipt)
+            after = await inspect_empty_stub(graph, target, group_id)
+            count = await physical_node_count(graph)
+            receipt["node_counts_after"][group_id] = count
+            _save_json_atomic(receipt_path, receipt)
+            if after["state"] != "absent" or count != receipt["node_counts_before"][group_id] - removed_by_group.get(group_id, 0):
+                raise ReconcileRefused("removal_count_mismatch")
+        if state_path.read_bytes() != original:
+            raise ReconcileRefused("state_changed_after_removal")
+        for key in selected:
+            state["retry"][key].update(status="operator_dropped" if drop else "needs_native_reconciliation",
+                operator_action=receipt["action"], operator_receipt_id=receipt_id,
+                operator_at_mdt=now_mdt_text())
+            if drop:
+                state["retry"][key]["operator_reason"] = reason.strip()
+        save_state_atomic(state_path, state)
+        receipt.update(status="complete", state_sha256_after=hashlib.sha256(state_path.read_bytes()).hexdigest())
+        _save_json_atomic(receipt_path, receipt)
+        log(f"RECONCILE receipt={receipt_id} action={receipt['action']} removed={len(receipt['removed_uuids'])}", echo=False)
+        return receipt
+    except Exception as exc:
+        if receipt_path.exists():
+            receipt.update(status="refused", error_message=_error_text(exc))
+            _save_json_atomic(receipt_path, receipt)
+        raise
+    finally:
+        await writer.close()
 
 
 class _ScenarioSource:
@@ -2854,16 +3056,35 @@ def main() -> int:
     )
     parser.add_argument("--canary", action="store_true", help="run only the reserved isolated canary")
     parser.add_argument("--json", action="store_true", help="emit the receipt as JSON")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--reconcile-unproven", action="store_true")
+    modes.add_argument("--drop-unproven", action="store_true")
+    parser.add_argument("--episode", action="append")
+    parser.add_argument("--reason", default="")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--expect-state-sha256")
     args = parser.parse_args()
+    reconciling = args.reconcile_unproven or args.drop_unproven
+    if reconciling and (args.canary or not args.expect_state_sha256):
+        parser.error("reconciliation requires --expect-state-sha256 and cannot use --canary")
+    if not reconciling and (args.episode or args.reason or args.dry_run or args.expect_state_sha256):
+        parser.error("operator options require a reconciliation mode")
 
     if not acquire_lock():
         if args.json:
             print(json.dumps({"outcome": "NOT_RUN", "reason": "already-running"}))
         else:
             print("already running", flush=True)
-        return 0
+        return 2 if reconciling else 0
     atexit.register(release_lock)
     try:
+        if reconciling:
+            receipt = asyncio.run(reconcile_unproven(state_path=STATE_F,
+                scope_map_path=SCOPE_MAP_F, brain_state_path=STATE_F.parent / "brain-state.json",
+                expected_sha256=args.expect_state_sha256, episodes=args.episode,
+                drop=args.drop_unproven, reason=args.reason, dry_run=args.dry_run))
+            print(json.dumps(receipt, sort_keys=True) if args.json else f"RECONCILE {receipt['status']} receipt={receipt['receipt_path']}")
+            return 0
         return asyncio.run(async_main(args))
     except Exception as exc:  # noqa: BLE001 - command reports a hard failure
         error = {
@@ -2871,12 +3092,13 @@ def main() -> int:
             "at_mdt": now_mdt_text(),
             "outcome": "FAIL",
             "error_type": type(exc).__name__,
+            "error_message": _error_text(exc),
         }
         if args.json:
             print(json.dumps(error, sort_keys=True), flush=True)
         else:
             log(f"RUN-END outcome=FAIL error_type={error['error_type']}")
-        return 1
+        return 2 if reconciling else 1
     finally:
         release_lock()
 

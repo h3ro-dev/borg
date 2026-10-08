@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 400,
+  "file_count": 406,
   "files": [
     {
       "bytes": 1914,
@@ -863,9 +863,9 @@
       "sha256": "727a626ea92499793e35fa3f21927528db05d7fa2b689784b0408e597e45d853"
     },
     {
-      "bytes": 106305,
+      "bytes": 119209,
       "path": "graph/backfill.py",
-      "sha256": "d4a09e1592478b0f7b774d0ab6dc6c066c2f52fd7b001dbcc319b926cb4b43b8"
+      "sha256": "ee212cad4637ea8734bf7797102f7a46bf66a1a08f2822cc5c201b315a755595"
     },
     {
       "bytes": 881,
@@ -888,9 +888,9 @@
       "sha256": "fc5382468dc9427102097102ece9d66d706172770d543b670f7f40c78fc447e4"
     },
     {
-      "bytes": 17678,
+      "bytes": 18552,
       "path": "graph/bin/ollama-schema-shim",
-      "sha256": "713f7f65c2a9de5d58eaecf2b8c2542efd17bda1808af08cf1468bc760a7d5da"
+      "sha256": "82b4554d316aae96e4f3a9d81a5c130a565385f68d0f139fed17eaaaf11cf09d"
     },
     {
       "bytes": 5181,
@@ -901,6 +901,16 @@
       "bytes": 6749,
       "path": "graph/graph_scope.py",
       "sha256": "d114abf84a04cd2c8d1137a8e8208219667f8b6afa5e3885f4696f68abfeef5c"
+    },
+    {
+      "bytes": 3968,
+      "path": "graph/patches/source-span-grounding.patch",
+      "sha256": "91c6be4ea62c97ea619d754a604f62c0ad75d554a617511965c7c5910cc4bfaa"
+    },
+    {
+      "bytes": 9651,
+      "path": "graph/patches/test_source_span.py",
+      "sha256": "3c623945c9dfc509e824e71c5f7243e25e157127795e20f26e140c819d81416a"
     },
     {
       "bytes": 197,
@@ -943,6 +953,11 @@
       "sha256": "a107021fef8b8c8d64a465dd5612aa756a037b8bb3f0191747413269aac058a9"
     },
     {
+      "bytes": 2458,
+      "path": "graph/tests/test_ollama_schema_shim_reply.py",
+      "sha256": "765320d97fdb2d976a8af9e8499a1a02e29a0b155939f8a50e02361bcb161af7"
+    },
+    {
       "bytes": 7624,
       "path": "graph/tests/test_parallel_feed.py",
       "sha256": "fd62acdc688193d2b0d42c6582882132e735bca9f7384521c47e107809b2dd3f"
@@ -951,6 +966,16 @@
       "bytes": 19636,
       "path": "graph/tests/test_portable_graph.py",
       "sha256": "7233df41ebc3d84167e3de1444fbcb6403ec4d24ca4cc31be45c1ac6b36f15d3"
+    },
+    {
+      "bytes": 3220,
+      "path": "graph/tests/test_state_checkpoint.py",
+      "sha256": "589ea0b4f7f1498da3ed453eb1954ed405422306241ccdb90d9573c90482252e"
+    },
+    {
+      "bytes": 11095,
+      "path": "graph/tests/test_unproven_reconcile.py",
+      "sha256": "4eb77d39472b5b684a90dbdb2bd0a0a28b02a5b7d682beda4693a58d9171e348"
     },
     {
       "bytes": 1308,
@@ -1116,6 +1141,11 @@
       "bytes": 11836,
       "path": "installer/services.py",
       "sha256": "54cfbfaa6dfa7a6e72bd7fbfc1c99501e0c66e2ae972db2c13522a1a9e44de49"
+    },
+    {
+      "bytes": 12358,
+      "path": "installer/state_checkpoint.py",
+      "sha256": "f0401dd409c24352c01ca066a101f79e8171208167b508619059f9d319184cc6"
     },
     {
       "bytes": 1354,
@@ -2003,7 +2033,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "c9fc99cf20150daf3e3fdddb43273d207b2ca064ccd17ead4e4418160d62bd73",
+  "inventory_sha256": "e145c6a22d8998e76c73373290a8e226c59a82315bddda13e4fe07c17cea5f45",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88102898
+  "total_bytes": 88159426
 }
