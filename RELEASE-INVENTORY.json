@@ -3,9 +3,9 @@
   "file_count": 415,
   "files": [
     {
-      "bytes": 2018,
+      "bytes": 2234,
       "path": ".github/workflows/site.yml",
-      "sha256": "767940f3b5c7f8a4cb385462b751efdbbf5cfcf0555a207eb17cf42da7199208"
+      "sha256": "a61347beed662586b6124d9c01c162d96667b29e9faa6fdc8cd5711e188e0055"
     },
     {
       "bytes": 5498,
@@ -2078,7 +2078,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "a55dd432084a935af1f286bc7455b433054dd2616f8d7b4231c94c2286a652c5",
+  "inventory_sha256": "77ca028f0a47b25399792a674a14b8fca6abc6064142300b03d592f80835b2e1",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 98948332
+  "total_bytes": 98948548
 }
