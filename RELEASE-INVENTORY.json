@@ -1778,9 +1778,9 @@
       "sha256": "31ab6524b09775ab3765c3ed6240397941f5c41c684910dca3355089a261c767"
     },
     {
-      "bytes": 91107,
+      "bytes": 90859,
       "path": "site/collective.html",
-      "sha256": "ae1f5f25f7117efaddf32f5f256f84025a66096ab2bd96e898eea287c59b07af"
+      "sha256": "3febe05aeaaaf4fdbb2fd21e196ecb6c95e0570b5dd660d3464c31c1d06b585e"
     },
     {
       "bytes": 9836,
@@ -1848,9 +1848,9 @@
       "sha256": "26fdd44ccfcf221d07c773e89326cf06422213b6b4c3d120781f588bfb50f609"
     },
     {
-      "bytes": 6019,
+      "bytes": 6282,
       "path": "site/scene.js",
-      "sha256": "613744a213f11199eb63158b4ac4160f7a7a72f1fcd1a570a2d620efca852282"
+      "sha256": "93deb2b267d82fbae487e1366bb8fd4d46f66b68f7ea787fb87f56f96ac1a784"
     },
     {
       "bytes": 4024,
@@ -2078,7 +2078,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "e1d56975cb1664f33ac5df6b24785b2a07ac008183fa16fb515801fe99d1664a",
+  "inventory_sha256": "794749e43f230285a765161e52bc9dbc39d2017ecd92347ad40af795c8bd5650",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 98946680
+  "total_bytes": 98946695
 }
