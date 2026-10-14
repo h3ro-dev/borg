@@ -98,7 +98,7 @@
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
   const total = cards.size;
   const key = "borg-map-assimilated-v1";
-  const name = (part) => cards.get(part)?.querySelector("h4").textContent.trim() || "Stardate log";
+  const name = (part) => cards.get(part)?.querySelector("h4").textContent.trim() || "Lab notes";
   const readout = (part) =>
     cards.get(part)?.querySelector(".part-readout").textContent.replace(/\s+/g, " ").trim() || "";
   let seen = new Set();

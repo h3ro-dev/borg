@@ -14,6 +14,7 @@ const GITHUB = 'https://github.com/h3ro-dev/borg';
 // (WCAG 2.5.8 inline exception); self = needs the "Type it yourself" panel; open = FAQ item to open first.
 const CONTROLS = [
   ['Skip link', '.skip', 'hash', { hash: '#main', keyboardOnly: true }],
+  ['Logo: BORG home', '.site-head .brand', 'page', { path: '/borg/' }],
   ['Header: Get started', '.site-head .btn-acid', 'hash', { hash: '#start' }],
   ['Menu: How it works', '.nav a[href="#how"]', 'hash', { hash: '#how', desktop: true }],
   ['Menu: Will it run?', '.nav a[href="#check"]', 'hash', { hash: '#check', desktop: true }],
@@ -228,6 +229,31 @@ export async function verifyHome({ browser, origin, evidence, results }) {
     }
   }
   results.checks.push('Front page: no horizontal overflow, text at least 13px and the hero "Get started" on the first screen at 320, 390, 768, 1024, 1440 and 1920px');
+
+  // Regressions from the 14 October independent visual check (B1 to B3).
+  const narrow = await browser.newContext({ viewport: { width: 390, height: 760 }, hasTouch: true, isMobile: true });
+  const thin = await narrow.newPage();
+  watch(thin);
+  for (const width of [320, 390, 460]) {
+    await thin.setViewportSize({ width, height: 760 });
+    await open(thin, home);
+    const tops = await thin.locator('[role="tab"]').evaluateAll((tabs) => tabs.map((t) => Math.round(t.getBoundingClientRect().top)));
+    assert.equal(new Set(tops).size, 1, `Install tabs wrap at ${width}px: ${tops}`);
+    for (const id of ['tip-oss', 'tip-codex', 'tip-claude', 'tip-term']) {
+      await thin.locator(`[aria-controls="${id}"]`).tap();
+      const box = await thin.locator('#' + id).evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left, right: r.right, viewport: innerWidth, content: document.documentElement.scrollWidth };
+      });
+      assert(box.left >= 0 && box.right <= box.viewport && box.content <= box.viewport, `${id} leaves the screen at ${width}px: ${JSON.stringify(box)}`);
+      await thin.touchscreen.tap(4, 400);
+    }
+    await thin.locator('[aria-controls="tech-memory"]').tap();
+    const panel = await thin.locator('#tech-memory').evaluate((el) => el.getBoundingClientRect().width);
+    assert(panel > 160, `The technical-name panel is only ${Math.round(panel)}px wide at ${width}px`);
+  }
+  await narrow.close();
+  results.checks.push('Front page: install tabs stay on one row, explanation pop-ups stay on screen and technical-name panels use the text column at 320, 390 and 460px');
 
   // Links to sections that moved to collective.html keep working.
   for (const [hash, expected] of [['#configure', '/borg/collective.html#configure'], ['#system', '/borg/collective.html#system'], ['#part-memory', '/borg/collective.html#part-memory'], ['#setup', '/borg/#start'], ['#how', '/borg/#how']]) {

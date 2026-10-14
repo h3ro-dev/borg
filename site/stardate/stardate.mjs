@@ -236,7 +236,7 @@ function when(entry) {
 function shell({ title, description, canonical, root, current, body }) {
   const nav = [
     [`${root}collective.html#system`, 'The system', ' class="sd-keep"'],
-    ['./', 'Stardate log', ` class="sd-keep"${current === 'log' ? ' aria-current="page"' : ''}`],
+    ['./', 'Lab notes', ` class="sd-keep"${current === 'log' ? ' aria-current="page"' : ''}`],
     [`${root}collective.html#fleet`, 'The fleet', ''],
     [`${root}collective.html#configure`, 'Configure', ''],
     [`${root}guide.html`, 'Install guide', ''],
@@ -267,7 +267,7 @@ ${body}
 <footer class="footer wrap">
 <a class="brand" href="${root}"><img src="../mark.svg" width="30" height="34" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
 <p>An independent open-source project.<br>Not affiliated with Star Trek or its rights holders.</p>
-<nav aria-label="Footer navigation"><a href="./">Stardate log</a><a href="${root}collective.html#system">The system</a><a href="${root}guide.html">Install guide</a><a href="https://github.com/h3ro-dev/borg">GitHub ↗</a></nav>
+<nav aria-label="Footer navigation"><a href="./">Lab notes</a><a href="${root}collective.html#system">The system</a><a href="${root}guide.html">Install guide</a><a href="https://github.com/h3ro-dev/borg">GitHub ↗</a></nav>
 </footer>
 </body>
 </html>
@@ -298,7 +298,7 @@ ${content}
     `<a class="sd-pager-all" href="./">All entries</a>`,
     newer ? `<a class="sd-pager-newer" href="./${newer.page}"><span>Newer entry</span> ${escapeHtml(newer.meta.title)}</a>` : '',
   ].join('');
-  const body = `<nav class="sd-crumbs" aria-label="Breadcrumb"><ol><li><a href="./">Stardate log</a></li><li><span aria-current="page">Stardate ${meta.stardate}</span></li></ol></nav>
+  const body = `<nav class="sd-crumbs" aria-label="Breadcrumb"><ol><li><a href="./">Lab notes</a></li><li><span aria-current="page">Stardate ${meta.stardate}</span></li></ol></nav>
 <article class="sd-entry" aria-labelledby="entry-title">
 <header class="sd-entry-head">
 <p class="sd-stardate">STARDATE <b>${meta.stardate}</b></p>
@@ -360,7 +360,7 @@ ${list}
 </ol>
 </section>`;
   return shell({
-    title: 'Stardate log — the lab book of the BORG Collective',
+    title: 'Lab notes — the Stardate log of the BORG Collective',
     description: 'Every experiment the collective runs, in one format: what we did, what we learned, open questions and the lab book log.',
     canonical: ORIGIN,
     root: '../../',
