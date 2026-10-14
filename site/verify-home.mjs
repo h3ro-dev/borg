@@ -29,7 +29,7 @@ const CONTROLS = [
   ['Technical name: Memory', '[aria-controls="tech-memory"]', 'reveal', {}],
   ['Technical name: Tools', '[aria-controls="tech-tools"]', 'reveal', {}],
   ['Technical name: Teamwork', '[aria-controls="tech-team"]', 'reveal', {}],
-  ['Mac check: kind of computer', '#kind-intel', 'radio', { pill: 'Not tested yet' }],
+  ['Mac check: kind of computer', '#kind-intel', 'radio', { pill: 'Not verified yet' }],
   ['Mac check: memory', '#ram-32', 'radio', { pill: 'Great fit' }],
   ['Mac check: free space', '#disk-lt20', 'radio', { pill: 'Free up space first' }],
   ['Mac check: Get started', '#r-cta', 'hash', { hash: '#start' }],
@@ -142,7 +142,7 @@ async function effect(page, [name, selector, kind, options], how) {
       await act(' ');
       const after = await page.evaluate(() => document.documentElement.dataset.motion);
       assert.notEqual(after, before, 'Motion switch changes the page state');
-      assert.equal(await el.getAttribute('aria-pressed'), String(after === 'running'));
+      assert.equal((await el.textContent()).trim(), after === 'running' ? 'Pause motion' : 'Play motion');
       return `switches motion ${before} → ${after}`;
     }
     case 'radio': {
@@ -164,6 +164,7 @@ async function effect(page, [name, selector, kind, options], how) {
       return 'tap selects and shows its panel';
     }
     case 'copy': {
+      if (options.self) await page.locator('#owner').fill('jamie');
       await act('Enter');
       await page.waitForFunction((sel) => document.querySelector(sel).textContent.trim() === 'Copied', selector);
       const copied = await page.evaluate(() => navigator.clipboard.readText());

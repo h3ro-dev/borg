@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#10120f" />
     <meta
       name="description"
-      content="BORG gives your AI coding agents one shared memory that lives on your Mac. It saves what they learn about your project and hands it back the next time any of them starts work. Free and open source."
+      content="BORG gives your AI coding agents one shared memory that lives on your Mac. Codex saves what it learns about your project there and gets it back the next time it starts work; Claude Code and Grok can join after setup. Free and open source."
     />
     <meta property="og:title" content="BORG — Your AI forgets. BORG remembers." />
     <meta
@@ -67,7 +67,7 @@
               <li>Codex · Claude · Grok</li>
             </ul>
             <h1 id="hero-h">Your AI forgets.<br /><span class="acid">BORG remembers.</span></h1>
-            <p class="lede">BORG gives your AI coding agents <strong>one shared memory that lives on your Mac.</strong> It saves what they learn about your project and hands it back the next time any of them starts work. Stop explaining your project from scratch.</p>
+            <p class="lede">BORG gives your AI coding agents <strong>one shared memory that lives on your Mac.</strong> Codex saves what it learns about your project there and gets it back the next time it starts work. Claude Code and Grok can join after a few setup steps. Stop explaining your project from scratch.</p>
             <div class="cta-row">
               <a class="btn btn-acid" href="#start">Get started <span aria-hidden="true">↓</span></a>
               <a class="btn btn-ghost" href="#how">See how it works</a>
@@ -78,7 +78,7 @@
             <div class="stars" aria-hidden="true"></div>
             <img src="./assets/borg-fleet-foreground.webp" width="2200" height="1375" fetchpriority="high"
               alt="Drawn as ships in space: a large green cube labelled BORG, shared memory, on your Mac. Lines link it to smaller cubes labelled Codex, Claude and Grok, each an AI agent, and Tools for files, apps and the browser." />
-            <button class="motion" id="motion" type="button" aria-pressed="true">Pause motion</button>
+            <button class="motion" id="motion" type="button">Pause motion</button>
           </figure>
         </div>
       </section>
@@ -89,7 +89,7 @@
           <h2 id="diff-h">Monday you explain.<br />Tuesday it already knows.</h2>
           <div class="compare">
             <article class="chat chat-without" aria-label="Without BORG">
-              <div><span class="tag tag-muted">Without BORG</span></div>
+              <div><span class="tag tag-muted">Example · without BORG</span></div>
               <p class="day">Monday</p>
               <div class="msg you">Our app uses Supabase for logins and Tailwind for styling. Please never use inline styles.</div>
               <div class="msg ai">Got it. I'll keep that in mind.</div>
@@ -99,7 +99,7 @@
               <p class="chat-foot">You explain it all again.</p>
             </article>
             <article class="chat chat-with" aria-label="With BORG">
-              <div><span class="tag tag-acid">With BORG</span></div>
+              <div><span class="tag tag-acid">Example · with BORG</span></div>
               <p class="day">Tuesday · new chat</p>
               <div class="msg you">Add a settings page.</div>
               <p class="memory-chip"><svg viewBox="0 0 40 44" aria-hidden="true"><path fill="currentColor" d="M20 1 39 11v22L20 43 1 33V11Zm0 4L6 12.5l14 7.4 14-7.4ZM5 16v14.5l13 7V23Zm30 0-13 7v14.5l13-7Z"/></svg>BORG added 3 notes from Monday</p>
@@ -116,11 +116,11 @@
           <p class="eyebrow">How it works</p>
           <h2 id="how-h">Three steps, all on your Mac.</h2>
           <ol class="steps">
-            <li><h3>Your agent works as usual.</h3><p>As Codex works on your project, BORG saves the useful parts: the tools you use, the choices you made, the fixes that worked.</p></li>
+            <li><h3>Your agent works as usual.</h3><p>As Codex works on your project, BORG saves useful facts from each session, for example which tools you use and what you decided.</p></li>
             <li><h3>BORG files it away.</h3><p>Notes go into a private memory in one folder on your Mac. Small AI models, also on your Mac, sort the notes and link related facts.</p></li>
-            <li><h3>Next time, it remembers.</h3><p>When a connected agent starts a task, BORG hands it the notes that matter for that task.</p></li>
+            <li><h3>Next time, it remembers.</h3><p>When Codex starts a task, BORG hands it the notes that matter for that task.</p></li>
           </ol>
-          <p class="note"><span class="tip-wrap"><button class="tip" type="button" aria-expanded="false" aria-controls="tip-codex">Codex</button><span class="tip-pop" id="tip-codex" role="note" hidden>OpenAI's coding agent. You talk to it in Terminal and it writes and runs code for you.</span></span> is connected for you during setup. <span class="tip-wrap"><button class="tip" type="button" aria-expanded="false" aria-controls="tip-claude">Claude Code</button><span class="tip-pop" id="tip-claude" role="note" hidden>Anthropic's coding agent for Terminal.</span></span> and Grok connect with a few extra steps.</p>
+          <p class="note"><span class="tip-wrap"><button class="tip" type="button" aria-expanded="false" aria-controls="tip-codex">Codex</button><span class="tip-pop" id="tip-codex" role="note" hidden>OpenAI's coding agent. You talk to it in Terminal and it writes and runs code for you.</span></span> is connected for you during setup. <span class="tip-wrap"><button class="tip" type="button" aria-expanded="false" aria-controls="tip-claude">Claude Code</button><span class="tip-pop" id="tip-claude" role="note" hidden>Anthropic's coding agent for Terminal.</span></span> and Grok connect with a few extra steps, then search the same memory.</p>
         </div>
       </section>
 
@@ -203,15 +203,15 @@
             <div class="result" id="result" data-state="small" aria-live="polite">
               <p class="pill" id="r-pill">Good to try</p>
               <p class="result-title" id="r-title">Good for trying BORG with light use.</p>
-              <p class="result-body" id="r-body">Start small and watch how your Mac feels before you rely on it. You have enough space to install; plan for about 50 GB free as your memory grows.</p>
+              <p class="result-body" id="r-body">This matches our starter plan. Start small and watch how your Mac feels before you rely on it. You have enough space to install; plan for about 50 GB free as your memory grows.</p>
               <dl class="plan" id="r-plan">
-                <div><dt>Memory</dt><dd id="r-ram">16 GB</dd></div>
-                <div><dt>Free space to plan for</dt><dd id="r-disk">About 50 GB</dd></div>
+                <div><dt id="r-ram-label">Your plan</dt><dd id="r-ram">Starter · 16 GB</dd></div>
+                <div><dt id="r-disk-label">Free space to plan for</dt><dd id="r-disk">About 50 GB</dd></div>
               </dl>
               <a class="btn btn-acid" id="r-cta" href="#start">Get started <span aria-hidden="true">↓</span></a>
               <p class="result-foot" id="check-note">Based on our planning guide. Real speed depends on what else your Mac is doing.</p>
             </div>
-            <noscript><div class="result-static"><p><b>16 GB:</b> good for trying BORG with light use; plan for about 50 GB free.</p><p><b>32 GB or more:</b> a great fit for daily use; plan for about 100 GB free.</p><p>Setup needs at least 20 GB free. BORG is tested on Macs with M-series chips.</p></div></noscript>
+            <noscript><div class="result-static"><p><b>16 GB:</b> good for trying BORG with light use; plan for about 50 GB free.</p><p><b>32 GB or more:</b> matches our everyday plan; plan for about 100 GB free.</p><p>Setup needs at least 20 GB free. BORG is tested on Macs with M-series chips.</p></div></noscript>
           </form>
         </div>
       </section>
@@ -220,7 +220,7 @@
         <div class="wrap">
           <p class="eyebrow">Get started</p>
           <h2 id="start-h">Let your AI set it up.</h2>
-          <p class="sub">The easiest way: give your AI agent the instructions and let it do the typing. It checks your Mac first and explains each step before it runs it.</p>
+          <p class="sub">The easiest way: give your AI agent the instructions and let it do the typing. The message below asks it to check your Mac first and explain each step before it runs it.</p>
           <div class="tabs" role="tablist" aria-label="Ways to install BORG">
             <button class="tab" role="tab" type="button" id="tab-ai" aria-selected="true" aria-controls="panel-ai">Let your AI do it <span class="rec">Easiest</span></button>
             <button class="tab" role="tab" type="button" id="tab-self" aria-selected="false" aria-controls="panel-self" tabindex="-1">Type it yourself</button>
@@ -257,7 +257,7 @@
             <p class="fineprint">Want every option, including ChatGPT on the web and other machines? Read the <a href="./guide.html">install guide</a>.</p>
           </div>
           <div class="done-card">
-            <div><h3>You're set up when…</h3><p><code>borg doctor</code> says you're ready. If something still needs setup, it tells you what.</p></div>
+            <div><h3>You're set up when…</h3><p><code>"$HOME/.borg/bin/borg" doctor</code> says you're ready. If something still needs setup, it tells you what.</p></div>
             <div><h3>Then try it</h3><p>Tell Codex one fact about your project. Start a new chat and ask about it.</p></div>
           </div>
         </div>
@@ -270,10 +270,10 @@
           <div class="faq">
             <details open><summary>Is BORG free?</summary><div class="a"><p>Yes. BORG is open source under the MIT license. You use your own AI accounts, such as the one you use for Codex, and their normal costs apply.</p></div></details>
             <details><summary>Where is my data stored?</summary><div class="a"><p>On your Mac, in one private folder (~/.borg). BORG never connects to our setup or to anyone else's.</p><p>When your AI uses a memory, that note becomes part of your chat with that AI's company, like anything you type.</p></div></details>
-            <details><summary>Will it slow down or change my Mac?</summary><div class="a"><p>BORG runs a few background services that only your Mac can reach. Its local AI models use memory, so a Mac with more memory runs it more comfortably.</p><p>macOS asks your permission before an agent can control other apps or see your screen.</p></div></details>
+            <details><summary>Will it slow down or change my Mac?</summary><div class="a"><p>BORG runs several background services that only your Mac can reach. Its local AI models use memory, so a Mac with more memory runs it more comfortably.</p><p>macOS asks your permission before an agent can control other apps or see your screen.</p></div></details>
             <details><summary>Which AI tools work with it?</summary><div class="a"><p>Codex is connected during setup. Claude Code and Grok work after a few <a href="./guide.html#providers">extra steps in the install guide</a>. ChatGPT on the web can connect too, through <a href="./guide.html#web">your own Cloudflare account</a>. That one is for advanced users.</p></div></details>
             <details><summary>Do I need to know how to code?</summary><div class="a"><p>You need to be comfortable pasting commands into Terminal, or letting your AI agent do it for you.</p></div></details>
-            <details><summary>How do I remove it?</summary><div class="a"><p>Stop BORG, then remove its folder and its background services. The <a href="./guide.html#operate">install guide lists the exact steps</a>.</p></div></details>
+            <details><summary>How do I remove it?</summary><div class="a"><p>Stop BORG, then remove its folder and its background services. The <a href="./guide.html#operate">install guide explains how</a>, including backing up first.</p></div></details>
           </div>
         </div>
       </section>
@@ -284,7 +284,7 @@
           <h2 id="more-h">Curious how far it goes?</h2>
           <div class="more">
             <a href="./collective.html#system"><h3>How we run ours</h3><p>Our own setup across seven Macs, with a memory judge, nightly cleanup and quality checks. Some of it isn't in the download yet.</p><span class="go">See our setup →</span></a>
-            <a href="./assets/stardate/"><h3>Lab notes</h3><p>Every experiment we run, written down: what worked, what didn't and what we still don't know.</p><span class="go">Read the lab notes →</span></a>
+            <a href="./assets/stardate/"><h3>Lab notes</h3><p>Our Stardate log of every experiment: what worked, what didn't and what we still don't know.</p><span class="go">Read the lab notes →</span></a>
             <a href="./collective.html#configure"><h3>Plan several machines</h3><p>For bigger setups: size each machine, pick its parts and download a plan.</p><span class="go">Open the planner →</span></a>
             <a href="https://github.com/h3ro-dev/borg"><h3>Read the code</h3><p>Everything is public. Look through it before you install.</p><span class="go">Open GitHub →</span></a>
           </div>

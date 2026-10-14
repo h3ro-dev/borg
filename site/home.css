@@ -24,7 +24,8 @@
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-.no-js .tabs, .no-js .motion, .no-js .result { display: none; }
+.no-js .tabs, .no-js .motion, .no-js .result, .no-js .tip-more, .no-js .copy { display: none; }
+.no-js .tip { text-decoration: none; cursor: auto; }
 .no-js .panel { border-top: 1px solid var(--line); border-radius: 12px; margin-top: 16px; }
 .result-static { border: 1px solid var(--line); border-radius: 12px; padding: 20px; background: var(--surface); display: grid; gap: 10px; color: var(--muted); }
 .result-static b { color: var(--fg); }
@@ -109,7 +110,7 @@ h1 { font-size: clamp(34px, 9.2vw, 60px); font-weight: 700; text-transform: uppe
 .hero-art { position: relative; margin: 0; min-width: 0; }
 .hero-art img { position: relative; z-index: 1; width: 100%; animation: float 9s ease-in-out infinite; }
 :root[data-motion="paused"] .hero-art img, :root[data-motion="paused"] .stars { animation-play-state: paused; }
-.motion { position: absolute; right: 0; bottom: -6px; z-index: 3; font: inherit; font-size: 15px; font-weight: 700; color: var(--fg); background: color-mix(in srgb, var(--bg) 80%, transparent); border: 1px solid var(--line); border-radius: var(--r); min-height: 44px; padding: 8px 14px; cursor: pointer; }
+.motion { position: relative; z-index: 3; display: block; margin: 6px 0 0 auto; font: inherit; font-size: 15px; font-weight: 700; color: var(--fg); background: color-mix(in srgb, var(--bg) 80%, transparent); border: 1px solid var(--line); border-radius: var(--r); min-height: 44px; padding: 8px 14px; cursor: pointer; }
 .motion:hover { border-color: var(--acid); }
 .stars {
   position: absolute; inset: -18% -12%; z-index: 0; pointer-events: none; opacity: .75;
@@ -186,9 +187,11 @@ h1 { font-size: clamp(34px, 9.2vw, 60px); font-weight: 700; text-transform: uppe
 .tip-more:hover, .tip-more[aria-expanded="true"] { color: var(--fg); border-color: var(--acid); }
 .tip-pop {
   display: block; margin-top: 8px; padding: 12px 14px; font-size: 15px; line-height: 1.5;
+  font-family: var(--font); font-weight: 400; letter-spacing: normal; text-transform: none;
   background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r); color: var(--fg);
 }
-.tip-wrap .tip-pop { position: absolute; left: 0; top: calc(100% + 6px); width: min(300px, 80vw); z-index: 10; margin: 0; box-shadow: 0 18px 40px -18px #000; }
+.layer-list .tip-pop { grid-column: 2; }
+.tip-wrap .tip-pop { position: absolute; left: 0; top: calc(100% + 6px); width: min(300px, calc(100vw - 24px)); z-index: 10; margin: 0; box-shadow: 0 18px 40px -18px #000; }
 
 /* Will it run */
 .checker { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 28px; margin-top: 36px; align-items: start; }
@@ -296,7 +299,14 @@ legend { font-weight: 700; font-size: 19px; margin-bottom: 12px; padding: 0; }
 .foot nav a:hover { color: var(--acid); }
 
 @media (prefers-reduced-motion: reduce) {
+  /* The hero's drift starts paused (home.js) and only runs after an explicit "Play motion". */
   html { scroll-behavior: auto; }
-  .hero-art img, .stars { animation: none; }
   .btn, .more a { transition: none; }
+}
+@media (max-width: 520px) {
+  /* Two install choices side by side, so neither reads as a heading for the other. */
+  .tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; border-bottom: 0; }
+  .tab { flex-direction: column; justify-content: center; text-align: center; gap: 6px; margin: 0; padding: 10px 8px; font-size: 16px; line-height: 1.2; border: 1px solid var(--line); border-radius: var(--r); }
+  .tab[aria-selected="true"] { border: 1px solid var(--acid); background: var(--surface); }
+  .panel { border-top: 1px solid var(--line); border-radius: 12px; margin-top: 10px; }
 }
