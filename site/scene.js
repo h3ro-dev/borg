@@ -20,7 +20,8 @@ let mapVisible = false;
 let pageLoaded = document.readyState === "complete";
 let video = null;
 let ready = false;
-let canPlayThrough = false;
+let handedOff = false;
+let buffered = false;
 let failed = false;
 
 function motionState() {
@@ -35,8 +36,9 @@ function motionState() {
   // The visible label says what the button will do, and it is also the button's name.
   for (const control of motionButtons) control.textContent = paused ? "Play motion" : "Pause motion";
   if (!video || !ready) return;
-  // Hold on the first frame (the poster) until the whole loop can play without stalling.
-  if (running && visible && canPlayThrough) video.play().catch(() => {});
+  // Hold on the first frame (the poster) until the poster has gone and the whole loop has
+  // downloaded, so the turn never stalls or shows the poster's outline underneath.
+  if (running && visible && handedOff && buffered) video.play().catch(() => {});
   else video.pause();
 }
 
@@ -86,7 +88,18 @@ function initialize() {
   const size = poster.includes("poster-720") ? 720 : poster.includes("poster-960") ? 960 : 1200;
   video.src = `./assets/borg-ship-turn-${size}.webm`;
   video.addEventListener("error", fallback, { once: true });
-  video.addEventListener("canplaythrough", () => { canPlayThrough = true; motionState(); }, { once: true });
+  const checkBuffered = () => {
+    if (buffered || !video) return;
+    const ranges = video.buffered;
+    const end = ranges.length ? ranges.end(ranges.length - 1) : 0;
+    if (video.duration && end >= video.duration - 0.1) { buffered = true; motionState(); }
+  };
+  video.addEventListener("progress", checkBuffered);
+  video.addEventListener("canplaythrough", checkBuffered);
+  // If the browser stops downloading because it already holds enough, treat that as ready.
+  video.addEventListener("suspend", () => {
+    if (video && video.readyState >= 4 && !buffered) { buffered = true; motionState(); }
+  });
   video.addEventListener(
     "loadeddata",
     () => {
@@ -97,8 +110,9 @@ function initialize() {
       }
       ready = true;
       stage.dataset.state = "ready";
-      // The first frame is the poster, so it is shown at once; start turning a moment later.
-      setTimeout(motionState, 250);
+      // The first frame is the poster, so it is shown at once; the poster hides 0.15 s later
+      // and the turn may start after 0.25 s.
+      setTimeout(() => { handedOff = true; checkBuffered(); motionState(); }, 250);
     },
     { once: true },
   );
