@@ -10,6 +10,7 @@ import { verifyGuide } from "./verify-guide.mjs";
 import { verifyExplorer } from "./verify-explorer.mjs";
 import { verifyMap } from "./verify-map.mjs";
 import { verifyStardate, verifyStardateStatic } from "./verify-stardate.mjs";
+import { verifyHome } from "./verify-home.mjs";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const { chromium, webkit } = await import(
   process.env.PLAYWRIGHT_MODULE
@@ -70,6 +71,7 @@ try {
       : {}),
   });
   results.chromium = browser.version();
+  await verifyHome({ browser, origin, evidence, results });
   const context = await browser.newContext({
     permissions: ["clipboard-read", "clipboard-write"],
   });
@@ -83,7 +85,7 @@ try {
   });
   for (const width of [320, 390, 768, 1024, 1440, 1920]) {
     await page.setViewportSize({ width, height: width < 768 ? 844 : 1000 });
-    await page.goto(origin + "/borg/");
+    await page.goto(origin + "/borg/collective.html");
     await page.evaluate(() => document.fonts.ready);
     await page.locator("#download-blueprint").waitFor();
     const dimensions = await page.evaluate(() => ({
@@ -110,7 +112,7 @@ try {
     );
   }
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto(origin + "/borg/");
+  await page.goto(origin + "/borg/collective.html");
   await page.keyboard.press("Tab");
   assert(
     await page
@@ -270,7 +272,7 @@ try {
     viewport: { width: 390, height: 844 },
   });
   const fallback = await nojs.newPage();
-  await fallback.goto(origin + "/borg/");
+  await fallback.goto(origin + "/borg/collective.html");
   for (const id of ["local", "web", "existing"])
     assert(await fallback.locator(`#panel-${id}`).isVisible());
   assert(!(await fallback.locator(".setup-tabs").isVisible()));
@@ -302,6 +304,12 @@ try {
     });
     await page.goto(origin + "/borg/");
     await page.evaluate(() => document.fonts.ready);
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "WebKit front page overflow");
+    await page.locator(".site-head .btn-acid").click();
+    await page.waitForFunction(() => location.hash === "#start");
+    results.checks.push("WebKit mobile: the front page fits 390px and Get started opens the start section");
+    await page.goto(origin + "/borg/collective.html");
+    await page.evaluate(() => document.fonts.ready);
     await page.locator("#download-blueprint").waitFor();
     assert(
       await page.evaluate(
@@ -320,7 +328,7 @@ try {
     await verifyExplorer({ page, browser, origin, evidence, results });
     await verifyGuide({ page, origin, evidence, results });
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(origin + "/borg/#system");
+    await page.goto(origin + "/borg/collective.html#system");
     await page.locator(".map-node[data-part=\"recall\"]").click();
     assert.equal(await page.locator("#map-card h3").textContent(), "Recall");
     for (const url of ["/borg/assets/stardate/", "/borg/assets/stardate/2026-268-grok-hooks-ab.html"]) {

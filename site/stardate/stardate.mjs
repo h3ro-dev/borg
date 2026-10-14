@@ -235,10 +235,10 @@ function when(entry) {
 
 function shell({ title, description, canonical, root, current, body }) {
   const nav = [
-    [`${root}#system`, 'The system', ' class="sd-keep"'],
-    ['./', 'Stardate log', ` class="sd-keep"${current === 'log' ? ' aria-current="page"' : ''}`],
-    [`${root}#fleet`, 'The fleet', ''],
-    [`${root}#configure`, 'Configure', ''],
+    [`${root}collective.html#system`, 'The system', ' class="sd-keep"'],
+    ['./', 'Lab notes', ` class="sd-keep"${current === 'log' ? ' aria-current="page"' : ''}`],
+    [`${root}collective.html#fleet`, 'The fleet', ''],
+    [`${root}collective.html#configure`, 'Configure', ''],
     [`${root}guide.html`, 'Install guide', ''],
   ].map(([href, label, extra]) => `<a href="${href}"${extra}>${label}</a>`).join('');
   return `<!doctype html>
@@ -267,7 +267,7 @@ ${body}
 <footer class="footer wrap">
 <a class="brand" href="${root}"><img src="../mark.svg" width="30" height="34" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
 <p>An independent open-source project.<br>Not affiliated with Star Trek or its rights holders.</p>
-<nav aria-label="Footer navigation"><a href="./">Stardate log</a><a href="${root}#system">The system</a><a href="${root}guide.html">Install guide</a><a href="https://github.com/h3ro-dev/borg">GitHub ↗</a></nav>
+<nav aria-label="Footer navigation"><a href="./">Lab notes</a><a href="${root}collective.html#system">The system</a><a href="${root}guide.html">Install guide</a><a href="https://github.com/h3ro-dev/borg">GitHub ↗</a></nav>
 </footer>
 </body>
 </html>
@@ -298,7 +298,7 @@ ${content}
     `<a class="sd-pager-all" href="./">All entries</a>`,
     newer ? `<a class="sd-pager-newer" href="./${newer.page}"><span>Newer entry</span> ${escapeHtml(newer.meta.title)}</a>` : '',
   ].join('');
-  const body = `<nav class="sd-crumbs" aria-label="Breadcrumb"><ol><li><a href="./">Stardate log</a></li><li><span aria-current="page">Stardate ${meta.stardate}</span></li></ol></nav>
+  const body = `<nav class="sd-crumbs" aria-label="Breadcrumb"><ol><li><a href="./">Lab notes</a></li><li><span aria-current="page">Stardate ${meta.stardate}</span></li></ol></nav>
 <article class="sd-entry" aria-labelledby="entry-title">
 <header class="sd-entry-head">
 <p class="sd-stardate">STARDATE <b>${meta.stardate}</b></p>
@@ -360,7 +360,7 @@ ${list}
 </ol>
 </section>`;
   return shell({
-    title: 'Stardate log — the lab book of the BORG Collective',
+    title: 'Lab notes — the Stardate log of the BORG Collective',
     description: 'Every experiment the collective runs, in one format: what we did, what we learned, open questions and the lab book log.',
     canonical: ORIGIN,
     root: '../../',
@@ -369,7 +369,7 @@ ${list}
   });
 }
 
-/** The home page block between the stardate:latest markers. */
+/** The collective page's block between the stardate:latest markers. */
 export function renderLatest(entries, count = 3) {
   return `${LATEST_START}
 <ol class="log-latest">${entries.slice(0, count).map(entry => `<li>${entryCard(entry, './assets/stardate/' + entry.page)}</li>`).join('')}</ol>
@@ -386,10 +386,11 @@ export async function buildAll(site) {
     files.set(`assets/stardate/${entry.page}`, renderEntryPage(entry, { newer: entries[i - 1], older: entries[i + 1] }));
   });
   files.set('assets/stardate/index.html', renderIndexPage(entries));
-  const home = await readFile(path.join(site, 'index.html'), 'utf8');
+  // The latest-entries block lives on collective.html ("How we run ours"); index.html is the front page.
+  const home = await readFile(path.join(site, 'collective.html'), 'utf8');
   const start = home.indexOf(LATEST_START);
   const end = home.indexOf(LATEST_END);
-  if (start < 0 || end < start) errors.push('index.html: missing stardate:latest markers');
-  else files.set('index.html', home.slice(0, start) + renderLatest(entries) + home.slice(end + LATEST_END.length));
+  if (start < 0 || end < start) errors.push('collective.html: missing stardate:latest markers');
+  else files.set('collective.html', home.slice(0, start) + renderLatest(entries) + home.slice(end + LATEST_END.length));
   return { entries, errors, files };
 }

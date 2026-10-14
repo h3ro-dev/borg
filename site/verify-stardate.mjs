@@ -69,7 +69,7 @@ export async function verifyStardateStatic() {
     const [a, b] = [entries[i - 1].meta, entries[i].meta];
     assert(a.stardate > b.stardate || (a.stardate === b.stardate && (a.time || '') >= (b.time || '')), `Index order is not newest first at ${entries[i].slug}`);
   }
-  checks.push('Index lists every entry once, newest first; home page shows the three newest');
+  checks.push('Index lists every entry once, newest first; collective page shows the three newest');
 
   for (const entry of entries) {
     const html = await readFile(path.join(published, entry.page), 'utf8');
@@ -159,10 +159,10 @@ export async function verifyStardate({ browser, origin, evidence, results, axeSc
     assert(await nojs.locator('#lab-book-log').isVisible());
     assert(await nojs.locator('.sd-log li').first().isVisible());
   }
-  await nojs.goto(`${origin}/borg/`);
+  await nojs.goto(`${origin}/borg/collective.html`);
   assert.equal(await nojs.locator('.log-latest .sd-card').count(), 3);
   await plain.close();
-  results.checks.push(`No-JavaScript: all ${expected} entries listed and every entry page readable in full; home shows the three newest`);
+  results.checks.push(`No-JavaScript: all ${expected} entries listed and every entry page readable in full; the collective page shows the three newest`);
   await page.screenshot({ path: path.join(evidence, 'stardate-entry-1280.png'), fullPage: true });
   results.screenshots.push('evidence/stardate-entry-1280.png');
   assert.deepEqual(errors, [], 'Stardate pages load without script or asset errors');

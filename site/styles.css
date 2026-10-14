@@ -2652,3 +2652,19 @@ pre:focus-visible,
     animation: none !important;
   }
 }
+
+/* Phones and small tablets: the menu gets its own row under the logo instead of crowding it. */
+@media (max-width: 800px) {
+  .header {
+    height: auto;
+    flex-wrap: wrap;
+    row-gap: 12px;
+    padding-block: 16px 14px;
+  }
+  .header nav {
+    width: 100%;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 13px;
+  }
+}

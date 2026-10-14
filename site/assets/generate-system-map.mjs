@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Generates the isometric deck art for the home page system map (inline SVG in index.html,
+// Generates the isometric deck art for the system map (inline SVG in collective.html,
 // between the system-map:art markers) plus the hotspot positions. Deterministic, no dependencies.
-//   node site/assets/generate-system-map.mjs          rewrite the block in index.html
+//   node site/assets/generate-system-map.mjs          rewrite the block in collective.html
 //   node site/assets/generate-system-map.mjs --check  exit 1 if the block is out of date
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -236,11 +236,11 @@ const START = '<!-- system-map:art -->';
 const END = '<!-- /system-map:art -->';
 if (import.meta.url === `file://${process.argv[1]}`) {
   const site = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-  const file = path.join(site, 'index.html');
+  const file = path.join(site, 'collective.html');
   const html = await readFile(file, 'utf8');
   const start = html.indexOf(START);
   const end = html.indexOf(END);
-  if (start < 0 || end < start) throw new Error('index.html is missing the system-map:art markers');
+  if (start < 0 || end < start) throw new Error('collective.html is missing the system-map:art markers');
   const next = html.slice(0, start) + START + '\n' + renderArt() + '\n' + html.slice(end);
   if (process.argv.includes('--hotspots')) console.log(JSON.stringify(hotspots(), null, 2));
   else if (process.argv.includes('--check')) {

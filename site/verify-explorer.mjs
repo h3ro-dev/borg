@@ -6,7 +6,7 @@ import { profiles } from './fleet-profiles.mjs';
 export async function verifyExplorer({ page, browser, origin, evidence, results }) {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto(origin + '/borg/#fleet');
+  await page.goto(origin + '/borg/collective.html#fleet');
   const dialog = page.locator('#node-profile');
   const audits = [];
   for (const profile of profiles) {
@@ -110,7 +110,7 @@ export async function verifyExplorer({ page, browser, origin, evidence, results 
     };
   });
   const fallback = await fallbackContext.newPage();
-  await fallback.goto(origin + '/borg/');
+  await fallback.goto(origin + '/borg/collective.html');
   await fallback.waitForFunction(() => document.querySelector('.ship-stage').dataset.state === 'fallback');
   assert(await fallback.locator('#motion-toggle').isVisible());
   assert.equal(await fallback.locator('.hero .star-near').evaluate(el => getComputedStyle(el).animationPlayState), 'running');
@@ -119,7 +119,7 @@ export async function verifyExplorer({ page, browser, origin, evidence, results 
   await fallbackContext.close();
   const staticContext = await browser.newContext({ javaScriptEnabled: false });
   const staticPage = await staticContext.newPage();
-  await staticPage.goto(origin + '/borg/');
+  await staticPage.goto(origin + '/borg/collective.html');
   assert.equal(await staticPage.locator('#fleet .star-near').evaluate(el => getComputedStyle(el).animationPlayState), 'paused');
   await staticPage.locator('.fleet-hotspot[data-profile="memory"]').click();
   assert.equal(new URL(staticPage.url()).pathname, '/borg/guide.html');

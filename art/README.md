@@ -42,3 +42,9 @@ reproducibility across Blender versions.
 The page supplies its own space background, lighting, camera and starfield. Its
 fallback does not need WebGL. Blender and its rendering machinery are tools used
 to author these outputs; they are not bundled into the website.
+
+## Other artwork
+
+- [FLEET.md](FLEET.md): the five-vessel fleet picture, labelled in plain words.
+- [DRONE.md](DRONE.md): the drone units.
+- [LAYERS.md](LAYERS.md): the cube opened into three layers for the front page.

@@ -1,6 +1,6 @@
 # Configure your BORG components
 
-Start with the [interactive machine planner](https://borg.utlyze.com/#configure), then use the [blueprint installation guide](BLUEPRINT.md). The machine planner and installer share the versioned [component catalog](../platform/catalog.json). A selection records what you want to set up; live readiness requires the checks for that component.
+Start with the [interactive machine planner](https://borg.utlyze.com/collective.html#configure), then use the [blueprint installation guide](BLUEPRINT.md). The machine planner and installer share the versioned [component catalog](../platform/catalog.json). A selection records what you want to set up; live readiness requires the checks for that component.
 
 ## What a new owner gets
 

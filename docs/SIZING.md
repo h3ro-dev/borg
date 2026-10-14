@@ -1,6 +1,6 @@
 # How the machine calculator works
 
-The [BORG planner](https://borg.utlyze.com/#configure) estimates each machine from its own role and workload. It does not divide a fleet total between machines. Its versioned inputs and allowances live in [catalog.json](../platform/catalog.json), and the calculation is [readable JavaScript](../platform/planner.mjs).
+The [BORG planner](https://borg.utlyze.com/collective.html#configure) estimates each machine from its own role and workload. It does not divide a fleet total between machines. Its versioned inputs and allowances live in [catalog.json](../platform/catalog.json), and the calculation is [readable JavaScript](../platform/planner.mjs).
 
 These are **engineering planning allowances**, not benchmarks, certified minimums, agent-count guarantees or live dispatch admission. Start with the [hardware guide](HARDWARE.md) and measure a representative workload before purchasing or expanding a fleet. Apple Silicon macOS is the verified complete installation path; Linux and Intel macOS acceptance remains pending. Windows is unsupported.
 

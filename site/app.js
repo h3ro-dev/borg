@@ -98,7 +98,7 @@
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
   const total = cards.size;
   const key = "borg-map-assimilated-v1";
-  const name = (part) => cards.get(part)?.querySelector("h4").textContent.trim() || "Stardate log";
+  const name = (part) => cards.get(part)?.querySelector("h4").textContent.trim() || "Lab notes";
   const readout = (part) =>
     cards.get(part)?.querySelector(".part-readout").textContent.replace(/\s+/g, " ").trim() || "";
   let seen = new Set();
@@ -122,7 +122,7 @@
   function progress() {
     const done = seen.size;
     count.textContent = `${done} of ${total}`;
-    countLabel.textContent = done === total ? "parts assimilated. The collective is complete." : "parts assimilated";
+    countLabel.textContent = done === total ? "parts explored. You've seen the whole collective." : "parts explored";
     ring.style.strokeDasharray = `${(done / total) * 100} 100`;
     section.classList.toggle("is-complete", done === total);
     resetButton.hidden = done === 0;
@@ -135,7 +135,7 @@
       if (assimilated && !badge) {
         badge = document.createElement("p");
         badge.className = "part-state";
-        badge.textContent = "Assimilated";
+        badge.textContent = "Explored";
         card.append(badge);
       } else if (!assimilated && badge) badge.remove();
     }
@@ -205,7 +205,7 @@
       const log = document.createElement("a");
       log.className = "map-button primary";
       log.href = "./assets/stardate/";
-      log.textContent = "Every part seen. Read the Stardate log";
+      log.textContent = "Every part seen. Read the lab notes";
       actions.append(log);
     }
     actions.append(button("All cards", () => document.querySelector(`#part-${part}`).scrollIntoView({ behavior: reduced.matches ? "auto" : "smooth" })));
@@ -214,8 +214,8 @@
     nodes.forEach((node) => (node.dataset.part === part ? node.setAttribute("aria-current", "true") : node.removeAttribute("aria-current")));
     highlight(part, "is-selected");
     const status = fresh.length
-      ? `${name(part)} assimilated. ${seen.size} of ${total}.${seen.size === total ? " The collective is complete." : ""}`
-      : `${name(part)}. Already assimilated.`;
+      ? `${name(part)} explored. ${seen.size} of ${total}.${seen.size === total ? " You've seen the whole collective." : ""}`
+      : `${name(part)}. Already explored.`;
     say(status);
     if (!fromMap) panel.focus({ preventScroll: true });
     reveal();
@@ -262,7 +262,7 @@
     else actions.append(button("Finish the tour", () => exitTour(true), true));
     actions.append(button("Exit", () => exitTour(true)));
     panel.replaceChildren(eyebrow, title, text, list, actions);
-    say(`Stop ${tour + 1} of ${steps.length}: ${title.textContent}${fresh.length ? ` ${fresh.length} new part${fresh.length > 1 ? "s" : ""} assimilated, ${seen.size} of ${total}.` : ""}`);
+    say(`Stop ${tour + 1} of ${steps.length}: ${title.textContent}${fresh.length ? ` ${fresh.length} new part${fresh.length > 1 ? "s" : ""} explored, ${seen.size} of ${total}.` : ""}`);
     panel.focus({ preventScroll: true });
     reveal();
   }
@@ -352,7 +352,7 @@
       node.removeAttribute("aria-current");
     });
     if (tour < 0) panel.replaceChildren(...intro.map((node) => node.cloneNode(true)));
-    say("Progress reset. Every part is unassimilated again.");
+    say("Progress reset. Every part is unexplored again.");
   });
   section.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && tour >= 0) exitTour(true);
