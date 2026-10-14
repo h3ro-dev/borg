@@ -1593,9 +1593,9 @@
       "sha256": "b0204a100db9f7bef698bfbf12b373134dc56a226d1e524b5d56903bc9cf2919"
     },
     {
-      "bytes": 14461,
+      "bytes": 14458,
       "path": "site/app.js",
-      "sha256": "97e0e9e44252134a7aa0653a0f4c5d9a93b0bf37e68f6817a571a2389a9c4f89"
+      "sha256": "1e3526f96655523e4bf8955ce8c1e201e29128ab940234d4cda8018de83a5a9d"
     },
     {
       "bytes": 4396,
@@ -1693,49 +1693,49 @@
       "sha256": "b6930d08a383f03735bbf317ab9e410648501804f501cf58f563e8d5274e0880"
     },
     {
-      "bytes": 7535,
+      "bytes": 7526,
       "path": "site/assets/stardate/2026-267-recall-budget-jam.html",
-      "sha256": "1f32674e1951a86c65377d79388ce711d0a6b16233113bfca8031a1748919668"
+      "sha256": "7395460881e797efa5e748148a3326552eb84f3de89b3de1223be98b8558e19d"
     },
     {
-      "bytes": 8374,
+      "bytes": 8365,
       "path": "site/assets/stardate/2026-268-clm-side-test.html",
-      "sha256": "147e0dc186b7eac4d8a2f197ece2cafb43e581faa0b3e7ed05e04dd902b097ea"
+      "sha256": "cdc2331708e2d60bfe97575364e686870be773bc708555d1e050ad5d33443d38"
     },
     {
-      "bytes": 9554,
+      "bytes": 9545,
       "path": "site/assets/stardate/2026-268-deep-dream-day-one.html",
-      "sha256": "f1f266fd964a899609a84ce5a848df50d9682f056c71be3caecd570e2a8d1d2f"
+      "sha256": "2de347f6520b9a52ae22b8d8841dcd1f53e148016d029f04d02627078696b38a"
     },
     {
-      "bytes": 8317,
+      "bytes": 8308,
       "path": "site/assets/stardate/2026-268-grok-hooks-ab.html",
-      "sha256": "2b193bb5fbb63b7327b99de54bb582af32270faded3c429415287da6e88b11cd"
+      "sha256": "139ed48ade60828a20199430b117c211ab85e27c63c1703248a9ee79e1a0d50f"
     },
     {
-      "bytes": 7949,
+      "bytes": 7940,
       "path": "site/assets/stardate/2026-268-incoming-filter-on.html",
-      "sha256": "b3c3321f11c82f35cc7945f7dfc5d4eaac4e05b803b0181c099f25eba7fe032d"
+      "sha256": "93b7b6821146bf7a01dac3444c3dc97e1bd1d0f77e22aa7984d8f71c1416beab"
     },
     {
-      "bytes": 7770,
+      "bytes": 7761,
       "path": "site/assets/stardate/2026-268-judge-kit-reviews.html",
-      "sha256": "be9ee7a0fc51e6e653266f6593e5a7c6ab823da13543fc06ac2927093bb832a7"
+      "sha256": "c2a588282e7baff371e640bb1184594264a9c9a7517270ab1fc9cdc86d835bae"
     },
     {
-      "bytes": 8108,
+      "bytes": 8099,
       "path": "site/assets/stardate/2026-268-marker-chains.html",
-      "sha256": "fd00563fee9c2a36564ee00254e7c6c0ec46eff47624a4543f013d3d6c7e964e"
+      "sha256": "8577f3f55f4a52caf642aadff536f72e6cf6c12dc90a4d23c78a4a63b82298bd"
     },
     {
-      "bytes": 8171,
+      "bytes": 8162,
       "path": "site/assets/stardate/2026-268-memory-reach.html",
-      "sha256": "575b390438723227aea7a07087f559e38ca187754e695889ab75fd3bdde2d3dc"
+      "sha256": "35da0dab603cd981d611ef408b0eb13f087527261f47ca244fbd9abd17d8bc04"
     },
     {
-      "bytes": 8460,
+      "bytes": 8455,
       "path": "site/assets/stardate/index.html",
-      "sha256": "625dfc0c31d67fc344f5c84dd968f7c56e0346d4146dd95965e4af8f8fbf6556"
+      "sha256": "bf5dad1e0a98cd3a81c37f18084cdeeffc6fd9158ee450297e98b0d0f6de3074"
     },
     {
       "bytes": 7046,
@@ -1743,9 +1743,9 @@
       "sha256": "31ab6524b09775ab3765c3ed6240397941f5c41c684910dca3355089a261c767"
     },
     {
-      "bytes": 91047,
+      "bytes": 91022,
       "path": "site/collective.html",
-      "sha256": "a3ab302c066ff8e785cce95999c97fcc4e8448b3a0a4cf2b0c0b3adb4b740c0e"
+      "sha256": "93191c272e88eb0c81867f9b62be8015561d51067d85704830b1b6ead7fe429c"
     },
     {
       "bytes": 9836,
@@ -1793,19 +1793,19 @@
       "sha256": "0ef3fd6b85ade71ccb594334f5f3e4a41000f2d9167c380b95b9248d73297d2c"
     },
     {
-      "bytes": 21796,
+      "bytes": 22705,
       "path": "site/home.css",
-      "sha256": "7400bac59e630209c097ed4a3132d855eef419b81ba5e6dc65b0f88ca9b26e79"
+      "sha256": "d32897a076a6611943da772a0ac34f7a5e6587385e6efa2663cb5db871967817"
     },
     {
-      "bytes": 7808,
+      "bytes": 8807,
       "path": "site/home.js",
-      "sha256": "81874a709cd01c325ce1a5489b6efd77999095ae4abdfbc2cbaa2cfd4884cd68"
+      "sha256": "17fb4887dac76cdddff2fb1c4c184204b5efc2c0deee488728af1f1365dc262b"
     },
     {
-      "bytes": 23354,
+      "bytes": 23613,
       "path": "site/index.html",
-      "sha256": "d1eef790a08a609d293c674249e94f2010d9ca26547a91a65154e6fa98cbda7b"
+      "sha256": "112677d37bd3dd8e398491f852d39c2d0bda67c6968ad56f624c852a530893d8"
     },
     {
       "bytes": 2892,
@@ -1868,14 +1868,14 @@
       "sha256": "fa47c0eb9ead93e7c76997aa291f4107403b4eab5e755b035911b7de84f933c1"
     },
     {
-      "bytes": 19693,
+      "bytes": 19685,
       "path": "site/stardate/stardate.mjs",
-      "sha256": "d38d1ed77a2f0092f11f5a739d9be366e6bdd7794f392b31c438ff14d46b26c7"
+      "sha256": "50ba6c7d9e1b438e9a4564caa39cb7264d2dba8632b91381b33eb6336f30d053"
     },
     {
-      "bytes": 48300,
+      "bytes": 48636,
       "path": "site/styles.css",
-      "sha256": "04e466033c64bb886b2a2d6da9bee71edd535491da646a9310bc8000f24bb37a"
+      "sha256": "7ed36781d81a971c8e33a7035e5dcde24ca218218d2d9d9b9fad5634e4a692e1"
     },
     {
       "bytes": 1081,
@@ -1943,9 +1943,9 @@
       "sha256": "3b1bef292bc037c13b9291bf034421a791d7e011a244e184da68a9c565bd2d09"
     },
     {
-      "bytes": 20507,
+      "bytes": 22306,
       "path": "site/verify-home.mjs",
-      "sha256": "f3c59e045ac04deb54c6cac935a82e016ab5d263f5710b60249a4648030bd0c3"
+      "sha256": "aabbfa2dfe81dc1a92c071b30fe085d47257cfd726699e92ea2e003964b697ee"
     },
     {
       "bytes": 2302,
@@ -2038,7 +2038,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "4c41aa61f3a81cb3a18412722b80d341daa53922c9fbd3095c1dc758907018d8",
+  "inventory_sha256": "1e3ca12794a43edcdf2310369a788a1f7852b2d30f5d0cac513abbbf2b7f52dd",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88282252
+  "total_bytes": 88286441
 }
