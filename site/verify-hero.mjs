@@ -47,12 +47,26 @@ export async function verifyHero({ browser, origin, results }) {
   assert(await page.locator('.ship-video').evaluate((v) => v.paused), 'The shared motion switch pauses the turn');
   await desktop.close();
 
-  const phone = await browser.newContext({ viewport: { width: 390, height: 844 } });
-  const small = await phone.newPage();
-  await small.goto(url);
-  await ready(small);
-  assert((await small.locator('.ship-video').evaluate((v) => v.currentSrc)).endsWith('/assets/borg-ship-turn-720.webm'));
-  await phone.close();
+  // The turn is always the size of the poster the browser chose for the screen's pixels.
+  for (const [label, viewport, deviceScaleFactor, expected] of [
+    ['1x laptop', { width: 1440, height: 900 }, 1, 960],
+    ['2x laptop', { width: 1440, height: 900 }, 2, 1200],
+    ['1x phone', { width: 390, height: 844 }, 1, 720],
+    ['3x phone', { width: 390, height: 844 }, 3, 1200],
+  ]) {
+    const context = await browser.newContext({ viewport, deviceScaleFactor });
+    const view = await context.newPage();
+    await view.goto(url);
+    await ready(view);
+    const pair = await view.evaluate(() => ({
+      poster: document.querySelector('.ship-poster').currentSrc,
+      video: document.querySelector('.ship-video').currentSrc,
+    }));
+    const posterSize = pair.poster.includes('poster-720') ? 720 : pair.poster.includes('poster-960') ? 960 : 1200;
+    assert.equal(posterSize, expected, `${label}: poster ${pair.poster}`);
+    assert(pair.video.endsWith(`/assets/borg-ship-turn-${expected}.webm`), `${label}: video ${pair.video}`);
+    await context.close();
+  }
 
   const calm = await browser.newContext({ reducedMotion: 'reduce' });
   const still = await calm.newPage();
@@ -65,6 +79,6 @@ export async function verifyHero({ browser, origin, results }) {
   await calm.close();
 
   results.checks.push(
-    `Hero turn: the Blender video takes over from an identical poster (mean difference ${difference.toFixed(2)}/255), plays, pauses with the shared motion switch, uses the 720px file on phones and is never downloaded with reduced motion`,
+    `Hero turn: the Blender video takes over from an identical poster (mean difference ${difference.toFixed(2)}/255), plays, pauses with the shared motion switch, matches the poster size the browser chose (720/960/1200 for 1x and 3x screens) and is never downloaded with reduced motion`,
   );
 }

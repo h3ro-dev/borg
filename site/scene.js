@@ -1,6 +1,7 @@
 /* Decorative hero. The Blender poster shows first. Where the browser draws transparent
    video, a Blender-rendered turn of the same ship takes over: its first frame is the
-   poster, so nothing jumps and the ship keeps its rendered quality while it moves.
+   poster, and it is the same size as the poster the browser chose for this screen, so
+   nothing jumps or softens and the ship keeps its rendered quality while it moves.
    Everywhere else, and for reduced motion or data saving, the poster simply stays. */
 const hero = document.querySelector(".hero");
 const stage = document.querySelector(".ship-stage");
@@ -42,7 +43,12 @@ function motionState() {
 function fallback() {
   failed = true;
   ready = false;
-  video?.remove();
+  if (video) {
+    // Stop the download as well as removing the element.
+    video.removeAttribute("src");
+    video.load();
+    video.remove();
+  }
   video = null;
   stage.dataset.state = "fallback";
   motionState();
@@ -74,8 +80,11 @@ function initialize() {
   video.disablePictureInPicture = true;
   video.setAttribute("aria-hidden", "true");
   video.setAttribute("tabindex", "-1");
-  const narrow = stage.getBoundingClientRect().width < 560;
-  video.src = narrow ? "./assets/borg-ship-turn-720.webm" : "./assets/borg-ship-turn-960.webm";
+  // The browser picked the poster size for this screen's pixels (srcset); play the turn
+  // rendered at that same size, so the hand-off keeps the poster's sharpness.
+  const poster = stage.querySelector(".ship-poster")?.currentSrc || "";
+  const size = poster.includes("poster-720") ? 720 : poster.includes("poster-960") ? 960 : 1200;
+  video.src = `./assets/borg-ship-turn-${size}.webm`;
   video.addEventListener("error", fallback, { once: true });
   video.addEventListener(
     "loadeddata",
@@ -87,8 +96,8 @@ function initialize() {
       }
       ready = true;
       stage.dataset.state = "ready";
-      // Start turning once the identical first frame has fully faded in over the poster.
-      setTimeout(motionState, 650);
+      // The first frame is the poster, so it is shown at once; start turning a moment later.
+      setTimeout(motionState, 250);
     },
     { once: true },
   );

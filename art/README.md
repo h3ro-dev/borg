@@ -37,8 +37,9 @@ behavior follow the page.
 
 The web export omits the tiny render-only bevel modifier. Blender's native
 `EXT_meshopt_compression` reduces this version to 1,709,776 bytes without external
-textures. The poster is the turntable's middle frame: a 960-square transparent
-Cycles render, 48 samples, with denoising and a subtle compositor glow.
+textures. The poster is the turntable's middle frame: a 1,200-square transparent
+Cycles render, 48 samples, with denoising and a subtle compositor glow, with 960 and
+720 copies for screens that need fewer pixels.
 The mechanical seed is fixed; exporter changes may change exact bytes. Published
 artifacts remain pinned by byte length and SHA256 rather than assuming bitwise
 reproducibility across Blender versions.
