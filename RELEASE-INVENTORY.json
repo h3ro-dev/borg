@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 412,
+  "file_count": 415,
   "files": [
     {
       "bytes": 2018,
@@ -108,14 +108,14 @@
       "sha256": "0bba5b3678354a9540dc7626adf62fba17c5e52650e7cb62e0136542addb27a4"
     },
     {
-      "bytes": 2849,
+      "bytes": 2911,
       "path": "art/README.md",
-      "sha256": "f7edca7e32a59c0b036d4f3c6e78cce3d921f944766a5ef025a9645bca7ec201"
+      "sha256": "116b48cd3559f4fe7301da70b7ce719af0d1ef3ee21161f8fdafbfd5be8348b2"
     },
     {
-      "bytes": 3416,
+      "bytes": 4218,
       "path": "art/TURNTABLE.md",
-      "sha256": "80dd045c5cf285135902be6b05fcf6853453c55e401fe77471dec5df9bf54b23"
+      "sha256": "a0a16e9d2d656f9584d044453d170a8a4c552ac29b7c5cec3647892f16c948ea"
     },
     {
       "bytes": 21521,
@@ -1113,9 +1113,9 @@
       "sha256": "02860640403068e6184562161f8e452cbce31746371697b461be16a371edd281"
     },
     {
-      "bytes": 28826,
+      "bytes": 29194,
       "path": "installer/release_guard.py",
-      "sha256": "0f696a73e1aa037a45d6e8815151e6322506582a17abf239fabbb7360ee8e6c4"
+      "sha256": "717dc14e7d1d3c239ec0165e71409696b13be0624c2dd804a061df75dac3997e"
     },
     {
       "bytes": 352,
@@ -1638,9 +1638,24 @@
       "sha256": "271a72eb15dc2666f2474da12031cc578eb1711c306bda310aef7399f16b3745"
     },
     {
+      "bytes": 92492,
+      "path": "site/assets/borg-ship-poster-720.webp",
+      "sha256": "c2b41fd5c0eaa9d93b1fb3909e3cbdf8d91add8bd30183681c6892c4ca3eb890"
+    },
+    {
       "bytes": 137628,
-      "path": "site/assets/borg-ship-poster.webp",
+      "path": "site/assets/borg-ship-poster-960.webp",
       "sha256": "c833f8af4807d8ad5e8016f999beea01f7107d60c4e28678d8c29233332775d7"
+    },
+    {
+      "bytes": 175790,
+      "path": "site/assets/borg-ship-poster.webp",
+      "sha256": "9ccf369a7cd85a704fbbf6392110d14bea35393556ff08ba425b145d5e5c6532"
+    },
+    {
+      "bytes": 5380973,
+      "path": "site/assets/borg-ship-turn-1200.webm",
+      "sha256": "23294570a74c4e63e2be03ecc04f9175e4c98e04c378816385c515a4abf2a40c"
     },
     {
       "bytes": 1935893,
@@ -1763,9 +1778,9 @@
       "sha256": "31ab6524b09775ab3765c3ed6240397941f5c41c684910dca3355089a261c767"
     },
     {
-      "bytes": 90907,
+      "bytes": 91107,
       "path": "site/collective.html",
-      "sha256": "884bae295767a046e9dca6f14aae5296514cabbb6f1e9d35683444e2480b683b"
+      "sha256": "ae1f5f25f7117efaddf32f5f256f84025a66096ab2bd96e898eea287c59b07af"
     },
     {
       "bytes": 9836,
@@ -1833,9 +1848,9 @@
       "sha256": "26fdd44ccfcf221d07c773e89326cf06422213b6b4c3d120781f588bfb50f609"
     },
     {
-      "bytes": 5563,
+      "bytes": 6019,
       "path": "site/scene.js",
-      "sha256": "a7edb4f0f3fd53f7507cddaa1b9dacab4db2845af42716cc3bd7bcde49b661a9"
+      "sha256": "613744a213f11199eb63158b4ac4160f7a7a72f1fcd1a570a2d620efca852282"
     },
     {
       "bytes": 4024,
@@ -1893,9 +1908,9 @@
       "sha256": "50ba6c7d9e1b438e9a4564caa39cb7264d2dba8632b91381b33eb6336f30d053"
     },
     {
-      "bytes": 48916,
+      "bytes": 48953,
       "path": "site/styles.css",
-      "sha256": "d728b73efb2f278b346f56b58ac58cdd359ebe4ed929b6c3a1b0d2388246b622"
+      "sha256": "9987f9d54ef4e309a863006dcf45d65498fafd06ad36de67b32560d924ec4274"
     },
     {
       "bytes": 1081,
@@ -1963,9 +1978,9 @@
       "sha256": "3b1bef292bc037c13b9291bf034421a791d7e011a244e184da68a9c565bd2d09"
     },
     {
-      "bytes": 3579,
+      "bytes": 4383,
       "path": "site/verify-hero.mjs",
-      "sha256": "0f22b90eb6fab75bf4284ae3075993a7b73d5c484f10d44bc7bb3e4d8066b684"
+      "sha256": "9ed64b855d70685e0e856425b9a33783e26be2256404b47ef185efcdacdb9420"
     },
     {
       "bytes": 22306,
@@ -2063,7 +2078,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "e91d6d0be717f494943b003891d89cdc5f252ba213de50e2de0d8682691989d2",
+  "inventory_sha256": "e1d56975cb1664f33ac5df6b24785b2a07ac008183fa16fb515801fe99d1664a",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 93294696
+  "total_bytes": 98946680
 }
