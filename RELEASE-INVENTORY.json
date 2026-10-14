@@ -1793,19 +1793,19 @@
       "sha256": "0ef3fd6b85ade71ccb594334f5f3e4a41000f2d9167c380b95b9248d73297d2c"
     },
     {
-      "bytes": 22705,
+      "bytes": 22936,
       "path": "site/home.css",
-      "sha256": "d32897a076a6611943da772a0ac34f7a5e6587385e6efa2663cb5db871967817"
+      "sha256": "e3bdee261879d2005a85793cc9c5cbc3415a1edc6e829a2e1ca780780fdf9c74"
     },
     {
-      "bytes": 8807,
+      "bytes": 8962,
       "path": "site/home.js",
-      "sha256": "17fb4887dac76cdddff2fb1c4c184204b5efc2c0deee488728af1f1365dc262b"
+      "sha256": "dd3251380aee06b53ed5f2d5ca174d3e7109eeadec9bbb5beb071accadaa19d4"
     },
     {
-      "bytes": 23613,
+      "bytes": 23913,
       "path": "site/index.html",
-      "sha256": "112677d37bd3dd8e398491f852d39c2d0bda67c6968ad56f624c852a530893d8"
+      "sha256": "07415ce25e6a8fc16374de34ce5c17dc650b5ca4bfd0373b35e8dc49b1a52e25"
     },
     {
       "bytes": 2892,
@@ -1873,9 +1873,9 @@
       "sha256": "50ba6c7d9e1b438e9a4564caa39cb7264d2dba8632b91381b33eb6336f30d053"
     },
     {
-      "bytes": 48636,
+      "bytes": 48641,
       "path": "site/styles.css",
-      "sha256": "7ed36781d81a971c8e33a7035e5dcde24ca218218d2d9d9b9fad5634e4a692e1"
+      "sha256": "c2813e601508b71d105411619a09430fad80a45c792f51a2e56ee4d4d798e250"
     },
     {
       "bytes": 1081,
@@ -1943,9 +1943,9 @@
       "sha256": "3b1bef292bc037c13b9291bf034421a791d7e011a244e184da68a9c565bd2d09"
     },
     {
-      "bytes": 22306,
+      "bytes": 22549,
       "path": "site/verify-home.mjs",
-      "sha256": "aabbfa2dfe81dc1a92c071b30fe085d47257cfd726699e92ea2e003964b697ee"
+      "sha256": "a42d40099c214b384d13928b7a5dc172727bd35af8aedf92020f071d9effa309"
     },
     {
       "bytes": 2302,
@@ -2038,7 +2038,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "1e3ca12794a43edcdf2310369a788a1f7852b2d30f5d0cac513abbbf2b7f52dd",
+  "inventory_sha256": "681dad38099bf170214f7ef35afa7399cd57d60892da95421a2fd39d7bbaaf78",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88286441
+  "total_bytes": 88287375
 }
