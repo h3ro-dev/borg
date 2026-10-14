@@ -1066,7 +1066,8 @@ pre:focus-visible,
   position: relative;
 }
 .ship-stage .ship-poster,
-.ship-canvas {
+.ship-canvas,
+.ship-video {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -1080,12 +1081,21 @@ pre:focus-visible,
 }
 .ship-stage[data-state="ready"] .ship-poster {
   opacity: 0;
+  /* Hide the poster only after the identical first video frame has faded in over it. */
+  transition: opacity 0.2s ease 0.6s;
 }
 .ship-canvas {
   opacity: 0;
   transition: opacity 0.6s ease;
 }
 .ship-stage[data-state="ready"] .ship-canvas {
+  opacity: 1;
+}
+.ship-video {
+  opacity: 0;
+  transition: opacity 0.6s ease;
+}
+.ship-stage[data-state="ready"] .ship-video {
   opacity: 1;
 }
 .hero-art figcaption {
@@ -1791,7 +1801,8 @@ pre:focus-visible,
     animation: none !important;
   }
   .ship-stage .ship-poster,
-  .ship-canvas {
+  .ship-canvas,
+  .ship-video {
     transition: none;
   }
 }
