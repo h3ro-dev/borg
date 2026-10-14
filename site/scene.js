@@ -20,6 +20,7 @@ let mapVisible = false;
 let pageLoaded = document.readyState === "complete";
 let video = null;
 let ready = false;
+let canPlayThrough = false;
 let failed = false;
 
 function motionState() {
@@ -31,12 +32,11 @@ function motionState() {
   status.textContent = paused
     ? (motionPreference.matches ? "Static view · reduced motion" : "Motion paused")
     : (failed ? "Static ship · stars in motion" : "Your collective. In orbit.");
-  for (const control of motionButtons) {
-    control.textContent = paused ? "Play motion" : "Pause motion";
-    control.setAttribute("aria-pressed", String(!paused));
-  }
+  // The visible label says what the button will do, and it is also the button's name.
+  for (const control of motionButtons) control.textContent = paused ? "Play motion" : "Pause motion";
   if (!video || !ready) return;
-  if (running && visible) video.play().catch(() => {});
+  // Hold on the first frame (the poster) until the whole loop can play without stalling.
+  if (running && visible && canPlayThrough) video.play().catch(() => {});
   else video.pause();
 }
 
@@ -86,6 +86,7 @@ function initialize() {
   const size = poster.includes("poster-720") ? 720 : poster.includes("poster-960") ? 960 : 1200;
   video.src = `./assets/borg-ship-turn-${size}.webm`;
   video.addEventListener("error", fallback, { once: true });
+  video.addEventListener("canplaythrough", () => { canPlayThrough = true; motionState(); }, { once: true });
   video.addEventListener(
     "loadeddata",
     () => {
