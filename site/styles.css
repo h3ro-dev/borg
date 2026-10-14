@@ -2653,8 +2653,8 @@ pre:focus-visible,
   }
 }
 
-/* Narrow phones: the menu gets its own row under the logo instead of colliding with it. */
-@media (max-width: 480px) {
+/* Phones and small tablets: the menu gets its own row under the logo instead of crowding it. */
+@media (max-width: 800px) {
   .header {
     height: auto;
     flex-wrap: wrap;

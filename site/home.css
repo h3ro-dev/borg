@@ -24,6 +24,11 @@
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+/* A pop-up is moved back on screen when it opens; clip keeps the page from widening meanwhile. */
+main { overflow-x: clip; }
+.nojs-only { display: none; }
+.no-js .nojs-only { display: block; }
+.no-js .owner-row { display: none; }
 .no-js .tabs, .no-js .motion, .no-js .result, .no-js .tip-more, .no-js .copy { display: none; }
 .no-js .tip { text-decoration: none; cursor: auto; }
 .no-js .panel { border-top: 1px solid var(--line); border-radius: 12px; margin-top: 16px; }

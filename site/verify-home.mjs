@@ -234,7 +234,7 @@ export async function verifyHome({ browser, origin, evidence, results }) {
   const narrow = await browser.newContext({ viewport: { width: 390, height: 760 }, hasTouch: true, isMobile: true });
   const thin = await narrow.newPage();
   watch(thin);
-  for (const width of [320, 390, 460]) {
+  for (const width of [320, 360, 375, 390, 414, 460, 480, 640]) {
     await thin.setViewportSize({ width, height: 760 });
     await open(thin, home);
     const tops = await thin.locator('[role="tab"]').evaluateAll((tabs) => tabs.map((t) => Math.round(t.getBoundingClientRect().top)));
@@ -242,8 +242,10 @@ export async function verifyHome({ browser, origin, evidence, results }) {
     for (const id of ['tip-oss', 'tip-codex', 'tip-claude', 'tip-term']) {
       await thin.locator(`[aria-controls="${id}"]`).tap();
       const box = await thin.locator('#' + id).evaluate((el) => {
+        // clientWidth is the real screen width; innerWidth grows on phones when content overflows.
         const r = el.getBoundingClientRect();
-        return { left: r.left, right: r.right, viewport: innerWidth, content: document.documentElement.scrollWidth };
+        const screen = document.documentElement.clientWidth;
+        return { left: r.left, right: r.right, viewport: screen, content: document.documentElement.scrollWidth };
       });
       assert(box.left >= 0 && box.right <= box.viewport && box.content <= box.viewport, `${id} leaves the screen at ${width}px: ${JSON.stringify(box)}`);
       await thin.touchscreen.tap(4, 400);
@@ -253,7 +255,7 @@ export async function verifyHome({ browser, origin, evidence, results }) {
     assert(panel > 160, `The technical-name panel is only ${Math.round(panel)}px wide at ${width}px`);
   }
   await narrow.close();
-  results.checks.push('Front page: install tabs stay on one row, explanation pop-ups stay on screen and technical-name panels use the text column at 320, 390 and 460px');
+  results.checks.push('Front page: install tabs stay on one row, explanation pop-ups stay on the real screen without widening the page, and technical-name panels use the text column at 320, 360, 375, 390, 414, 460, 480 and 640px');
 
   // Links to sections that moved to collective.html keep working.
   for (const [hash, expected] of [['#configure', '/borg/collective.html#configure'], ['#system', '/borg/collective.html#system'], ['#part-memory', '/borg/collective.html#part-memory'], ['#setup', '/borg/#start'], ['#how', '/borg/#how']]) {
