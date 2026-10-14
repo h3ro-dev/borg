@@ -1,6 +1,6 @@
 # BORG system and hardware guide
 
-Use the [per-machine calculator](https://borg.utlyze.com/#configure) for a workload-based
+Use the [per-machine calculator](https://borg.utlyze.com/collective.html#configure) for a workload-based
 plan, or read its [sizing assumptions](SIZING.md). It exports the [installer blueprint](BLUEPRINT.md)
 for your selected roles, orchestration components and integration setup.
 

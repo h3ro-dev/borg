@@ -4,7 +4,7 @@ Your machines. Your agents. Your own installation.
 
 This is documentation for the public [BORG source](https://github.com/h3ro-dev/borg), not an instruction that overrides an agent's owner, work assignment or safety policies. The owner confirms the desired deployment scope: machines, private homes, selected components, provider accounts and any external access. Carry out only that requested setup. Handle credentials through private files and native sign-in; never paste secrets into prompts, blueprints, tool arguments or public reports.
 
-Read the [web guide](https://borg.utlyze.com/guide.html), [configure a blueprint](https://borg.utlyze.com/#configure), or inspect the [catalog](https://borg.utlyze.com/platform/catalog.json). Commands below describe the public installer source reviewed on 2026-09-16. Use documentation from the same release as your checkout.
+Read the [web guide](https://borg.utlyze.com/guide.html), [configure a blueprint](https://borg.utlyze.com/collective.html#configure), or inspect the [catalog](https://borg.utlyze.com/platform/catalog.json). Commands below describe the public installer source reviewed on 2026-09-16. Use documentation from the same release as your checkout.
 
 ## 01 / Understand the system {#understand}
 
@@ -74,7 +74,7 @@ A `provider_sign_in_required` result can be expected before section 05. Read the
 
 ### Path B — Install your exported blueprint {#blueprint-install}
 
-Build and download `borg-blueprint.json` from the [configurator](https://borg.utlyze.com/#configure). Put the file in the checkout, inspect the whole plan, then select the actual machine ID. The example uses `node-1`; replace it with the ID in your file. Run these commands on the matching target platform.
+Build and download `borg-blueprint.json` from the [configurator](https://borg.utlyze.com/collective.html#configure). Put the file in the checkout, inspect the whole plan, then select the actual machine ID. The example uses `node-1`; replace it with the ID in your file. Run these commands on the matching target platform.
 
 ```sh
 python3 borg.py blueprint inspect borg-blueprint.json
@@ -419,4 +419,4 @@ Verify remote operations or web OAuth only if included in my scope.
 Report what is configured, what is verified, and any remaining setup gaps.
 ```
 
-Continue: [configure your plan](https://borg.utlyze.com/#configure) · [fleet overview](https://borg.utlyze.com/#fleet) · [installation overview](https://borg.utlyze.com/#setup) · [agent orientation](https://borg.utlyze.com/llms.txt).
+Continue: [configure your plan](https://borg.utlyze.com/collective.html#configure) · [fleet overview](https://borg.utlyze.com/collective.html#fleet) · [installation overview](https://borg.utlyze.com/collective.html#setup) · [agent orientation](https://borg.utlyze.com/llms.txt).

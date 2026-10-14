@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Publish the Stardate log: render every Markdown entry to a static page, rebuild the
-// log index and refresh the home page's latest-entries block. Zero dependencies.
+// log index and refresh the latest-entries block on collective.html. Zero dependencies.
 //   node site/stardate/publish.mjs          write the pages
 //   node site/stardate/publish.mjs --check  exit 1 if any published page is out of date
 import { readFile, writeFile, readdir, unlink } from 'node:fs/promises';

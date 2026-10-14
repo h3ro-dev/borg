@@ -23,6 +23,7 @@ jobs:
       - name: Verify machine planning contract
         run: |
           node --check site/app.js
+          node --check site/home.js
           node --check site/guide.js
           node --check site/scene.js
           node --check site/fleet-explorer.mjs
@@ -33,7 +34,8 @@ jobs:
       - name: Stage public website files
         run: |
           mkdir -p _site/assets _site/platform
-          cp site/index.html site/styles.css site/app.js site/scene.js _site/
+          cp site/index.html site/home.css site/home.js _site/
+          cp site/collective.html site/styles.css site/app.js site/scene.js _site/
           cp site/configure.css site/configure.mjs _site/
           cp site/fleet.css site/guide.html site/guide.css site/guide.js _site/
           cp site/fleet-explorer.css site/fleet-explorer.mjs site/fleet-profiles.mjs _site/

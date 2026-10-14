@@ -10,7 +10,7 @@ const origin = 'https://borg.utlyze.com/';
 // The Stardate log is published from site/assets/stardate/ (see site/stardate/README.md).
 const stardate = (await readdir(path.join(site, 'assets', 'stardate')))
   .filter(name => name.endsWith('.html')).sort().map(name => `assets/stardate/${name}`);
-const pages = ['index.html', 'guide.html', ...stardate];
+const pages = ['index.html', 'collective.html', 'guide.html', ...stardate];
 const ids = new Map();
 const localFile = pathname => path.join(pathname.startsWith('/platform/') ? repo : site, pathname);
 for (const page of pages) {

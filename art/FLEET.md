@@ -9,6 +9,11 @@ Each host's memory remains private to that host unless the owner explicitly
 configures otherwise. Provider integrations require the owner's setup and
 credentials. LoRAs remain inactive research and are not depicted as active ships.
 
+The labels use plain words a first-time visitor knows: BORG, shared memory, on
+your Mac; Codex, Claude and Grok, each an AI agent; and tools for files, apps and
+the browser. The front page shows this picture first, so its labels explain the
+system without a glossary.
+
 ## Rebuild
 
 Use Blender 5.2.1 LTS and libwebp's `cwebp`, from a repository checkout:
@@ -57,17 +62,18 @@ Explicit Play opts into motion. Stars work independently of WebGL availability.
 
 - Foreground: `site/assets/borg-fleet-foreground.webp`
 - Dimensions: 2200 × 1375 with alpha
-- Length: 244,494 bytes
-- SHA256: `c39ec8039abe79f65dcd8e9fe28f9d4ea31608562e2218b7ca99819d77760e40`
+- Length: 240,024 bytes
+- SHA256: `d270b831cd98f2e0d58298c82a8f189a86a0d514230411c2b97fe9df99df892c`
 
 ## Published still
 
 - File: `site/assets/borg-fleet.webp`
 - Dimensions: 2200 × 1375 pixels
-- Length: 234,470 bytes
-- SHA256: `f7d0fd992b3fa0eb8f5d7e30cc89d2644f38ae5f7e7a68fb1517686641351cca`
+- Length: 229,914 bytes
+- SHA256: `b795199e5e13a6bfd6b7ff630833bc52969321bf056286b47865eedadec741f7`
 - Authoring: Blender 5.2.1 LTS, build `9e2066aef7ef`, Cycles CPU, four threads,
-  32 samples with denoising; final render time 2 minutes 1.925 seconds.
+  32 samples with denoising; final render time 37.56 seconds (plain-label
+  re-render, 14 October 2026).
 - Scene: five vessels, 88 objects, 45 mesh objects, 727,834 mesh polygons counting
   instances. The reused ship contains 12,121 cuboid details before instancing.
 

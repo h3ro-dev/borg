@@ -4,7 +4,7 @@
 you install and control.
 
 [Explore BORG Collective](https://borg.utlyze.com/) ·
-[Size and configure your machines](https://borg.utlyze.com/#configure) ·
+[Size and configure your machines](https://borg.utlyze.com/collective.html#configure) ·
 [Install guide](https://borg.utlyze.com/guide.html) ·
 [Agent entry point](https://borg.utlyze.com/llms.txt) ·
 [Set up your collective](docs/SETUP.md) ·
@@ -72,7 +72,7 @@ through your own Cloudflare Access application and tunnel.
 
 ## Quickstart
 
-Use the [machine planner](https://borg.utlyze.com/#configure) to choose roles,
+Use the [machine planner](https://borg.utlyze.com/collective.html#configure) to choose roles,
 orchestrators, integrations and workload for each machine. Download its blueprint,
 then follow the [blueprint guide](docs/BLUEPRINT.md). The [component catalog](docs/COMPONENTS.md)
 distinguishes included services, provider setup, external integrations and inactive

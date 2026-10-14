@@ -10,7 +10,7 @@ Apple Silicon macOS native full/tools installation is verified. Linux and Intel 
 
 - [Installation and setup guide](https://borg.utlyze.com/guide.html): static numbered instructions, platform limits, full/blueprint paths, provider setup, remote enrollment, optional web gateway, verification, troubleshooting and maintenance.
 - [Complete agent runbook](https://borg.utlyze.com/agent-guide.md): self-contained setup and acceptance instructions, exact shell examples and source references.
-- [Blueprint configurator](https://borg.utlyze.com/#configure): plan your own machines and export a credential-free borg-blueprint/v1 file; estimates are not measured capacity.
+- [Blueprint configurator](https://borg.utlyze.com/collective.html#configure): plan your own machines and export a credential-free borg-blueprint/v1 file; estimates are not measured capacity.
 - [Component catalog](https://borg.utlyze.com/platform/catalog.json): versioned component choices, dependencies, setup steps and limitations.
 - [Blueprint format and installation](https://github.com/h3ro-dev/borg/blob/master/docs/BLUEPRINT.md): validation, profiles, native evidence and preservation rules.
 - [Public repository](https://github.com/h3ro-dev/borg): authoritative software source; use documentation matching your checkout release.

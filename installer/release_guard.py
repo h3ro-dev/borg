@@ -123,8 +123,9 @@ PUBLIC_BINARY_ASSETS = {
     "site/assets/chakra-petch-bold.ttf": (78384, "65fbf76d95651697275e19db4d717c0e95a789ddd3476478b05292104db278a0"),
     "site/assets/borg-ship.glb": (1709776, "05fd62b658ba07593d9754c530f7229be55f9646acdac706bee21e13969aa2c7"),
     "site/assets/borg-ship-poster.webp": (175862, "1f148822cef00792c725464c091f1ad2c4a0fe831f1e911d4f847252cd30dc70"),
-    "site/assets/borg-fleet.webp": (234470, "f7d0fd992b3fa0eb8f5d7e30cc89d2644f38ae5f7e7a68fb1517686641351cca"),
-    "site/assets/borg-fleet-foreground.webp": (244494, "c39ec8039abe79f65dcd8e9fe28f9d4ea31608562e2218b7ca99819d77760e40"),
+    "site/assets/borg-fleet.webp": (229914, "b795199e5e13a6bfd6b7ff630833bc52969321bf056286b47865eedadec741f7"),
+    "site/assets/borg-fleet-foreground.webp": (240024, "d270b831cd98f2e0d58298c82a8f189a86a0d514230411c2b97fe9df99df892c"),
+    "site/assets/borg-layers.webp": (155780, "271a72eb15dc2666f2474da12031cc578eb1711c306bda310aef7399f16b3745"),
     "site/assets/borg-drone.webp": (571410, "132d9694ade32027439c2e9e9e9b2fbdb3475f0b8d750cf00656a8653beab278"),
     "site/assets/borg-drone-codex.webp": (578482, "c5d37a7935b099e43ffc48c6ed389f0f2ef2b9474946027e1050269844b0d654"),
 }

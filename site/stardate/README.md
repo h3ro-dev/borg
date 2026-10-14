@@ -7,8 +7,8 @@ parts: **What we did**, **What we learned**, **Open questions** and **Lab book l
 - Published pages: `site/assets/stardate/` (generated; do not edit by hand). They live under
   `assets/` because the Pages workflow publishes `site/assets/` as a whole folder, so the log
   goes live without any workflow change. Public address: `https://borg.utlyze.com/assets/stardate/`.
-- The home page shows the three newest entries between the `stardate:latest` markers in
-  `site/index.html`. The publisher refreshes that block too.
+- The "How we run ours" page shows the three newest entries between the `stardate:latest` markers in
+  `site/collective.html`. The publisher refreshes that block too.
 
 ## Stardates
 

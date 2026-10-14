@@ -1,4 +1,4 @@
-// Ship's map acceptance on the home page; invoked by verify.mjs with its /borg/ test server.
+// Ship's map acceptance on the collective page (collective.html); invoked by verify.mjs with its /borg/ test server.
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -8,7 +8,7 @@ const PARTS = ['memory', 'jev', 'recall', 'incoming', 'dreaming', 'cache', 'pack
 export async function verifyMap({ page, browser, origin, evidence, results, axeScript = process.env.AXE_SCRIPT }) {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await page.setViewportSize({ width: 1440, height: 1000 });
-  await page.goto(origin + '/borg/#system');
+  await page.goto(origin + '/borg/collective.html#system');
   await page.evaluate(() => localStorage.removeItem('borg-map-assimilated-v1'));
   await page.reload();
   const section = page.locator('#system');
@@ -25,7 +25,7 @@ export async function verifyMap({ page, browser, origin, evidence, results, axeS
   assert(await page.locator('.map-art .cube[data-part="memory"]').evaluate(el => el.classList.contains('is-assimilated')));
   await page.waitForFunction(() => /Memory core|memory core/.test(document.querySelector('.map-announce').textContent));
   assert.equal(new URL(page.url()).hash, '#system', 'Cube click opens the card in place');
-  results.checks.push('Map: a cube opens its card (what, why, readout), marks it assimilated, updates the ring and announces politely');
+  results.checks.push('Map: a cube opens its card (what, why, readout), marks it explored, updates the ring and announces politely');
 
   await page.locator('.map-node[data-part="memory"]').focus();
   await page.keyboard.press('Shift+Tab');
@@ -60,7 +60,7 @@ export async function verifyMap({ page, browser, origin, evidence, results, axeS
   await page.locator('#map-reset').click();
   assert.match(await page.locator('#map-count').textContent(), /^0 of 11$/);
   assert.equal(await page.locator('.part-card .part-state').count(), 0);
-  results.checks.push('Assimilation: all 11 parts complete the ring, progress survives reload in local storage only, Reset clears it');
+  results.checks.push('Progress: all 11 parts complete the ring, progress survives reload in local storage only, Reset clears it');
 
   await page.locator('#system').scrollIntoViewIfNeeded();
   await page.waitForFunction(() => document.querySelector('#system').dataset.motion === 'running');
@@ -83,7 +83,7 @@ export async function verifyMap({ page, browser, origin, evidence, results, axeS
   const audits = [];
   for (const width of [320, 768, 1280, 1920]) {
     await page.setViewportSize({ width, height: width < 768 ? 844 : 1000 });
-    await page.goto(origin + '/borg/');
+    await page.goto(origin + '/borg/collective.html');
     await page.evaluate(() => document.fonts.ready);
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `Home overflow at ${width}`);
     const box = await page.locator('.map-node[data-part="recall"]').boundingBox();
@@ -102,13 +102,13 @@ export async function verifyMap({ page, browser, origin, evidence, results, axeS
   if (audits.length) {
     await writeFile(path.join(evidence, 'home-accessibility-widths.json'), JSON.stringify(audits, null, 2));
     assert(audits.every(audit => audit.violations.length === 0), 'Home accessibility violations; see evidence/home-accessibility-widths.json');
-    results.checks.push('Home page with a card open: axe WCAG 2 A/AA and 2.1 AA zero violations at 320/768/1280/1920');
+    results.checks.push('Collective page with a card open: axe WCAG 2 A/AA and 2.1 AA zero violations at 320/768/1280/1920');
   }
-  results.checks.push('Home fits 320/768/1280/1920 without horizontal overflow; map targets stay at least 24px');
+  results.checks.push('Collective page fits 320/768/1280/1920 without horizontal overflow; map targets stay at least 24px');
 
   const plain = await browser.newContext({ javaScriptEnabled: false, viewport: { width: 390, height: 844 } });
   const nojs = await plain.newPage();
-  await nojs.goto(origin + '/borg/');
+  await nojs.goto(origin + '/borg/collective.html');
   for (const part of PARTS) assert(await nojs.locator(`#part-${part}`).isVisible(), `Card ${part} hidden without JavaScript`);
   assert.equal(await nojs.locator('.flow-steps li:visible').count(), 6);
   assert(await nojs.locator('#map-tour').isHidden());

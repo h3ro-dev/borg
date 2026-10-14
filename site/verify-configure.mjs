@@ -9,7 +9,7 @@ export async function verifyConfigurator({ page, origin, evidence, results }) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const catalog = JSON.parse(await readFile(path.join(root, 'platform/catalog.json')));
   const { validateBlueprint, planBlueprint } = await import('../platform/planner.mjs');
-  await page.goto(origin + '/borg/#configure');
+  await page.goto(origin + '/borg/collective.html#configure');
   await page.locator('#download-blueprint').waitFor();
   while (await page.locator('#choices-component .choice-category:not([open]) > summary').count()) await page.locator('#choices-component .choice-category:not([open]) > summary').first().click();
   const download = async name => {

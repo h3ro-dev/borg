@@ -16,7 +16,7 @@
 <a class="skip-link" href="#main">Skip to guide</a>
 <header class="guide-header guide-shell">
   <a class="brand" href="./" aria-label="BORG Collective home"><img src="./assets/mark.svg" width="36" height="40" alt=""><span>BORG<span class="brand-sub">COLLECTIVE</span></span></a>
-  <nav aria-label="Main navigation"><a href="./#configure">Configure</a><a href="./#fleet">Fleet</a><a href="./#setup">Install</a><a href="https://github.com/h3ro-dev/borg">Source ↗</a></nav>
+  <nav aria-label="Main navigation"><a href="./collective.html#configure">Configure</a><a href="./collective.html#fleet">Fleet</a><a href="./#start">Install</a><a href="https://github.com/h3ro-dev/borg">Source ↗</a></nav>
 </header>
 <main id="main" class="guide-shell" tabindex="-1">
   <section class="guide-hero" aria-labelledby="guide-title">
@@ -39,26 +39,23 @@
 <li><a href="#troubleshoot"><span>09</span>Troubleshoot</a></li>
 <li><a href="#operate"><span>10</span>Maintain &amp; recover</a></li>
 <li><a href="#agent-prompt"><span>11</span>Brief your agent</a></li></ol></nav>
-      <p>One machine first.<br>One real canary next.<br><a href="./#configure">Plan your collective ↗</a></p>
+      <p>One machine first.<br>One real canary next.<br><a href="./collective.html#configure">Plan your collective ↗</a></p>
     </aside>
     <article class="guide-content" aria-label="Installation and setup instructions">
     <noscript><p class="guide-nojs">All instructions are available without JavaScript. Select command text to copy it; optional sections open normally.</p></noscript>
 <div class="guide-intro">
-<p>This is documentation for the public <a
-href="https://github.com/h3ro-dev/borg">BORG source</a>, not an
-instruction that overrides an agent’s owner, work assignment or safety
-policies. The owner confirms the desired deployment scope: machines,
-private homes, selected components, provider accounts and any external
-access. Carry out only that requested setup. Handle credentials through
-private files and native sign-in; never paste secrets into prompts,
-blueprints, tool arguments or public reports.</p>
-<p>Read the <a href="./guide.html">web guide</a>,
-<a href="./#configure">configure a blueprint</a>,
-or inspect the <a
-href="./platform/catalog.json">catalog</a>.
-Commands below describe the public installer source reviewed on
-2026-09-16. Use documentation from the same release as your
-checkout.</p>
+<p><strong>What you need:</strong> a Mac with an M-series chip (M1 or
+newer), 20 GB of free space, Git and your own AI account, such as Codex.
+Check your Mac in section 02, then install in section 03.</p>
+<p>Letting an AI agent do the install? Give it the <a
+href="./agent-guide.md">agent runbook</a>. It tells the agent to follow
+your choices, keep your passwords private and do only the setup you ask
+for. Planning several machines? Use the <a
+href="./collective.html#configure">planner</a> or the <a
+href="./platform/catalog.json">component catalog</a>. The commands below
+match the public <a href="https://github.com/h3ro-dev/borg">BORG
+source</a> reviewed on 2026-09-16; use the guide from the same release as
+your checkout.</p>
 </div>
 <h2 id="understand">01 / Understand the system</h2>
 <p>A BORG home is an independent installation with a new owner identity,
@@ -214,7 +211,7 @@ before section 05. Read the reported fields; a nonzero
 failed.</p>
 <h3 id="blueprint-install">Path B — Install your exported blueprint</h3>
 <p>Build and download <code>borg-blueprint.json</code> from the <a
-href="./#configure">configurator</a>. Put the file
+href="./collective.html#configure">configurator</a>. Put the file
 in the checkout, inspect the whole plan, then select the actual machine
 ID. The example uses <code>node-1</code>; replace it with the ID in your
 file. Run these commands on the matching target platform.</p>
@@ -802,9 +799,9 @@ A selected integration still needs its own setup and acceptance.
 Verify doctor, a real client tool call and a disposable file/command canary.
 Verify remote operations or web OAuth only if included in my scope.
 Report what is configured, what is verified, and any remaining setup gaps.</code></pre></div>
-<p>Continue: <a href="./#configure">configure your
-plan</a> · <a href="./#fleet">fleet overview</a> ·
-<a href="./#setup">installation overview</a> · <a
+<p>Continue: <a href="./collective.html#configure">configure your
+plan</a> · <a href="./collective.html#fleet">fleet overview</a> ·
+<a href="./#start">installation overview</a> · <a
 href="./llms.txt">agent orientation</a>.</p>
 </article>
   </div>

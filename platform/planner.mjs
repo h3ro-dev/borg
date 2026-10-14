@@ -161,7 +161,7 @@ export function planBlueprint(blueprint, catalog) {
   });
   const totals = machines.reduce((sum,{estimate:e}) => ({ram_gb:sum.ram_gb+e.ram_gb,cpu_cores:sum.cpu_cores+e.cpu_cores,free_disk_gb:sum.free_disk_gb+e.free_disk_gb}),{ram_gb:0,cpu_cores:0,free_disk_gb:0});
   return {...checked,machines,totals,warnings:[
-    'Selection records setup intent, not live readiness, authentication or a security permission grant.',
+    'This plan lists what to set up. Nothing is installed, signed in or given permissions until you run it.',
     'Each machine is installed independently. Fleet enrollment, provider sign-in and external services require your own configuration.',
   ]};
 }
