@@ -103,15 +103,20 @@ export async function verifyExplorer({ page, browser, origin, evidence, results 
   results.checks.push('Fleet stars move with hero offscreen; profile advances automatically; shared pause cancels timers and CSS motion; reduced motion is static unless explicitly played');
 
   const fallbackContext = await browser.newContext({ viewport: { width: 1100, height: 900 } });
+  // A browser that plays the hero turn but drops its transparency must keep the poster.
   await fallbackContext.addInitScript(() => {
-    const original = HTMLCanvasElement.prototype.getContext;
-    HTMLCanvasElement.prototype.getContext = function(type, ...args) {
-      return /webgl/.test(type) ? null : original.call(this, type, ...args);
+    const original = CanvasRenderingContext2D.prototype.getImageData;
+    CanvasRenderingContext2D.prototype.getImageData = function(...args) {
+      const image = original.apply(this, args);
+      for (let i = 3; i < image.data.length; i += 4) image.data[i] = 255;
+      return image;
     };
   });
   const fallback = await fallbackContext.newPage();
   await fallback.goto(origin + '/borg/collective.html');
-  await fallback.waitForFunction(() => document.querySelector('.ship-stage').dataset.state === 'fallback');
+  await fallback.waitForFunction(() => document.querySelector('.ship-stage').dataset.state === 'fallback', null, { timeout: 20000 });
+  assert.equal(await fallback.locator('.ship-video').count(), 0);
+  assert.equal(await fallback.locator('.ship-poster').evaluate(el => getComputedStyle(el).opacity), '1');
   assert(await fallback.locator('#motion-toggle').isVisible());
   assert.equal(await fallback.locator('.hero .star-near').evaluate(el => getComputedStyle(el).animationPlayState), 'running');
   await fallback.locator('.fleet-hotspot[data-profile="memory"]').click();
@@ -125,5 +130,5 @@ export async function verifyExplorer({ page, browser, origin, evidence, results 
   assert.equal(new URL(staticPage.url()).pathname, '/borg/guide.html');
   assert.equal(new URL(staticPage.url()).hash, '#understand');
   await staticContext.close();
-  results.checks.push('WebGL failure preserves moving CSS stars and interactive profiles; no-JavaScript ship links open the relevant installation guide');
+  results.checks.push('A browser that drops video transparency keeps the poster, moving CSS stars and interactive profiles; no-JavaScript ship links open the relevant installation guide');
 }

@@ -11,6 +11,7 @@ import { verifyExplorer } from "./verify-explorer.mjs";
 import { verifyMap } from "./verify-map.mjs";
 import { verifyStardate, verifyStardateStatic } from "./verify-stardate.mjs";
 import { verifyHome } from "./verify-home.mjs";
+import { verifyHero } from "./verify-hero.mjs";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const { chromium, webkit } = await import(
   process.env.PLAYWRIGHT_MODULE
@@ -26,6 +27,7 @@ const mime = {
   ".svg": "image/svg+xml",
   ".ttf": "font/ttf",
   ".webp": "image/webp",
+  ".webm": "video/webm",
   ".glb": "model/gltf-binary",
   ".md": "text/markdown; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
@@ -264,6 +266,7 @@ try {
   }
   await verifyConfigurator({ page, origin, evidence, results });
   await verifyExplorer({ page, browser, origin, evidence, results });
+  await verifyHero({ browser, origin, results });
   await verifyMap({ page, browser, origin, evidence, results });
   for (const check of await verifyStardateStatic()) results.checks.push(`Stardate static: ${check}`);
   await verifyStardate({ browser, origin, evidence, results });

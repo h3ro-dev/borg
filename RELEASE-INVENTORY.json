@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 407,
+  "file_count": 415,
   "files": [
     {
       "bytes": 2018,
@@ -108,9 +108,14 @@
       "sha256": "0bba5b3678354a9540dc7626adf62fba17c5e52650e7cb62e0136542addb27a4"
     },
     {
-      "bytes": 2564,
+      "bytes": 2911,
       "path": "art/README.md",
-      "sha256": "72e20d6cac541a199b193cb336a3388b58fcb17fd212ee389e13c005751d4d38"
+      "sha256": "116b48cd3559f4fe7301da70b7ce719af0d1ef3ee21161f8fdafbfd5be8348b2"
+    },
+    {
+      "bytes": 4218,
+      "path": "art/TURNTABLE.md",
+      "sha256": "a0a16e9d2d656f9584d044453d170a8a4c552ac29b7c5cec3647892f16c948ea"
     },
     {
       "bytes": 21521,
@@ -131,6 +136,11 @@
       "bytes": 9462,
       "path": "art/borg_ship.py",
       "sha256": "ae0e4a767c4f2fe6f107dc48bc78defc2c09ce1d3794f6176ba0ca2e13f87914"
+    },
+    {
+      "bytes": 3253,
+      "path": "art/borg_ship_turntable.py",
+      "sha256": "53bc0195ff8dc87d73dbbdcf842d71e62ac5815f973beb7f188421bd5e7cb402"
     },
     {
       "bytes": 179,
@@ -1103,9 +1113,9 @@
       "sha256": "02860640403068e6184562161f8e452cbce31746371697b461be16a371edd281"
     },
     {
-      "bytes": 28582,
+      "bytes": 29194,
       "path": "installer/release_guard.py",
-      "sha256": "8f91cfac08bdd5866821c5143cc73d443017c8f00220c2508b9120146de184b8"
+      "sha256": "717dc14e7d1d3c239ec0165e71409696b13be0624c2dd804a061df75dac3997e"
     },
     {
       "bytes": 352,
@@ -1628,9 +1638,34 @@
       "sha256": "271a72eb15dc2666f2474da12031cc578eb1711c306bda310aef7399f16b3745"
     },
     {
-      "bytes": 175862,
+      "bytes": 92492,
+      "path": "site/assets/borg-ship-poster-720.webp",
+      "sha256": "c2b41fd5c0eaa9d93b1fb3909e3cbdf8d91add8bd30183681c6892c4ca3eb890"
+    },
+    {
+      "bytes": 137628,
+      "path": "site/assets/borg-ship-poster-960.webp",
+      "sha256": "c833f8af4807d8ad5e8016f999beea01f7107d60c4e28678d8c29233332775d7"
+    },
+    {
+      "bytes": 175790,
       "path": "site/assets/borg-ship-poster.webp",
-      "sha256": "1f148822cef00792c725464c091f1ad2c4a0fe831f1e911d4f847252cd30dc70"
+      "sha256": "9ccf369a7cd85a704fbbf6392110d14bea35393556ff08ba425b145d5e5c6532"
+    },
+    {
+      "bytes": 5380973,
+      "path": "site/assets/borg-ship-turn-1200.webm",
+      "sha256": "23294570a74c4e63e2be03ecc04f9175e4c98e04c378816385c515a4abf2a40c"
+    },
+    {
+      "bytes": 1935893,
+      "path": "site/assets/borg-ship-turn-720.webm",
+      "sha256": "173caa9b11ccdd10032531ceeebb7a499d86ac310825e4296254598e5013e7d7"
+    },
+    {
+      "bytes": 3103530,
+      "path": "site/assets/borg-ship-turn-960.webm",
+      "sha256": "eebdc0a45d9557ea192564983121ae651188ed53ddb007e89d00935b436a9cab"
     },
     {
       "bytes": 1709776,
@@ -1743,9 +1778,9 @@
       "sha256": "31ab6524b09775ab3765c3ed6240397941f5c41c684910dca3355089a261c767"
     },
     {
-      "bytes": 91022,
+      "bytes": 90859,
       "path": "site/collective.html",
-      "sha256": "93191c272e88eb0c81867f9b62be8015561d51067d85704830b1b6ead7fe429c"
+      "sha256": "3febe05aeaaaf4fdbb2fd21e196ecb6c95e0570b5dd660d3464c31c1d06b585e"
     },
     {
       "bytes": 9836,
@@ -1813,9 +1848,9 @@
       "sha256": "26fdd44ccfcf221d07c773e89326cf06422213b6b4c3d120781f588bfb50f609"
     },
     {
-      "bytes": 9960,
+      "bytes": 6985,
       "path": "site/scene.js",
-      "sha256": "f3fb5de21e62479f6fcc1c9126f3163dbb4eb7a3a287a64b9414a48c754523f7"
+      "sha256": "6bae5437384bbbd7aaad292287b07d875254ff861865b4f5c3933c90d1f66196"
     },
     {
       "bytes": 4024,
@@ -1873,9 +1908,9 @@
       "sha256": "50ba6c7d9e1b438e9a4564caa39cb7264d2dba8632b91381b33eb6336f30d053"
     },
     {
-      "bytes": 48641,
+      "bytes": 48958,
       "path": "site/styles.css",
-      "sha256": "c2813e601508b71d105411619a09430fad80a45c792f51a2e56ee4d4d798e250"
+      "sha256": "c73cd82ec60d86fa71bba5dc5e18e55c244a0003b2a1627a1920bece213e79a8"
     },
     {
       "bytes": 1081,
@@ -1933,14 +1968,19 @@
       "sha256": "6d5514c5d938a6522a15412f5b60042bbc261f0b562399e1bfadf8629e2c3812"
     },
     {
-      "bytes": 8487,
+      "bytes": 8885,
       "path": "site/verify-explorer.mjs",
-      "sha256": "794f12dba76c98e000197f14aba2447d6d34516568c2e433046e005573b4e059"
+      "sha256": "a3a787260ab7088b17db1191d81ee5268dc32ebc9ec2e9fda16bc30699b86384"
     },
     {
       "bytes": 2918,
       "path": "site/verify-guide.mjs",
       "sha256": "3b1bef292bc037c13b9291bf034421a791d7e011a244e184da68a9c565bd2d09"
+    },
+    {
+      "bytes": 4383,
+      "path": "site/verify-hero.mjs",
+      "sha256": "9ed64b855d70685e0e856425b9a33783e26be2256404b47ef185efcdacdb9420"
     },
     {
       "bytes": 22549,
@@ -1963,9 +2003,9 @@
       "sha256": "99732f64ae150dd1389c328ed8c71157bfcbc17b700b1f4fa7aed465681bb240"
     },
     {
-      "bytes": 14594,
+      "bytes": 14717,
       "path": "site/verify.mjs",
-      "sha256": "d61c9208d5cc1e9d7558c686050ebbd7c6cf4608ee6c773f40290d4bbcecfa76"
+      "sha256": "6cfd0a3077671fa94055dd5fe6c0a134a5d0869ea98f2898e25a812669a7c1ef"
     },
     {
       "bytes": 6275,
@@ -2038,7 +2078,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "681dad38099bf170214f7ef35afa7399cd57d60892da95421a2fd39d7bbaaf78",
+  "inventory_sha256": "a55dd432084a935af1f286bc7455b433054dd2616f8d7b4231c94c2286a652c5",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88287375
+  "total_bytes": 98948332
 }
