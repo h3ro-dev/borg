@@ -4,6 +4,11 @@ on:
     branches: [master]
     paths: [site/**, platform/**, .github/workflows/site.yml]
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner label. Keep ubuntu-latest for GitHub's machines, or name a one-time runner of ours.
+        type: string
+        default: ubuntu-latest
 permissions:
   contents: read
   pages: write
@@ -13,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
