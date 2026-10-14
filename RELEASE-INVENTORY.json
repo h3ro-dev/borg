@@ -1,11 +1,11 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 400,
+  "file_count": 407,
   "files": [
     {
-      "bytes": 1914,
+      "bytes": 2018,
       "path": ".github/workflows/site.yml",
-      "sha256": "6bfdccbe0a3994dba7c402c2f7a2e0713de367e92476c68f680bc87439e7d1cf"
+      "sha256": "767940f3b5c7f8a4cb385462b751efdbbf5cfcf0555a207eb17cf42da7199208"
     },
     {
       "bytes": 5498,
@@ -23,9 +23,9 @@
       "sha256": "1ee496077ddbd98476168881ef5fdb880c8f8f5cda97e8aacaa997a6c0a3f780"
     },
     {
-      "bytes": 9275,
+      "bytes": 9305,
       "path": "README.md",
-      "sha256": "b65606451cffa65bc563b1917e30144532a535561c7315890f647331658497d5"
+      "sha256": "9ea5676d75235fd5be577a551b9ecb2e68a43b442b4b701ac4c411a5ae10c6e8"
     },
     {
       "bytes": 2934,
@@ -98,14 +98,19 @@
       "sha256": "74a33bfa8abb3b69398a11e60489b72e86b6d148ec3c6ca7c340a4557ddb910f"
     },
     {
-      "bytes": 5905,
+      "bytes": 6207,
       "path": "art/FLEET.md",
-      "sha256": "9fbe85c331b8fcfefda7e4c1512a93adeb2c04cef68dbaf02b8f15f829e655bb"
+      "sha256": "e21bd49cad3403c802dbfa1553a25fb343ae71a0c82582dab4377c868f07181b"
     },
     {
-      "bytes": 2344,
+      "bytes": 1969,
+      "path": "art/LAYERS.md",
+      "sha256": "0bba5b3678354a9540dc7626adf62fba17c5e52650e7cb62e0136542addb27a4"
+    },
+    {
+      "bytes": 2564,
       "path": "art/README.md",
-      "sha256": "cbb9b39a08c8c6641efcfb21f6f02738f4e99dc8be9b01cda285438e8efebe92"
+      "sha256": "72e20d6cac541a199b193cb336a3388b58fcb17fd212ee389e13c005751d4d38"
     },
     {
       "bytes": 21521,
@@ -113,9 +118,14 @@
       "sha256": "3b7276784b4b1f061c1d06aeb666817019a05d7cdc761b30b8158ca9fa7b665e"
     },
     {
-      "bytes": 13741,
+      "bytes": 13706,
       "path": "art/borg_fleet.py",
-      "sha256": "8e1b70fd09e01371d50a4016d1cd016c85072fd90348319c3d7369cad4b53195"
+      "sha256": "3f0ec10b849cd41154071ae5e6edb5248d72a95b0e6f871c0d57a3ee3be31abb"
+    },
+    {
+      "bytes": 10620,
+      "path": "art/borg_layers.py",
+      "sha256": "872e7dc4b03861ed14005e27b4085d75ac81ecb7530646e8716dc19d70819c29"
     },
     {
       "bytes": 9462,
@@ -813,9 +823,9 @@
       "sha256": "264355fa8af08b6c6f529a35e497da9da746540d11457d2fdccf95fffe27aa98"
     },
     {
-      "bytes": 14235,
+      "bytes": 14250,
       "path": "docs/COMPONENTS.md",
-      "sha256": "db77beecf6b73621691566f759414c3e62a4e85218a71e341ded9c560fe1330b"
+      "sha256": "a7da8146977e729f6ef9fed76d5c14d0e73a3505ff26530f208491cccfb722e5"
     },
     {
       "bytes": 8807,
@@ -823,9 +833,9 @@
       "sha256": "643e0975f55a2fa6e60540721ef2aa12bd6711095471117c9ce11b0359d66992"
     },
     {
-      "bytes": 19414,
+      "bytes": 19429,
       "path": "docs/HARDWARE.md",
-      "sha256": "c43600f06704928a08381c34d31471dff166b548f0b242247d06fae377b4e00e"
+      "sha256": "46c04554a8f4f3d30961eaac2dc4758464a4aed8b2dd1e835e53f8b6ef74c4c0"
     },
     {
       "bytes": 7051,
@@ -853,9 +863,9 @@
       "sha256": "44c1a6066eb0db50f0968538b871c0d6369e9003f4229577a126fe490c958741"
     },
     {
-      "bytes": 5816,
+      "bytes": 5831,
       "path": "docs/SIZING.md",
-      "sha256": "f0799aae4de0e8ddfec00b764b41b211cafc143f2f32e14c15c56d9d2c9a43c3"
+      "sha256": "36b3409797bc39fce11633bc9c1a7d10990867f7b1a64ba46f2db5609af6baa2"
     },
     {
       "bytes": 3897,
@@ -1093,9 +1103,9 @@
       "sha256": "02860640403068e6184562161f8e452cbce31746371697b461be16a371edd281"
     },
     {
-      "bytes": 28468,
+      "bytes": 28582,
       "path": "installer/release_guard.py",
-      "sha256": "ee32045bf09da38d41f85eb175e9073b04da6f1a388f983c8f3ae81b8bd16684"
+      "sha256": "8f91cfac08bdd5866821c5143cc73d443017c8f00220c2508b9120146de184b8"
     },
     {
       "bytes": 352,
@@ -1568,9 +1578,9 @@
       "sha256": "25589b77b069331c1b4775f1a5e03b066f3a61cd852357982c0d859145c9dc27"
     },
     {
-      "bytes": 11680,
+      "bytes": 11684,
       "path": "platform/planner.mjs",
-      "sha256": "751c9d3ed7a6851aef688606dd89f81f9aaacb30dbd75e1e1e5a4daf12bb404c"
+      "sha256": "876f132790bf943de44983ba439c36d9a22027990ce75acd426568c0fd0a2997"
     },
     {
       "bytes": 5299,
@@ -1578,14 +1588,14 @@
       "sha256": "08d6ad9b4afa2a1c5977f88b2e4499538472ca8c06f0b6910de4d36a9f124edc"
     },
     {
-      "bytes": 31139,
+      "bytes": 31214,
       "path": "site/agent-guide.md",
-      "sha256": "e2d5eeb2ce1e090d08862be290dfb2d20577272b7262627a8018211e01d6015f"
+      "sha256": "b0204a100db9f7bef698bfbf12b373134dc56a226d1e524b5d56903bc9cf2919"
     },
     {
-      "bytes": 14473,
+      "bytes": 14461,
       "path": "site/app.js",
-      "sha256": "bee0bc996140d34d0e5839bfc6e62d8a606c322644abe4214573b5e816d25499"
+      "sha256": "97e0e9e44252134a7aa0653a0f4c5d9a93b0bf37e68f6817a571a2389a9c4f89"
     },
     {
       "bytes": 4396,
@@ -1603,14 +1613,19 @@
       "sha256": "132d9694ade32027439c2e9e9e9b2fbdb3475f0b8d750cf00656a8653beab278"
     },
     {
-      "bytes": 244494,
+      "bytes": 240024,
       "path": "site/assets/borg-fleet-foreground.webp",
-      "sha256": "c39ec8039abe79f65dcd8e9fe28f9d4ea31608562e2218b7ca99819d77760e40"
+      "sha256": "d270b831cd98f2e0d58298c82a8f189a86a0d514230411c2b97fe9df99df892c"
     },
     {
-      "bytes": 234470,
+      "bytes": 229914,
       "path": "site/assets/borg-fleet.webp",
-      "sha256": "f7d0fd992b3fa0eb8f5d7e30cc89d2644f38ae5f7e7a68fb1517686641351cca"
+      "sha256": "b795199e5e13a6bfd6b7ff630833bc52969321bf056286b47865eedadec741f7"
+    },
+    {
+      "bytes": 155780,
+      "path": "site/assets/borg-layers.webp",
+      "sha256": "271a72eb15dc2666f2474da12031cc578eb1711c306bda310aef7399f16b3745"
     },
     {
       "bytes": 175862,
@@ -1643,9 +1658,9 @@
       "sha256": "1cab603b29a2e3c9ea36f57ce340920dccef9a6ee16ba1f505e7ee960bbce228"
     },
     {
-      "bytes": 14153,
+      "bytes": 14163,
       "path": "site/assets/generate-system-map.mjs",
-      "sha256": "9f0361bba479f227bf098af57d55437b9752ca04e5cb7515df5a1e9341bdc848"
+      "sha256": "97722b9d2b37dab91532b913bf621e9472b3e63979097ecd51b739dd7729d429"
     },
     {
       "bytes": 251,
@@ -1678,54 +1693,59 @@
       "sha256": "b6930d08a383f03735bbf317ab9e410648501804f501cf58f563e8d5274e0880"
     },
     {
-      "bytes": 7475,
+      "bytes": 7535,
       "path": "site/assets/stardate/2026-267-recall-budget-jam.html",
-      "sha256": "8b18dd4272c65ea93f804e2d5b5f670ba05df06f5eabc5aa899ec5699040c5b5"
+      "sha256": "1f32674e1951a86c65377d79388ce711d0a6b16233113bfca8031a1748919668"
     },
     {
-      "bytes": 8314,
+      "bytes": 8374,
       "path": "site/assets/stardate/2026-268-clm-side-test.html",
-      "sha256": "d01f229fb24e1512d54f961080c0388598a37f734a214539f88e6d93c1b62029"
+      "sha256": "147e0dc186b7eac4d8a2f197ece2cafb43e581faa0b3e7ed05e04dd902b097ea"
     },
     {
-      "bytes": 9494,
+      "bytes": 9554,
       "path": "site/assets/stardate/2026-268-deep-dream-day-one.html",
-      "sha256": "8fff60c9222f8c940ff7a1e9aee2128462835303fdfc71e50e4b3cf885a6644e"
+      "sha256": "f1f266fd964a899609a84ce5a848df50d9682f056c71be3caecd570e2a8d1d2f"
     },
     {
-      "bytes": 8257,
+      "bytes": 8317,
       "path": "site/assets/stardate/2026-268-grok-hooks-ab.html",
-      "sha256": "815a2875a1e2f60949794567d4939fa7d0c6347c0cb046df58cb37a576911bad"
+      "sha256": "2b193bb5fbb63b7327b99de54bb582af32270faded3c429415287da6e88b11cd"
     },
     {
-      "bytes": 7889,
+      "bytes": 7949,
       "path": "site/assets/stardate/2026-268-incoming-filter-on.html",
-      "sha256": "80904aa1107e2a79bdf3a0b3944923247d3da61224efc41396d394374ce124eb"
+      "sha256": "b3c3321f11c82f35cc7945f7dfc5d4eaac4e05b803b0181c099f25eba7fe032d"
     },
     {
-      "bytes": 7710,
+      "bytes": 7770,
       "path": "site/assets/stardate/2026-268-judge-kit-reviews.html",
-      "sha256": "b271aabcdbc089898b8f4984dc5f9f44f40e94927bd3c7ee8e73a667749b7e92"
+      "sha256": "be9ee7a0fc51e6e653266f6593e5a7c6ab823da13543fc06ac2927093bb832a7"
     },
     {
-      "bytes": 8048,
+      "bytes": 8108,
       "path": "site/assets/stardate/2026-268-marker-chains.html",
-      "sha256": "eba4bc5465853ea9c86d88702d3a2172ba78c91b298f7139f6d931b02eef0d02"
+      "sha256": "fd00563fee9c2a36564ee00254e7c6c0ec46eff47624a4543f013d3d6c7e964e"
     },
     {
-      "bytes": 8111,
+      "bytes": 8171,
       "path": "site/assets/stardate/2026-268-memory-reach.html",
-      "sha256": "e7940ff02995ece6c81f17c9c4ac1c1272cb04c8f5d3afe351fd916eee0a3d82"
+      "sha256": "575b390438723227aea7a07087f559e38ca187754e695889ab75fd3bdde2d3dc"
     },
     {
-      "bytes": 8400,
+      "bytes": 8460,
       "path": "site/assets/stardate/index.html",
-      "sha256": "c451ac767c354e5d70580baaddb73935f454ea16e96e796e705a047273ddff4f"
+      "sha256": "625dfc0c31d67fc344f5c84dd968f7c56e0346d4146dd95965e4af8f8fbf6556"
     },
     {
       "bytes": 7046,
       "path": "site/assets/stardate/stardate.css",
       "sha256": "31ab6524b09775ab3765c3ed6240397941f5c41c684910dca3355089a261c767"
+    },
+    {
+      "bytes": 91047,
+      "path": "site/collective.html",
+      "sha256": "a3ab302c066ff8e785cce95999c97fcc4e8448b3a0a4cf2b0c0b3adb4b740c0e"
     },
     {
       "bytes": 9836,
@@ -1763,9 +1783,9 @@
       "sha256": "b1466deeef059105426c7f813de5591707e8585a36aa83f5a108773c679a516c"
     },
     {
-      "bytes": 44265,
+      "bytes": 44279,
       "path": "site/guide.html",
-      "sha256": "ba90e6999af51c2cb2fc7ec86d4088d46a4f1a1420599fe18e31ba26a0e92908"
+      "sha256": "85669e6c94be23fece8b3d13eb39208bffe3ff2de2a5999244de1432503e167c"
     },
     {
       "bytes": 1044,
@@ -1773,14 +1793,24 @@
       "sha256": "0ef3fd6b85ade71ccb594334f5f3e4a41000f2d9167c380b95b9248d73297d2c"
     },
     {
-      "bytes": 91108,
-      "path": "site/index.html",
-      "sha256": "ec38faf6213bf6619bb68b236e02a097d30644ca1b4e54c02ee36cc8cc96dd23"
+      "bytes": 21796,
+      "path": "site/home.css",
+      "sha256": "7400bac59e630209c097ed4a3132d855eef419b81ba5e6dc65b0f88ca9b26e79"
     },
     {
-      "bytes": 2877,
+      "bytes": 7808,
+      "path": "site/home.js",
+      "sha256": "81874a709cd01c325ce1a5489b6efd77999095ae4abdfbc2cbaa2cfd4884cd68"
+    },
+    {
+      "bytes": 23354,
+      "path": "site/index.html",
+      "sha256": "d1eef790a08a609d293c674249e94f2010d9ca26547a91a65154e6fa98cbda7b"
+    },
+    {
+      "bytes": 2892,
       "path": "site/llms.txt",
-      "sha256": "bd2cceb71e4443839ddd0e05e112ad3a0a52958e516f1ab7d6f8a43e0ae39c52"
+      "sha256": "26fdd44ccfcf221d07c773e89326cf06422213b6b4c3d120781f588bfb50f609"
     },
     {
       "bytes": 9960,
@@ -1788,9 +1818,9 @@
       "sha256": "f3fb5de21e62479f6fcc1c9126f3163dbb4eb7a3a287a64b9414a48c754523f7"
     },
     {
-      "bytes": 4006,
+      "bytes": 4024,
       "path": "site/stardate/README.md",
-      "sha256": "7d12c7fcf23a05cc00a1425d0b619b8f422e3f106234e3521cc59a8a5dc78e8b"
+      "sha256": "a1dd6f3f9982ae42345692d678482fd9d8cb7f2c3733e2021991afd10ccd17f2"
     },
     {
       "bytes": 3470,
@@ -1833,14 +1863,14 @@
       "sha256": "37054bd09340768179275144f3b2010428b3bf476fa7810cd1f7b79e0c8f6d2a"
     },
     {
-      "bytes": 1952,
+      "bytes": 1959,
       "path": "site/stardate/publish.mjs",
-      "sha256": "e9b3aee47279968d24eae1b61c9dfa3359e2485cee53b0cc386e230d9fe30fa2"
+      "sha256": "fa47c0eb9ead93e7c76997aa291f4107403b4eab5e755b035911b7de84f933c1"
     },
     {
-      "bytes": 19504,
+      "bytes": 19693,
       "path": "site/stardate/stardate.mjs",
-      "sha256": "80511b3233b79ea29710fcd1140a374819dca979636ca7927ef94c84736cfd29"
+      "sha256": "d38d1ed77a2f0092f11f5a739d9be366e6bdd7794f392b31c438ff14d46b26c7"
     },
     {
       "bytes": 48300,
@@ -1898,14 +1928,14 @@
       "sha256": "fda7e946b8e0b5ab39b779206589e7a1079a22eb24efb89d7223e03fdfb1f751"
     },
     {
-      "bytes": 10914,
+      "bytes": 10929,
       "path": "site/verify-configure.mjs",
-      "sha256": "2b32a829bcd7c11112d2269fc0ce40f6c809dbdfa1912c77761e118273309607"
+      "sha256": "6d5514c5d938a6522a15412f5b60042bbc261f0b562399e1bfadf8629e2c3812"
     },
     {
-      "bytes": 8442,
+      "bytes": 8487,
       "path": "site/verify-explorer.mjs",
-      "sha256": "67d6c88ea835c1c7b0af8bc9e4d3efe80b5249e30f79f6e57ff6ecc22263ee49"
+      "sha256": "794f12dba76c98e000197f14aba2447d6d34516568c2e433046e005573b4e059"
     },
     {
       "bytes": 2918,
@@ -1913,24 +1943,29 @@
       "sha256": "3b1bef292bc037c13b9291bf034421a791d7e011a244e184da68a9c565bd2d09"
     },
     {
-      "bytes": 2283,
+      "bytes": 20507,
+      "path": "site/verify-home.mjs",
+      "sha256": "f3c59e045ac04deb54c6cac935a82e016ab5d263f5710b60249a4648030bd0c3"
+    },
+    {
+      "bytes": 2302,
       "path": "site/verify-links.mjs",
-      "sha256": "999257d4f0159267f0dcc0cb8311d7ea2eef6852c3a2e3a0e4c817c78760f163"
+      "sha256": "b226fd6fb718f642968dc918c1763e410eaee80c4e88aff269f7963a89cc1aa5"
     },
     {
-      "bytes": 8125,
+      "bytes": 8204,
       "path": "site/verify-map.mjs",
-      "sha256": "3d6d9e9be392aa684ef688f9b7b2e3de3d7ebf0595c2db65666a137d5a992e42"
+      "sha256": "3931c2041a5b98c034faa57584ae2dd7851b68378883d87389c1df091ff358ac"
     },
     {
-      "bytes": 10730,
+      "bytes": 10766,
       "path": "site/verify-stardate.mjs",
-      "sha256": "24598b63866dcf3f17f0b1498f704e3e3cdc4d9caf08ca2e35f7344320022cae"
+      "sha256": "99732f64ae150dd1389c328ed8c71157bfcbc17b700b1f4fa7aed465681bb240"
     },
     {
-      "bytes": 13966,
+      "bytes": 14594,
       "path": "site/verify.mjs",
-      "sha256": "13b988b925ddbde8e37a4d70122c0354fe76fa7c4272490bc6f0c536a17f1155"
+      "sha256": "d61c9208d5cc1e9d7558c686050ebbd7c6cf4608ee6c773f40290d4bbcecfa76"
     },
     {
       "bytes": 6275,
@@ -2003,7 +2038,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "927bc4b7fc93fcc354eea91f24337b98d289d616292f38fab72c87a95eb85cac",
+  "inventory_sha256": "4c41aa61f3a81cb3a18412722b80d341daa53922c9fbd3095c1dc758907018d8",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 88047043
+  "total_bytes": 88282252
 }
