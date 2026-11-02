@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -57,13 +57,13 @@ jobs:
       matrix:
         include:
           - suite: connector
-            os: macos-14
+            os: macos-15
             requirements: installer/requirements.lock
           - suite: coordination
             os: ubuntu-24.04
             requirements: coordination/requirements-core.lock
           - suite: installer
-            os: macos-14
+            os: macos-15
             requirements: installer/requirements.lock
           - suite: memory
             os: ubuntu-24.04
