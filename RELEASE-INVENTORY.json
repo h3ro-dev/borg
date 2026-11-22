@@ -323,9 +323,9 @@
       "sha256": "5dbd10ab2ca3ac830d79b2fc16455174496cc0d04e20e4911eeddff8073aa087"
     },
     {
-      "bytes": 42238,
+      "bytes": 42208,
       "path": "connector/borg_context_server.py",
-      "sha256": "f82c36b1ac99744b563b392dcdf40fe9f1c507356f16c895eb632708cd201148"
+      "sha256": "5758455f92fc7192759359330864b283d6e1e2cb3a7d4961391b83bf5b60c788"
     },
     {
       "bytes": 8017,
@@ -2083,7 +2083,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "613306999bca70c3f2054f1683b03c2ce23c8d1a0cf0bee76d48e691b73c9ae7",
+  "inventory_sha256": "cfd1eb1ba634fe3915621946025ba6722db08d91f24febffe4b4d6578208ffe8",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 99000083
+  "total_bytes": 99000053
 }

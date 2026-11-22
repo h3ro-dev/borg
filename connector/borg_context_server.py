@@ -139,7 +139,7 @@ class Settings:
         inbound = Path(doc["inbound_authorization_file"])
         inbound_secret = secret(inbound, authorization=True)
         upstream: Path | None = None
-        if memory_backend == "mem0" or doc.get("mem0_token_file"):
+        if memory_backend == "mem0":
             upstream = Path(doc["mem0_token_file"])
             owner_tokens = {HOME / "Library/Memory/mem0/data/mcp-token",
                             borg_home() / "mem0/data/mcp-token", borg_home() / "mem0/data/owner-token"}
