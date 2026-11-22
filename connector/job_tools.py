@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -29,6 +30,25 @@ MAX_ARTIFACT_BYTES = 25_000_000
 MAX_JOBS = 200
 TOOL_NAMES = ["job_start", "job_status", "job_read_output", "job_cancel", "job_list",
               "artifact_put", "artifact_read", "artifact_list"]
+
+
+def _default_shell() -> str:
+    for candidate in ("/bin/zsh", shutil.which("bash"), "/bin/sh"):
+        if candidate and os.access(candidate, os.X_OK):
+            return candidate
+    raise ToolError("BORG durable job shell is unavailable")
+
+
+def _read_slice(path: Path, offset: int, length: int) -> tuple[bytes, int]:
+    """Read only the requested byte range without loading unbounded logs into RAM."""
+    if path.is_symlink():
+        raise ValueError("symlink")
+    with path.open("rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        if length <= 0 or offset >= size:
+            return b"", size
+        handle.seek(offset)
+        return handle.read(length), size
 
 
 def _now() -> float:
@@ -160,12 +180,37 @@ class JobStore:
         identity = self._identity(pid)
         return bool(identity and identity == row.get("pid_start"))
 
+    def _prune_completed(self) -> None:
+        """Remove oldest terminal job records once count exceeds MAX_JOBS."""
+        try:
+            paths = sorted(self.jobs.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        except OSError:
+            return
+        if len(paths) <= MAX_JOBS:
+            return
+        for path in paths[MAX_JOBS:]:
+            job_id = path.stem
+            if job_id in self.processes and self.processes[job_id].poll() is None:
+                continue
+            try:
+                row = self._read(path)
+            except ToolError:
+                continue
+            if row.get("state") == "running" and self._alive(row):
+                continue
+            self.processes.pop(job_id, None)
+            path.unlink(missing_ok=True)
+            job_dir = self.jobs / job_id
+            if job_dir.is_dir() and not job_dir.is_symlink():
+                shutil.rmtree(job_dir, ignore_errors=True)
+
     def start(self, command: str, cwd: str | None = None, timeout_ms: int = 1000) -> dict:
         if not isinstance(command, str) or not command.strip() or len(command.encode()) > MAX_COMMAND_BYTES:
             raise ToolError("BORG job command is empty or too long")
         working = _path(cwd) if cwd else Path.home()
         if not working.is_dir():
             raise ToolError("BORG job working directory is unavailable")
+        shell = _default_shell()
         job_id = str(uuid.uuid4())
         job_dir = self.jobs / job_id
         job_dir.mkdir(mode=0o700)
@@ -175,7 +220,7 @@ class JobStore:
         stdout = stdout_path.open("ab", buffering=0)
         stderr = stderr_path.open("ab", buffering=0)
         try:
-            proc = subprocess.Popen(["/bin/zsh", "-lc", command], cwd=str(working),
+            proc = subprocess.Popen([shell, "-lc", command], cwd=str(working),
                                     stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                                     start_new_session=True)
         except Exception:
@@ -194,6 +239,7 @@ class JobStore:
         }
         self._write(self._job_path(job_id), row)
         self.processes[job_id] = proc
+        self._prune_completed()
         return {k: row[k] for k in ("job_id", "state", "pid", "started_at", "command_sha256")}
 
     def _observed_status(self, row: dict) -> dict:
@@ -226,19 +272,28 @@ class JobStore:
         if stream not in {"stdout", "stderr", "combined"}:
             raise ToolError("BORG job stream must be stdout, stderr or combined")
         offset = max(0, int(offset)); length = max(0, min(int(length), MAX_OUTPUT_BYTES))
-        paths = [Path(row[stream])] if stream != "combined" else [Path(row["stdout"]), Path(row["stderr"])]
-        chunks = []
-        for path in paths:
-            try:
-                if path.is_symlink():
-                    raise ValueError("symlink")
-                chunks.append(path.read_bytes())
-            except (OSError, ValueError):
-                raise ToolError("BORG job output is unavailable") from None
-        data = b"\n".join(chunks)[offset:offset + length]
+        try:
+            if stream != "combined":
+                data, total = _read_slice(Path(row[stream]), offset, length)
+            else:
+                out_path, err_path = Path(row["stdout"]), Path(row["stderr"])
+                out_part, out_size = _read_slice(out_path, offset, length)
+                remaining = length - len(out_part)
+                sep_part = b""
+                if remaining > 0 and offset <= out_size:
+                    sep_part = b"\n"
+                    remaining -= 1
+                err_offset = max(0, offset - (out_size + 1))
+                err_part, err_size = _read_slice(err_path, err_offset, remaining)
+                data = out_part + sep_part + err_part
+                total = out_size + 1 + err_size
+        except (OSError, ValueError):
+            raise ToolError("BORG job output is unavailable") from None
         text = data.decode("utf-8", "replace")
+        next_offset = offset + len(data)
         return {"job_id": _id(job_id), "stream": stream, "offset": offset,
-                "output": _scrub(text), "bytes": len(data), "truncated": len(data) >= length}
+                "next_offset": next_offset, "total_bytes": total,
+                "output": _scrub(text), "bytes": len(data), "truncated": next_offset < total}
 
     @_serialized_job
     def cancel(self, job_id: str) -> dict:

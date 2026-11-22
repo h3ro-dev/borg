@@ -83,8 +83,8 @@ class OperationLedger:
             except FileNotFoundError:
                 pass
 
-    def start(self, tool: str, request_sha256: str) -> dict[str, Any]:
-        receipt_id = str(uuid.uuid4())
+    def start(self, tool: str, request_sha256: str, *, receipt_id: str | None = None) -> dict[str, Any]:
+        receipt_id = _uuid(receipt_id) if receipt_id is not None else str(uuid.uuid4())
         row = {
             "version": 1,
             "receipt_id": receipt_id,

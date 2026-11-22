@@ -1,7 +1,9 @@
 """Native BORG remote execution over the owner's existing SSH estate."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 import os
 import re
 import shlex
@@ -15,6 +17,32 @@ from job_tools import JobStore
 
 TOOL_NAMES = ["remote_list_hosts", "remote_status", "remote_start", "remote_read_output", "remote_cancel"]
 HOST_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+DEFAULT_MAX_LOAD_PER_CPU = 1.5
+PORTABLE_PROBE_CMD = (
+    "if command -v sysctl >/dev/null 2>&1 && out=$(sysctl -n hw.ncpu vm.loadavg 2>/dev/null) "
+    "&& [ -n \"$out\" ]; then printf '%s\\n' \"$out\"; "
+    "elif [ -r /proc/loadavg ]; then "
+    "cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1); "
+    "read -r l1 l5 l15 _ < /proc/loadavg; printf '%s\\n{ %s %s %s }\\n' \"$cpus\" \"$l1\" \"$l5\" \"$l15\"; "
+    "else exit 2; fi"
+)
+PORTABLE_EXEC_WRAPPER = (
+    'if [ -x /bin/zsh ]; then exec /bin/zsh -lc "$1"; '
+    'elif command -v bash >/dev/null 2>&1; then exec bash -lc "$1"; '
+    'else exec /bin/sh -lc "$1"; fi'
+)
+
+
+def _max_load_per_cpu(value: object, default: float = DEFAULT_MAX_LOAD_PER_CPU) -> float:
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(parsed) or not 0.1 <= parsed <= 64.0:
+        return default
+    return parsed
 
 
 class RemoteStore:
@@ -23,6 +51,7 @@ class RemoteStore:
         self.config = config
         self.hosts_path = Path(config.get("hosts_file") or (borg_home() / "borg-context/hosts.json"))
         self.root = Path(config.get("jobs_root") or (borg_home() / "borg-context")) / "remote"
+        self.default_max_load = _max_load_per_cpu(config.get("max_load_per_cpu"), DEFAULT_MAX_LOAD_PER_CPU)
         self.jobs = JobStore(self.root)
 
     def _hosts(self) -> list[dict]:
@@ -53,60 +82,67 @@ class RemoteStore:
                 return row
         raise ToolError("BORG remote host is not configured")
 
-    @staticmethod
-    def _probe(row: dict) -> tuple[str, str]:
+    def _probe(self, row: dict) -> tuple[str, str, dict]:
+        threshold = _max_load_per_cpu(row.get("max_load_per_cpu"), self.default_max_load)
         if row.get("backend") == "local":
             cpu_count = os.cpu_count() or 1
-            load = os.getloadavg()[0] / cpu_count
-            return ("admission_denied", "load_high") if load >= 1.5 else ("ready", "local")
+            load_1m = os.getloadavg()[0]
+            metrics = {"cpu_count": cpu_count, "load_1m": round(load_1m, 2), "max_load_per_cpu": threshold}
+            status, reason = ("admission_denied", "load_high") if (load_1m / cpu_count) >= threshold else ("ready", "local")
+            return status, reason, metrics
         alias = str(row.get("ssh_alias") or row.get("name"))
         try:
-            result = subprocess.run(["/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4", alias,
-                                     "/usr/sbin/sysctl", "-n", "hw.ncpu", "vm.loadavg"],
+            result = subprocess.run(["/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
+                                     "--", alias, "/bin/sh -c " + shlex.quote(PORTABLE_PROBE_CMD)],
                                     capture_output=True, text=True, timeout=7, check=False)
         except subprocess.TimeoutExpired:
-            return "timeout", "ssh_timeout"
+            return "timeout", "ssh_timeout", {}
         except OSError:
-            return "unavailable", "ssh_unavailable"
+            return "unavailable", "ssh_unavailable", {}
         if result.returncode != 0:
-            return "unavailable", "ssh_failed"
-        lines = result.stdout.splitlines()
+            return "unavailable", "ssh_failed", {}
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         try:
-            cpu_count = max(1, int(lines[0].strip()))
-            load = float(lines[1].strip().strip("{} ").split()[0])
+            cpu_count = max(1, int(lines[0]))
+            load_1m = float(lines[1].strip("{} ").split()[0])
         except (IndexError, ValueError):
-            return "unknown", "resource_probe_invalid"
-        return ("admission_denied", "load_high") if load / cpu_count >= 1.5 else ("ready", "ssh")
+            return "unknown", "resource_probe_invalid", {}
+        metrics = {"cpu_count": cpu_count, "load_1m": round(load_1m, 2), "max_load_per_cpu": threshold}
+        status, reason = ("admission_denied", "load_high") if (load_1m / cpu_count) >= threshold else ("ready", "ssh")
+        return status, reason, metrics
+
+    def _probe_row(self, row: dict) -> dict:
+        status, reason, metrics = self._probe(row)
+        return {"name": row["name"], "backend": row.get("backend", "ssh"),
+                "capabilities": row.get("capabilities", ["jobs"]),
+                "status": status, "reason": reason, **metrics}
 
     def list_hosts(self) -> dict:
-        rows = []
-        for row in self._hosts():
-            status, reason = self._probe(row)
-            rows.append({"name": row["name"], "backend": row.get("backend", "ssh"),
-                         "capabilities": row.get("capabilities", ["jobs"]),
-                         "status": status, "reason": reason})
+        configured = self._hosts()
+        if len(configured) <= 1:
+            rows = [self._probe_row(row) for row in configured]
+        else:
+            with ThreadPoolExecutor(max_workers=min(8, len(configured))) as pool:
+                rows = list(pool.map(self._probe_row, configured))
         return {"hosts": rows, "notice": "Host status is a fresh probe; it is not proof that a later command completed."}
 
     def status(self, name: str) -> dict:
-        row = self._host(name); status, reason = self._probe(row)
-        return {"name": row["name"], "backend": row.get("backend", "ssh"), "status": status,
-                "reason": reason, "capabilities": row.get("capabilities", ["jobs"])}
+        return self._probe_row(self._host(name))
 
     def start(self, name: str, command: str, timeout_ms: int = 1000) -> dict:
         row = self._host(name)
         if not isinstance(command, str) or not command.strip() or len(command) > 16_000:
             raise ToolError("BORG remote command is empty or too long")
-        status, reason = self._probe(row)
+        status, reason, _ = self._probe(row)
         if status != "ready":
             raise ToolError(f"BORG remote host is not ready: {reason}")
         if row.get("backend") == "local":
             return {**self.jobs.start(command, timeout_ms=timeout_ms), "host": row["name"]}
         alias = str(row.get("ssh_alias") or row["name"])
-        # Pass the complete remote shell invocation as one SSH argument. SSH
-        # joins argv before invoking the remote shell; splitting ``-c`` and
-        # the script would make the first script token become zsh's $0.
-        remote_script = "/bin/zsh -lc " + shlex.quote(command)
-        wrapped = "/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=4 " + shlex.quote(alias) + " " + shlex.quote(remote_script)
+        # Pass the complete portable remote shell invocation as one SSH argument.
+        remote_script = "/bin/sh -c " + shlex.quote(PORTABLE_EXEC_WRAPPER) + " borg-remote " + shlex.quote(command)
+        wrapped = ("/usr/bin/ssh -o BatchMode=yes -o ConnectTimeout=4 -- "
+                   + shlex.quote(alias) + " " + shlex.quote(remote_script))
         return {**self.jobs.start(wrapped, timeout_ms=timeout_ms), "host": row["name"]}
 
     def read_output(self, job_id: str, stream: str = "combined", offset: int = 0, length: int = 256_000) -> dict:

@@ -141,8 +141,39 @@ def instance_lock():
         os.close(fd)
 
 
+MAX_LOG_BYTES = 2 * 1024 * 1024
+TRIM_LOG_BYTES = 512 * 1024
+
+
+def _trim_log_if_large() -> None:
+    try:
+        info = LOG_FILE.lstat()
+        if stat.S_ISLNK(info.st_mode) or info.st_size <= MAX_LOG_BYTES:
+            return
+        with LOG_FILE.open("rb") as handle:
+            handle.seek(max(0, info.st_size - TRIM_LOG_BYTES))
+            tail = handle.read()
+        newline = tail.find(b"\n")
+        if newline != -1:
+            tail = tail[newline + 1:]
+        fd, name = tempfile.mkstemp(prefix=".events-", dir=STATE_DIR)
+        tmp = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(tail)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, LOG_FILE)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def event(component: str, outcome: str, detail: str | None = None) -> None:
     ensure_state_dir()
+    _trim_log_if_large()
     row = {"at": now_iso(), "component": component, "outcome": outcome}
     if detail:
         row["detail"] = detail

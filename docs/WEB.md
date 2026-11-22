@@ -50,6 +50,37 @@ require recreating and republishing the app. Existing chats may retain cached to
 schemas; verify the current list from a new chat. These update requirements belong
 to ChatGPT and can change independently of the BORG server.
 
+## Connect other web MCP clients (OIDC Bearer and CORS)
+
+By default, `cloudflare_gateway.py` runs in `auth_mode: "cloudflare_access"` for
+Cloudflare Access Managed OAuth (`cf-access-jwt-assertion`). To connect any
+standards-compliant web MCP client (ChatGPT, Claude web, custom browser apps, or
+other OAuth 2.1 / OIDC identity providers), configure `auth_mode: "oidc_bearer"`
+with an explicit HTTPS `issuer`, `jwks_uri`, `audience`, and either `owner_email`
+/ `additional_owner_emails` or `allowed_subjects`:
+
+```json
+{
+  "version": 1,
+  "auth_mode": "oidc_bearer",
+  "public_url": "https://borg.example.com",
+  "issuer": "https://idp.example.com",
+  "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+  "audience": "borg-mcp",
+  "owner_email": "you@example.com",
+  "allowed_origins": ["https://app.example.com"],
+  "authorization_file": "/path/to/borg-context/private/authorization",
+  "upstream_url": "http://127.0.0.1:18766/mcp"
+}
+```
+
+In `oidc_bearer` mode the gateway verifies signed `Authorization: Bearer` JWTs
+with allowlisted asymmetric algorithms, rejects tokens with `email_verified: false`,
+and serves RFC 9728 metadata at `/.well-known/oauth-protected-resource`. When
+`allowed_origins` is set, the gateway handles `OPTIONS` CORS preflight for those
+exact HTTPS origins and rejects cross-site browser requests from unlisted origins
+with HTTP 403.
+
 ## Diagnose a connection
 
 - Local `borg call borg_status` fails: inspect local connector and memory logs first.

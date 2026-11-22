@@ -51,10 +51,12 @@ def _url(value: str) -> str:
 class CDP:
     def __init__(self, websocket_url: str, timeout: float = 10.0):
         parsed = urllib.parse.urlsplit(websocket_url)
-        if parsed.scheme != "ws" or parsed.hostname is None or parsed.port is None:
-            raise ToolError("BORG browser returned an invalid CDP endpoint")
-        self.sock = socket.create_connection((parsed.hostname, parsed.port), timeout=timeout)
-        self.sock.settimeout(timeout)
+        if (parsed.scheme != "ws" or parsed.hostname not in {"127.0.0.1", "::1"}
+                or parsed.port is None):
+            raise ToolError("BORG browser returned an invalid loopback CDP endpoint")
+        self.timeout = float(timeout)
+        self.sock = socket.create_connection((parsed.hostname, parsed.port), timeout=self.timeout)
+        self.sock.settimeout(self.timeout)
         key = base64.b64encode(os.urandom(16)).decode()
         path = parsed.path or "/"
         if parsed.query:
@@ -119,7 +121,12 @@ class CDP:
     def call(self, method: str, params: dict | None = None) -> dict:
         request_id = self.next_id; self.next_id += 1
         self._frame(json.dumps({"id": request_id, "method": method, "params": params or {}}).encode())
+        deadline = time.monotonic() + self.timeout
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ToolError("BORG browser operation timed out")
+            self.sock.settimeout(remaining)
             opcode, payload = self._read_frame()
             if opcode == 0x9:
                 self._frame(payload, opcode=0xA); continue
@@ -322,11 +329,20 @@ class BrowserStore:
 
     def close_session(self, session_id: str) -> dict:
         key = _id(session_id); row = self._read_meta(key); pid = int(row.get("pid", 0))
+        proc = self.processes.pop(key, None)
         if self._pid_identity(pid) != row.get("pid_start"):
             row["state"] = "outcome_unknown"
         else:
             try: os.killpg(pid, signal.SIGTERM)
             except ProcessLookupError: pass
+            if proc is not None:
+                try:
+                    proc.wait(timeout=2)
+                except (subprocess.TimeoutExpired, OSError):
+                    try: os.killpg(pid, signal.SIGKILL)
+                    except (ProcessLookupError, OSError): pass
+                    try: proc.wait(timeout=2)
+                    except (subprocess.TimeoutExpired, OSError): pass
             row["state"] = "closed"
         row["closed_at"] = time.time(); self._write_meta(self._meta(key), row)
         return {"session_id": key, "state": row["state"]}

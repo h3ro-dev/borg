@@ -22,13 +22,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastmcp import Client, FastMCP
 from fastmcp.client.auth import BearerAuth
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from fastmcp.server.dependencies import get_access_token
 from process_resources import descriptor_status
-from runtime_paths import borg_home, loopback_mcp_url
+from runtime_paths import borg_home, loopback_http_url, loopback_mcp_url
 
 HOME = Path.home()
 MEMORY = borg_home()
@@ -103,7 +104,7 @@ def secret(path: Path, *, authorization: bool = False) -> str:
 @dataclass(frozen=True)
 class Settings:
     inbound_authorization_file: Path
-    mem0_token_file: Path
+    mem0_token_file: Path | None
     project_roots: tuple[Path, ...]
     computer: dict[str, Any]
     desktop: dict[str, Any] = field(default_factory=dict)
@@ -118,10 +119,17 @@ class Settings:
     state_root: Path = MEMORY / "borg-context"
     identity: dict[str, Any] = field(default_factory=dict)
     fleet: dict[str, Any] = field(default_factory=dict)
+    memory: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> "Settings":
         doc = json.loads(private_text(path))
+        memory_raw = doc.get("memory") or {}
+        if not isinstance(memory_raw, dict):
+            raise ValueError("BORG memory configuration must be a JSON object")
+        memory_backend = memory_raw.get("backend", "mem0")
+        if memory_backend not in {"mem0", "hindsight"}:
+            raise ValueError("BORG memory backend must be mem0 or hindsight")
         # Full scope is deliberate owner authorization, never an automatic fallback.
         if (doc.get("version") != 1 or doc.get("access_mode") != "owner_all"
                 or not isinstance(doc.get("mem0_principal"), str)
@@ -129,13 +137,41 @@ class Settings:
                 or set(doc.get("allowed_scopes", [])) != SCOPES):
             raise ValueError("BORG configuration requires the explicit owner grant and dedicated principal")
         inbound = Path(doc["inbound_authorization_file"])
-        upstream = Path(doc["mem0_token_file"])
-        owner_tokens = {HOME / "Library/Memory/mem0/data/mcp-token",
-                        borg_home() / "mem0/data/mcp-token", borg_home() / "mem0/data/owner-token"}
-        if upstream.resolve() in owner_tokens or inbound.resolve() == upstream.resolve():
-            raise ValueError("BORG credentials must be dedicated and separate")
-        if secrets.compare_digest(secret(inbound, authorization=True), secret(upstream)):
-            raise ValueError("BORG credentials must be different")
+        inbound_secret = secret(inbound, authorization=True)
+        upstream: Path | None = None
+        if memory_backend == "mem0" or doc.get("mem0_token_file"):
+            upstream = Path(doc["mem0_token_file"])
+            owner_tokens = {HOME / "Library/Memory/mem0/data/mcp-token",
+                            borg_home() / "mem0/data/mcp-token", borg_home() / "mem0/data/owner-token"}
+            if upstream.resolve() in owner_tokens or inbound.resolve() == upstream.resolve():
+                raise ValueError("BORG credentials must be dedicated and separate")
+            if secrets.compare_digest(inbound_secret, secret(upstream)):
+                raise ValueError("BORG credentials must be different")
+        memory_cfg: dict[str, Any] = {}
+        if memory_backend == "hindsight":
+            hs_url = loopback_http_url(memory_raw.get("url", ""))
+            bank = memory_raw.get("bank")
+            bank_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$")
+            if not isinstance(bank, str) or not bank_re.fullmatch(bank):
+                raise ValueError("BORG Hindsight backend requires a concrete bank identifier")
+            raw_search_banks = memory_raw.get("search_banks", [bank])
+            if (not isinstance(raw_search_banks, list) or not 1 <= len(raw_search_banks) <= 16
+                    or any(not isinstance(b, str) or not bank_re.fullmatch(b) for b in raw_search_banks)):
+                raise ValueError("BORG Hindsight search_banks must be 1-16 valid bank identifiers")
+            budget = memory_raw.get("budget", "low")
+            if budget not in {"low", "mid", "high"}:
+                raise ValueError("BORG Hindsight recall budget must be low, mid, or high")
+            timeout_s = float(memory_raw.get("timeout_seconds", 25.0))
+            if not 1.0 <= timeout_s <= 60.0:
+                raise ValueError("BORG Hindsight timeout_seconds must be between 1 and 60")
+            memory_cfg = {
+                "backend": "hindsight",
+                "url": hs_url,
+                "bank": bank,
+                "search_banks": list(dict.fromkeys(raw_search_banks)),
+                "budget": budget,
+                "timeout_seconds": timeout_s,
+            }
         root_values = doc.get("project_roots")
         if not isinstance(root_values, list) or any(not isinstance(p, str) for p in root_values):
             raise ValueError("BORG project roots must be an explicit list of paths")
@@ -143,7 +179,10 @@ class Settings:
         if (not roots or len(roots) > 16
                 or any(not p.is_absolute() or not p.is_dir() or p.resolve(strict=True) != p for p in roots)):
             raise ValueError("BORG project discovery requires its explicit owner project root")
-        if os.environ.get("BORG_HOME") and any(key not in doc for key in ["mem0_url", "default_scope", "state_root"]):
+        required_independent = ["default_scope", "state_root"]
+        if memory_backend == "mem0":
+            required_independent.append("mem0_url")
+        if os.environ.get("BORG_HOME") and any(key not in doc for key in required_independent):
             raise ValueError("An independent BORG requires explicit upstream, scope and state settings")
         mem0_url = loopback_mcp_url(doc.get("mem0_url", MEM0_URL))
         default_scope = doc.get("default_scope", "personal:james")
@@ -184,7 +223,7 @@ class Settings:
             absolute_path(fleet["registry_file"])
         return cls(inbound, upstream, roots, computer, desktop, browser, remote, ui, credentials,
                    account_catalog, mem0_url, doc["mem0_principal"], default_scope, state_root,
-                   identity, fleet)
+                   identity, fleet, memory_cfg)
 
 
 class BorgBearerVerifier(TokenVerifier):
@@ -298,6 +337,167 @@ def _activity(terms: str, limit: int) -> dict[str, Any]:
 class BorgContext:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._adapter_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+    def _hindsight_config(self) -> dict[str, Any] | None:
+        cfg = getattr(self.settings, "memory", None) or {}
+        return cfg if isinstance(cfg, dict) and cfg.get("backend") == "hindsight" else None
+
+    @staticmethod
+    def _hindsight_client(timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(trust_env=False, follow_redirects=False,
+                                 timeout=httpx.Timeout(timeout, connect=3.0))
+
+    async def _hindsight_status(self, cfg: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        base = cfg["url"]
+        bank = cfg["bank"]
+        try:
+            async with self._hindsight_client(4.0) as client:
+                health_res = await client.get(f"{base}/health")
+                health_res.raise_for_status()
+                health = health_res.json()
+                banks_res = await client.get(f"{base}/v1/default/banks")
+                banks_res.raise_for_status()
+                banks_doc = banks_res.json()
+        except Exception:
+            return {"status": "UNAVAILABLE", "backend": "hindsight", "bank": bank}, {"status": "UNKNOWN", "backend": "hindsight"}
+        banks = banks_doc.get("banks") if isinstance(banks_doc, dict) else []
+        if not isinstance(banks, list):
+            banks = []
+        default_row = next((b for b in banks if isinstance(b, dict) and b.get("bank_id") == bank), None)
+        healthy = isinstance(health, dict) and health.get("status") == "healthy"
+        total_facts = sum(int(b.get("fact_count") or 0) for b in banks if isinstance(b, dict))
+        mem_health = {
+            "status": "PASS" if healthy else "UNAVAILABLE",
+            "backend": "hindsight",
+            "principal": getattr(self.settings, "mem0_principal", PRINCIPAL),
+            "bank": bank,
+            "search_banks": cfg.get("search_banks", [bank]),
+            "bank_count": len(banks),
+            "bank_fact_count": int(default_row.get("fact_count") or 0) if default_row else 0,
+            "total_fact_count": total_facts,
+            "allowed_scopes": ["*"],
+            "effective_read_scopes": "ALL (hindsight)",
+        }
+        graph = {
+            "status": "ok" if healthy else "UNKNOWN",
+            "backend": "hindsight",
+            "graph_count": len(banks),
+            "total_fact_count": total_facts,
+        }
+        return mem_health, graph
+
+    async def _hindsight_search(self, cfg: dict[str, Any], query: str, limit: int) -> list[dict[str, Any]]:
+        base = cfg["url"]
+        banks = cfg.get("search_banks") or [cfg["bank"]]
+        budget = cfg.get("budget", "low")
+        timeout = float(cfg.get("timeout_seconds", 25.0))
+        max_tokens = max(512, min(limit * 350, 4096))
+
+        async def recall_bank(client: httpx.AsyncClient, bank_id: str) -> list[dict[str, Any]]:
+            res = await client.post(
+                f"{base}/v1/default/banks/{bank_id}/memories/recall",
+                json={"query": query, "budget": budget, "max_tokens": max_tokens},
+            )
+            res.raise_for_status()
+            payload = res.json()
+            rows = payload.get("results") if isinstance(payload, dict) else []
+            out = []
+            for row in rows if isinstance(rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                scores = row.get("scores") if isinstance(row.get("scores"), dict) else {}
+                score = scores.get("final")
+                if score is None:
+                    score = row.get("score")
+                tags = row.get("tags") if isinstance(row.get("tags"), list) else []
+                scope_tag = next((t[6:] for t in tags if isinstance(t, str) and t.startswith("scope=")), None)
+                meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                out.append({
+                    "id": row.get("id"),
+                    "memory": row.get("text") or row.get("memory"),
+                    "score": score,
+                    "scope": scope_tag or row.get("context") or f"bank:{bank_id}",
+                    "bank": bank_id,
+                    "source": meta.get("source") or row.get("document_id"),
+                    "observed_at": row.get("mentioned_at") or row.get("occurred_start"),
+                    "thread_date": row.get("occurred_start"),
+                    "cwd": meta.get("cwd"),
+                    "authority": "candidate",
+                })
+            return out
+
+        try:
+            async with self._hindsight_client(timeout) as client:
+                batches = await asyncio.gather(*(recall_bank(client, b) for b in banks), return_exceptions=True)
+        except Exception:
+            raise ToolError("BORG Hindsight recall failed") from None
+
+        merged: list[dict[str, Any]] = []
+        ok_count = 0
+        for batch in batches:
+            if isinstance(batch, list):
+                ok_count += 1
+                merged.extend(batch)
+        if ok_count == 0:
+            raise ToolError("BORG Hindsight memory backend is unavailable")
+        seen: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+        merged.sort(key=lambda r: float(r.get("score") or 0.0), reverse=True)
+        for row in merged:
+            key = str(row.get("id") or row.get("memory") or "")
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            deduped.append(row)
+            if len(deduped) >= limit:
+                break
+        return deduped
+
+    async def _hindsight_remember(self, cfg: dict[str, Any], text: str, scope: str) -> dict[str, Any]:
+        base = cfg["url"]
+        bank = cfg["bank"]
+        timeout = float(cfg.get("timeout_seconds", 25.0))
+        payload = {
+            "items": [{
+                "content": text,
+                "context": scope,
+                "tags": [f"scope={scope}", "source=borg-connector"],
+                "metadata": {"agent": getattr(self.settings, "mem0_principal", PRINCIPAL), "scope": scope},
+            }],
+            "async": True,
+        }
+        try:
+            async with self._hindsight_client(timeout) as client:
+                res = await client.post(f"{base}/v1/default/banks/{bank}/memories", json=payload)
+                res.raise_for_status()
+                body = res.json()
+        except Exception:
+            raise ToolError("BORG upstream operation failed. For writes, verify the outcome before retrying.") from None
+        return {
+            "backend": "hindsight",
+            "bank_id": body.get("bank_id", bank) if isinstance(body, dict) else bank,
+            "scope": scope,
+            "success": bool(body.get("success", True)) if isinstance(body, dict) else True,
+            "items_count": body.get("items_count", 1) if isinstance(body, dict) else 1,
+            "operation_id": body.get("operation_id") if isinstance(body, dict) else None,
+        }
+
+    async def _hindsight_forget(self, cfg: dict[str, Any], memory_id: str) -> dict[str, Any]:
+        base = cfg["url"]
+        bank = cfg["bank"]
+        timeout = float(cfg.get("timeout_seconds", 25.0))
+        try:
+            async with self._hindsight_client(timeout) as client:
+                res = await client.patch(
+                    f"{base}/v1/default/banks/{bank}/memories/{memory_id}",
+                    json={"state": "invalidated", "reason": "owner_borg_forget"},
+                )
+                res.raise_for_status()
+        except Exception:
+            raise ToolError("BORG upstream operation failed. For writes, verify the outcome before retrying.") from None
+        return {"backend": "hindsight", "bank_id": bank, "memory_id": memory_id, "state": "invalidated"}
 
     @asynccontextmanager
     async def upstream(self):
@@ -327,31 +527,36 @@ class BorgContext:
         remote = getattr(self.settings, "remote", {})
         ui = getattr(self.settings, "ui", {})
         credentials = getattr(self.settings, "credentials", {})
-        who = None
-        graph = {"status": "UNKNOWN"}
-        mem0_health = {"status": "UNAVAILABLE"}
-        try:
-            async with self.upstream() as (client, observed_who):
-                who = observed_who
-                mem0_health = {"status": "PASS", **{k: who[k] for k in (
-                    "principal", "allowed_scopes", "effective_read_scopes")}}
-                try:
-                    raw_graph = await mem0_call(client, "memory_graph_stats", {})
-                    graph = {"status": raw_graph.get("status"),
-                             "graph_count": len(raw_graph.get("graphs", {})),
-                             "ingestion_watermark": raw_graph.get("ingestion_watermark"),
-                             "last_complete_scan": raw_graph.get("last_complete_scan")}
-                except Exception:
-                    graph = {"status": "UNKNOWN"}
-        except Exception:
-            pass
+        hs_cfg = self._hindsight_config()
+        graph: dict[str, Any] = {"status": "UNKNOWN"}
+        mem0_health: dict[str, Any] = {"status": "UNAVAILABLE"}
+        if hs_cfg is not None:
+            mem0_health, graph = await self._hindsight_status(hs_cfg)
+        else:
+            try:
+                async with self.upstream() as (client, observed_who):
+                    mem0_health = {"status": "PASS", **{k: observed_who[k] for k in (
+                        "principal", "allowed_scopes", "effective_read_scopes")}}
+                    try:
+                        raw_graph = await mem0_call(client, "memory_graph_stats", {})
+                        graph = {"status": raw_graph.get("status"),
+                                 "graph_count": len(raw_graph.get("graphs", {})),
+                                 "ingestion_watermark": raw_graph.get("ingestion_watermark"),
+                                 "last_complete_scan": raw_graph.get("last_complete_scan")}
+                    except Exception:
+                        graph = {"status": "UNKNOWN"}
+            except Exception:
+                pass
+        activity = await asyncio.to_thread(_activity, "", 0)
         return {"observed_at": _now(), "connector": {"status": "PASS"},
             "process_resources": descriptor_status(),
             "concurrency": self._scheduler.status() if hasattr(self, "_scheduler") else {"mode": "unknown"},
             "mem0": mem0_health,
+            "memory": mem0_health,
             "access_mode": "owner_all", "project_roots": [str(p) for p in self.settings.project_roots],
             "capabilities": {"memory_read": mem0_health["status"] == "PASS",
                              "memory_write": mem0_health["status"] == "PASS",
+                             "memory_backend": "hindsight" if hs_cfg is not None else "mem0",
                              "computer_tools_configured": bool(computer),
                              "desktop_tools_configured": bool(desktop),
                              "browser_tools_configured": bool(browser),
@@ -363,8 +568,8 @@ class BorgContext:
                              "failure_diagnostics_version": 2,
                              "readiness_notice": "Connector liveness, dependency readiness, freshness and completed-operation evidence are separate signals."},
             "caller_boundary": "Dedicated local Bearer; the public gateway requires BORG owner OAuth independently of the ChatGPT account.",
-            "graph": graph, "source_notice": NOTICE, "activity": _activity("", 0),
-            "adapter_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+            "graph": graph, "source_notice": NOTICE, "activity": activity,
+            "adapter_source_sha256": self._adapter_sha256}
 
     async def borg_capabilities(self) -> dict[str, Any]:
         """Describe the actual native tools mounted by this server."""
@@ -383,24 +588,34 @@ class BorgContext:
         """Search across the owner's entire BORG memory collection. Results are candidate context."""
         if not query.strip() or len(query) > 2000:
             raise ToolError("Supply a nonempty query of at most 2000 characters")
+        bounded_limit = max(1, min(int(limit), 12))
+        hs_cfg = self._hindsight_config()
+        if hs_cfg is not None:
+            authorize()
+            results = await self._hindsight_search(hs_cfg, query, bounded_limit)
+            return {"query": query, "backend": "hindsight", "results": results, "source_notice": NOTICE}
         async with self.upstream() as (client, _):
             rows = await mem0_call(client, "memory_search", {
-                "query": query, "limit": max(1, min(int(limit), 12)), "include_graph": include_graph})
+                "query": query, "limit": bounded_limit, "include_graph": include_graph})
         return {"query": query, "results": _memory_summary(rows), "source_notice": NOTICE}
 
     async def borg_projects(self, query: str = "", limit: int = 12) -> dict[str, Any]:
         """Find repositories locally; tolerate outage but fail closed on identity mismatch."""
         authorize()
-        try:
-            async with self.upstream():
-                pass
-        except ToolError as exc:
-            if "identity or scope differs" in str(exc):
-                raise
-        repos = await asyncio.to_thread(_repos_matching, query, self.settings.project_roots,
-                                        max(1, min(int(limit), 20)))
+        if self._hindsight_config() is None:
+            try:
+                async with self.upstream():
+                    pass
+            except ToolError as exc:
+                if "identity or scope differs" in str(exc):
+                    raise
+        bounded = max(1, min(int(limit), 20))
+        repos, activity = await asyncio.gather(
+            asyncio.to_thread(_repos_matching, query, self.settings.project_roots, bounded),
+            asyncio.to_thread(_activity, query, bounded),
+        )
         return {"query": query, "repositories": repos,
-                "activity": _activity(query, max(1, min(int(limit), 20))), "source_notice": NOTICE}
+                "activity": activity, "source_notice": NOTICE}
 
     async def borg_project_context(self, project: str, task: str = "", limit: int = 8) -> dict[str, Any]:
         """Brief a project; local evidence remains available when memory is degraded."""
@@ -409,22 +624,34 @@ class BorgContext:
         authorize()
         memories = []
         memory_status = "UNAVAILABLE"
-        try:
-            async with self.upstream() as (client, _):
-                rows = await mem0_call(client, "memory_search", {
-                    "query": " ".join((project, task)).strip(), "limit": max(1, min(int(limit), 12)),
-                    "include_graph": True})
-                memories = _memory_summary(rows)
+        bounded = max(1, min(int(limit), 12))
+        hs_cfg = self._hindsight_config()
+        if hs_cfg is not None:
+            try:
+                memories = await self._hindsight_search(hs_cfg, " ".join((project, task)).strip(), bounded)
                 memory_status = "PASS"
-        except ToolError as exc:
-            if "identity or scope differs" in str(exc):
-                raise
-        except Exception:
-            pass
-        repos = await asyncio.to_thread(_repos_matching, project, self.settings.project_roots, 6)
+            except Exception:
+                pass
+        else:
+            try:
+                async with self.upstream() as (client, _):
+                    rows = await mem0_call(client, "memory_search", {
+                        "query": " ".join((project, task)).strip(), "limit": bounded,
+                        "include_graph": True})
+                    memories = _memory_summary(rows)
+                    memory_status = "PASS"
+            except ToolError as exc:
+                if "identity or scope differs" in str(exc):
+                    raise
+            except Exception:
+                pass
+        repos, activity = await asyncio.gather(
+            asyncio.to_thread(_repos_matching, project, self.settings.project_roots, 6),
+            asyncio.to_thread(_activity, project, bounded),
+        )
         return {"project": project, "task": task, "observed_at": _now(), "memory_notice": NOTICE,
                 "memory_status": memory_status, "recalled_context": memories, "live_repositories": repos,
-                "activity": _activity(project, max(1, min(int(limit), 12)))}
+                "activity": activity}
 
     async def borg_remember(self, text: str, scope: str | None = None) -> dict[str, Any]:
         """Save one owner-requested durable fact in BORG. Never store secrets, client personal data or dollar amounts.
@@ -437,6 +664,10 @@ class BorgContext:
             raise ToolError("BORG memory must be nonempty, at most 4000 characters, and contain no credentials")
         if scope == "*" or not scope.strip():
             raise ToolError("A memory requires a concrete scope, such as personal:owner or team:project")
+        hs_cfg = self._hindsight_config()
+        if hs_cfg is not None:
+            authorize()
+            return await self._hindsight_remember(hs_cfg, text, scope)
         async with self.upstream() as (client, _):
             result = await mem0_call(client, "memory_add", {
                 "text": text, "scope": scope, "agent": self.settings.mem0_principal, "raw": True})
@@ -451,6 +682,10 @@ class BorgContext:
             memory_id = str(uuid.UUID(memory_id))
         except ValueError:
             raise ToolError("Supply one exact native memory UUID") from None
+        hs_cfg = self._hindsight_config()
+        if hs_cfg is not None:
+            authorize()
+            return await self._hindsight_forget(hs_cfg, memory_id)
         async with self.upstream() as (client, _):
             return await mem0_call(client, "memory_delete", {"memory_id": memory_id})
 

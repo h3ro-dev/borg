@@ -130,7 +130,7 @@ class Fleet:
         peer = self._clients.get(row["id"])
         if peer is None or peer["key"] != key:
             old = peer
-            peer = {"key": key, "client": self._factory(row), "users": 0}
+            peer = {"key": key, "client": self._factory(row), "users": 0, "broken": False}
             self._clients[row["id"]] = peer
             if old and old["users"] == 0:
                 await old["client"].close()
@@ -138,10 +138,18 @@ class Fleet:
         try:
             async with peer["client"] as client:
                 yield client
+        except Exception:
+            peer["broken"] = True
+            if self._clients.get(row["id"]) is peer:
+                self._clients.pop(row["id"], None)
+            raise
         finally:
             peer["users"] -= 1
-            if self._clients.get(row["id"]) is not peer and peer["users"] == 0:
-                await peer["client"].close()
+            if (self._clients.get(row["id"]) is not peer or peer["broken"]) and peer["users"] == 0:
+                try:
+                    await peer["client"].close()
+                except Exception:
+                    pass
 
     async def close(self):
         await asyncio.gather(*(p["client"].close() for p in self._clients.values()), return_exceptions=True)
@@ -191,8 +199,18 @@ class Fleet:
                     return {**result, "state": "reachable", "identity": identity,
                             "tool_count": len(schemas),
                             "domains": sorted({s["name"].split("_")[0] for s in schemas})}
+            except TimeoutError:
+                return {**result, "state": "unavailable", "identity": None,
+                        "failure_stage": "timeout",
+                        "notice": "SSH, connector liveness or pinned identity was not verified"}
+            except ToolError as exc:
+                stage = "identity_mismatch" if "identity" in str(exc).casefold() else "tool_discovery_failed"
+                return {**result, "state": "unavailable", "identity": None,
+                        "failure_stage": stage,
+                        "notice": "SSH, connector liveness or pinned identity was not verified"}
             except Exception:
                 return {**result, "state": "unavailable", "identity": None,
+                        "failure_stage": "connection_failed",
                         "notice": "SSH, connector liveness or pinned identity was not verified"}
 
         return {"schema": SCHEMA, "hosts": await asyncio.gather(*(probe(r) for r in rows[offset:offset + limit])),

@@ -31,9 +31,15 @@ class NativeUI:
         names = sorted({Path(line.strip()).name for line in result.stdout.splitlines() if line.strip()})
         return {"apps": names[:500]}
 
+    @staticmethod
+    def _escape_applescript(value: str, label: str = "app name") -> str:
+        if (not isinstance(value, str) or not value.strip() or len(value) > 200
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)):
+            raise ToolError(f"BORG {label} is invalid")
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
     def launch(self, name: str, foreground: bool = False) -> dict:
-        if not isinstance(name, str) or not name.strip() or len(name) > 200:
-            raise ToolError("BORG app name is invalid")
+        self._escape_applescript(name)
         args = ["/usr/bin/open", "-a", name]
         try: result = subprocess.run(args, capture_output=True, text=True, timeout=10, check=False)
         except (OSError, subprocess.TimeoutExpired):
@@ -42,9 +48,7 @@ class NativeUI:
         return {"name": name, "launched": True, "foreground_requested": bool(foreground)}
 
     def quit(self, name: str, force: bool = False) -> dict:
-        if not isinstance(name, str) or not name.strip() or len(name) > 200:
-            raise ToolError("BORG app name is invalid")
-        safe = name.replace('"', '\\"')
+        safe = self._escape_applescript(name)
         script = f'tell application "{safe}" to quit'
         try: result = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True, text=True, timeout=10, check=False)
         except (OSError, subprocess.TimeoutExpired):
@@ -62,11 +66,9 @@ class NativeUI:
         digest = hashlib.sha256(target.read_bytes()).hexdigest()
         return {"path": str(target), "bytes": target.stat().st_size, "sha256": digest}
 
-    @staticmethod
-    def _ui_script(app: str, body: str) -> str:
-        if not isinstance(app, str) or not app.strip() or len(app) > 200:
-            raise ToolError("BORG target app is invalid")
-        safe = app.replace('"', '\\"')
+    @classmethod
+    def _ui_script(cls, app: str, body: str) -> str:
+        safe = cls._escape_applescript(app, "target app")
         return f'tell application "System Events" to tell process "{safe}"\n{body}\nend tell'
 
     def click(self, app: str, x: int, y: int, foreground: bool = False) -> dict:

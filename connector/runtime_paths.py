@@ -21,3 +21,16 @@ def loopback_mcp_url(value: str) -> str:
             or parsed.path != "/mcp" or parsed.port is None or parsed.port < 1):
         raise ValueError("BORG upstream must be an explicit loopback HTTP MCP URL")
     return value
+
+
+def loopback_http_url(value: str) -> str:
+    """Validate an explicit loopback HTTP base URL for local companion services."""
+    if not isinstance(value, str):
+        raise ValueError("BORG local service URL must be a string")
+    parsed = urlsplit(value)
+    if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1"}
+            or parsed.username or parsed.password or parsed.query or parsed.fragment
+            or parsed.port is None or parsed.port < 1
+            or ".." in parsed.path.split("/")):
+        raise ValueError("BORG local service must be an explicit loopback HTTP URL")
+    return value.rstrip("/")

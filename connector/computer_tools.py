@@ -69,6 +69,7 @@ FAILURE_MESSAGES = {
     "credential_withheld": "Credential material was withheld. Verify any preceding change before retrying.",
     "authentication_required": "Authentication or a user-owned sign-in step is required.",
     "busy": "BORG host capacity or the selected resource is busy. Check concurrency in borg_status; reconcile any uncertain write before retrying.",
+    "invalid_request": "The request arguments did not satisfy the BORG tool contract.",
     "permission_denied": "The native operation lacks a required operating-system or provider permission.",
     "policy_refused": "The downstream execution policy refused this operation. Do not bypass it; use a narrower supported operation or inspect admission requirements.",
     "admission_required": "The operation needs current ownership, lease, claim, or fleet admission before execution.",
@@ -152,6 +153,14 @@ def describe_wire_tool(tool):
         tool.meta = None
 
 
+class SafeContractError(ToolError):
+    """Static, payload-free connector validation error safe to surface to web clients."""
+    def __init__(self, message: str, *, code: str = "invalid_request", mutated: bool = False):
+        self.code = code
+        self.mutated = mutated
+        super().__init__(message)
+
+
 class ProcessOutputOffsetError(ToolError):
     """Safe numeric recovery boundary, without command/output payloads."""
     def __init__(self, base: int, end: int):
@@ -196,7 +205,9 @@ class BoundaryMiddleware(Middleware):
         from borg_context_server import secret, private_text
         known = []
         for path, authorization in ((self.settings.inbound_authorization_file, True),
-                                    (self.settings.mem0_token_file, False)):
+                                    (getattr(self.settings, "mem0_token_file", None), False)):
+            if not path:
+                continue
             try:
                 known.append(secret(path, authorization=authorization))
             except (OSError, ValueError, UnicodeError):
@@ -250,28 +261,42 @@ class BoundaryMiddleware(Middleware):
         started = time.monotonic()
         outcome = "error:downstream_error"
         receipt = None
+        pre_receipt_id = None
+        dispatched = False
         final_receipt_state = None
         receipt_failure = None
+
+        async def invoke():
+            nonlocal dispatched
+            dispatched = True
+            return await call_next(context)
+
         try:
             await asyncio.to_thread(self._check, arguments)
             if self.ledger is not None and self._receipt_worthy(name):
-                receipt = await asyncio.to_thread(self.ledger.start, name, self._fingerprint(name, arguments))
+                from operation_receipts import OperationLedger
+                if isinstance(self.ledger, OperationLedger):
+                    pre_receipt_id = str(uuid.uuid4())
+                    receipt = await asyncio.to_thread(
+                        self.ledger.start, name, self._fingerprint(name, arguments), receipt_id=pre_receipt_id)
+                else:
+                    receipt = await asyncio.to_thread(self.ledger.start, name, self._fingerprint(name, arguments))
             lane_name = self._lane_name(name)
             if lane_name:
-                result = await self.scheduler.run(name, arguments, lambda: call_next(context))
+                result = await self.scheduler.run(name, arguments, invoke)
             else:
-                result = await call_next(context)
+                result = await invoke()
             dumped = result.model_dump()
             await asyncio.to_thread(self._check, dumped)
             if result.is_error:
                 code = classify_failure(dumped)
                 result.meta = {**(result.meta or {}), "borg_failure": failure_meta(code)}
-                final_receipt_state = "failed" if code in {
-                    "authentication_required", "busy", "permission_denied", "policy_refused",
-                    "admission_required", "capability_unavailable", "rate_limited"
-                } else "outcome_unknown"
-                if (result.meta or {}).get("borg_fleet", {}).get("state") == "not_started":
-                    final_receipt_state = "failed"
+                not_started = (
+                    not dispatched
+                    or (result.meta or {}).get("borg_fleet", {}).get("state") == "not_started"
+                    or (result.meta or {}).get("borg_handoff", {}).get("state") == "not_started"
+                )
+                final_receipt_state = "failed" if not_started else "outcome_unknown"
                 receipt_failure = code
                 outcome = f"error:{code}"
             else:
@@ -283,17 +308,29 @@ class BoundaryMiddleware(Middleware):
             return result
         except asyncio.CancelledError:
             outcome = "error:request_cancelled"
-            if receipt is not None:
-                await asyncio.to_thread(self.ledger.finish, receipt["receipt_id"], "outcome_unknown", "request_cancelled")
+            finalize_id = receipt["receipt_id"] if receipt is not None else pre_receipt_id
+            if finalize_id is not None and self.ledger is not None:
+                try:
+                    await asyncio.to_thread(self.ledger.finish, finalize_id, "outcome_unknown", "request_cancelled")
+                except ToolError:
+                    pass
             raise
+        except SafeContractError as exc:
+            code = exc.code if exc.code in FAILURE_MESSAGES else "invalid_request"
+            outcome = f"error:{code}"
+            if receipt is not None:
+                state = "failed" if (not dispatched or not exc.mutated) else "outcome_unknown"
+                await asyncio.to_thread(self.ledger.finish, receipt["receipt_id"], state, code)
+            detail = str(exc)
+            if contains_secret(detail):
+                detail = FAILURE_MESSAGES[code]
+            suffix = f" receipt={receipt['receipt_id']}" if receipt is not None else ""
+            raise ToolError(f"BORG_{code.upper()}: {detail}{suffix}") from None
         except ToolError as exc:
             code = classify_failure(str(exc))
             outcome = f"error:{code}"
             if receipt is not None:
-                state = "failed" if code in {
-                    "authentication_required", "busy", "permission_denied", "policy_refused",
-                    "admission_required", "capability_unavailable", "rate_limited"
-                } else "outcome_unknown"
+                state = "failed" if not dispatched else "outcome_unknown"
                 await asyncio.to_thread(self.ledger.finish, receipt["receipt_id"], state, code)
             if code == "credential_withheld" or isinstance(exc, ProcessOutputOffsetError):
                 raise
@@ -303,7 +340,8 @@ class BoundaryMiddleware(Middleware):
             code = classify_failure(str(exc))
             outcome = f"error:{code}"
             if receipt is not None:
-                await asyncio.to_thread(self.ledger.finish, receipt["receipt_id"], "outcome_unknown", code)
+                state = "failed" if not dispatched else "outcome_unknown"
+                await asyncio.to_thread(self.ledger.finish, receipt["receipt_id"], state, code)
             suffix = f" receipt={receipt['receipt_id']}" if receipt is not None else ""
             raise ToolError(f"BORG_{code.upper()}: {FAILURE_MESSAGES[code]}{suffix}") from None
         finally:
@@ -316,6 +354,8 @@ MAX_OUTPUT_BYTES = 256_000
 MAX_SEARCH_RESULTS = 500
 MAX_SCAN_ENTRIES = 10_000
 SCAN_SECONDS = 5.0
+MAX_SEARCH_SESSIONS = 64
+MAX_COMPLETED_PROCESSES = 64
 
 
 def _walk(root: Path, depth: int | None = None):
@@ -337,7 +377,7 @@ def _walk(root: Path, depth: int | None = None):
 def _path(value: str) -> Path:
     path = Path(value)
     if not path.is_absolute() or any(part == ".." for part in path.parts):
-        raise ToolError("BORG paths must be absolute and stay within the supplied path")
+        raise SafeContractError("BORG paths must be absolute and stay within the supplied path")
     return path
 
 
@@ -364,7 +404,10 @@ class NativeComputer:
                   sheet: str | None = None) -> dict:
         # Origin is legacy caller metadata, never an authorization grant.
         if isUrl or options or range or sheet:
-            raise ToolError("BORG capability unavailable: native read_file supports local byte ranges only")
+            raise SafeContractError(
+                "native read_file supports local byte ranges only",
+                code="capability_unavailable",
+            )
         target = _path(path)
         offset = max(0, int(offset))
         length = max(0, min(int(length), MAX_FILE_BYTES))
@@ -389,10 +432,10 @@ class NativeComputer:
                    origin: Literal["llm", "ui"] = "llm") -> dict:
         target = _path(path)
         if len(content.encode()) > MAX_FILE_BYTES:
-            raise ToolError("BORG file content exceeds the bounded write size")
+            raise SafeContractError("BORG file content exceeds the bounded write size")
         target.parent.mkdir(parents=True, exist_ok=True)
         if mode not in {"rewrite", "append"}:
-            raise ToolError("BORG write mode must be rewrite or append")
+            raise SafeContractError("BORG write mode must be rewrite or append")
         if mode == "append":
             with target.open("a", encoding="utf-8") as handle:
                 handle.write(content)
@@ -463,13 +506,18 @@ class NativeComputer:
                    origin: Literal["llm", "ui"] = "llm", content: object = None,
                    options: dict | None = None, range: str | None = None) -> dict:
         if content is not None or options or range:
-            raise ToolError("BORG capability unavailable: edit_block supports exact text replacements only")
+            raise SafeContractError(
+                "edit_block supports exact text replacements only",
+                code="capability_unavailable",
+            )
         if not old_string or new_string is None or expected_replacements < 1:
-            raise ToolError("BORG edit requires old_string, new_string and a positive expected_replacements")
+            raise SafeContractError("BORG edit requires old_string, new_string and a positive expected_replacements")
         target = _path(file_path); text = target.read_text(encoding="utf-8")
         count = text.count(old_string)
         if count != expected_replacements:
-            raise ToolError("BORG edit requires exactly the expected number of matching text blocks")
+            raise SafeContractError(
+                f"BORG edit expected {expected_replacements} matching block(s), found {count}"
+            )
         return self.write_file(str(target), text.replace(old_string, new_string), "rewrite") | {"replacements": count}
 
     def start_search(self, path: str, pattern: str = "*", search_term: str = "",
@@ -498,13 +546,17 @@ class NativeComputer:
         search_id = str(uuid.uuid4())
         with self._registry_lock:
             self._searches[search_id] = {"rows": rows, "offset": max_results}
+            while len(self._searches) > MAX_SEARCH_SESSIONS:
+                oldest = next(iter(self._searches))
+                self._searches.pop(oldest, None)
         return {"search_id": search_id, "results": rows[:max_results], "has_more": len(rows) > max_results,
                 "scan_truncated": truncated, "scanned_entries": scanned,
                 "content_truncated_files": content_truncated, "content_bytes_per_file": MAX_FILE_BYTES}
 
     def get_more_search_results(self, search_id: str, limit: int = 100) -> dict:
-        state = self._searches.get(str(search_id));
-        if state is None: raise ToolError("BORG search session not found")
+        with self._registry_lock:
+            state = self._searches.get(str(search_id))
+        if state is None: raise SafeContractError("BORG search session not found")
         limit = max(1, min(int(limit), MAX_SEARCH_RESULTS)); start = state["offset"]; rows = state["rows"][start:start + limit]; state["offset"] += len(rows)
         return {"search_id": str(search_id), "results": rows, "has_more": state["offset"] < len(state["rows"])}
 
@@ -518,11 +570,24 @@ class NativeComputer:
             return {"searches": [{"search_id": key, "remaining": len(value["rows"]) - value["offset"]}
                                  for key, value in self._searches.items()]}
 
+    def _prune_completed_processes_locked(self, keep_pid: int | None = None) -> None:
+        """Evict oldest finished sessions beyond MAX_COMPLETED_PROCESSES to bound RAM."""
+        completed = [
+            pid for pid, proc in self._processes.items()
+            if pid != keep_pid and proc.poll() is not None
+            and self._process_output.get(pid, {}).get("done") is not None
+            and self._process_output[pid]["done"].is_set()
+        ]
+        excess = len(completed) - MAX_COMPLETED_PROCESSES
+        for pid in completed[:max(0, excess)]:
+            self._processes.pop(pid, None)
+            self._process_output.pop(pid, None)
+
     def _process_session(self, pid):
         with self._registry_lock:
             proc = self._processes.get(int(pid))
             if proc is None:
-                raise ToolError("BORG process session not found")
+                raise SafeContractError("BORG process session not found")
             return proc, self._process_output[int(pid)]
 
     @staticmethod
@@ -588,11 +653,15 @@ class NativeComputer:
                       shell: str | None = None, origin: Literal["llm", "ui"] = "llm",
                       verbose_timing: bool = False) -> dict:
         started = time.monotonic()
-        if not command or len(command) > 4000: raise ToolError("BORG command is empty or too long")
+        if not command or len(command) > 4000:
+            raise SafeContractError("BORG command is empty or too long")
         executable = shell or ("/bin/zsh" if Path("/bin/zsh").is_file() else "/bin/sh")
         executable = shutil.which(executable)
         if executable is None or Path(executable).name not in {"sh", "bash", "zsh", "dash", "ksh"}:
-            raise ToolError("BORG capability unavailable: requested shell must be an installed POSIX shell")
+            raise SafeContractError(
+                "requested shell must be an installed POSIX shell",
+                code="capability_unavailable",
+            )
         working = str(_path(cwd)) if cwd else str(Path.home())
         state = {"data": bytearray(), "base": 0, "cursor": 0,
                  "condition": threading.Condition(), "read_lock": threading.Lock(),
@@ -614,8 +683,11 @@ class NativeComputer:
             pump = threading.Thread(target=self._pump_process, args=(proc, state, selector),
                                     name=f"borg-output-{proc.pid}", daemon=True)
             with self._registry_lock:
+                self._processes.pop(proc.pid, None)
+                self._process_output.pop(proc.pid, None)
                 self._processes[proc.pid] = proc
                 self._process_output[proc.pid] = state
+                self._prune_completed_processes_locked(keep_pid=proc.pid)
                 pump.start()
         except Exception:
             # Only this newly spawned child belongs to failed initialization.

@@ -82,5 +82,10 @@ have been reconciled. Raw PID handles can collide after OS PID reuse, so this is
 a bounded migration mechanism, not indefinite process-history storage.
 
 Configuration and service commands are described in [INSTALL.md](../docs/INSTALL.md).
-For an owner's Cloudflare/ChatGPT connection, follow [WEB.md](../docs/WEB.md). Optional
-SSH and credential registries start empty and must be configured for that owner.
+For an owner's Cloudflare/ChatGPT or general OIDC web connection, follow [WEB.md](../docs/WEB.md).
+Optional `memory: {"backend": "hindsight", "url": "http://127.0.0.1:8891", "bank": "..."}`
+connects `borg_status`, `borg_search`, `borg_project_context`, `borg_remember`, and
+`borg_forget` to a local Hindsight server instead of Mem0 MCP. Optional SSH and
+credential registries start empty and must be configured for that owner; `remote`
+probes support both macOS and Linux hosts in parallel with configurable
+`max_load_per_cpu`.

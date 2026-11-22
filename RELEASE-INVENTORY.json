@@ -1,6 +1,6 @@
 {
   "excluded_self": "RELEASE-INVENTORY.json",
-  "file_count": 415,
+  "file_count": 416,
   "files": [
     {
       "bytes": 2234,
@@ -10,7 +10,7 @@
     {
       "bytes": 5498,
       "path": ".github/workflows/verify.yml",
-      "sha256": "cb97b2990c3af1b3831c9a940df64e7f6def1287ae73e0e718c5a2d2e380a902"
+      "sha256": "d1c8b2400d95c3cd6e0a5ac7bdeb8e8e3214d7e74015c737289f22c6d6f59afa"
     },
     {
       "bytes": 29,
@@ -308,9 +308,9 @@
       "sha256": "1600e1b9bb2eda4fad5790d5ef17bb17d2e868439b58fceebcad09e1af3c071d"
     },
     {
-      "bytes": 5983,
+      "bytes": 6342,
       "path": "connector/README.md",
-      "sha256": "16cc2db889c1afa8a5c9a9b3946bd9c814f44bb6c90612479e65b7017b8c2581"
+      "sha256": "407e1b8a48fd7dd67ccb65d1663a66bcdf1609e77b470a59fc29aee3619a553d"
     },
     {
       "bytes": 791,
@@ -323,14 +323,14 @@
       "sha256": "5dbd10ab2ca3ac830d79b2fc16455174496cc0d04e20e4911eeddff8073aa087"
     },
     {
-      "bytes": 30579,
+      "bytes": 42238,
       "path": "connector/borg_context_server.py",
-      "sha256": "1da7e9bab3f2dfcb73de8ce2f990c426142b5491c47078bbaf2335ab007655c2"
+      "sha256": "f82c36b1ac99744b563b392dcdf40fe9f1c507356f16c895eb632708cd201148"
     },
     {
-      "bytes": 7861,
+      "bytes": 8017,
       "path": "connector/capabilities.py",
-      "sha256": "719f46566f43a258a9fe647d1b526a45caa981f287e2234286486025d42184ac"
+      "sha256": "fe623a8a26966ae771d5a281572e2de7fac1dd2cc0f6113c3a637600d54dcea1"
     },
     {
       "bytes": 3349,
@@ -338,14 +338,14 @@
       "sha256": "a466f26be534368c082f8baa00be2cefa87f85617787d1a11342abb47a668634"
     },
     {
-      "bytes": 8184,
+      "bytes": 16887,
       "path": "connector/cloudflare_gateway.py",
-      "sha256": "c2d180488c05184b44efeda60255142a605ebe9e1287de8f83d0ad46c4fb0b7a"
+      "sha256": "301c1244af128a499a224b33d8a2d19681a9a79768017b1d27e06d52188405fc"
     },
     {
-      "bytes": 39887,
+      "bytes": 42949,
       "path": "connector/computer_tools.py",
-      "sha256": "1a9d13e51839f275f8ffb45b012b878ba114474da9386542146eb8175927bc4c"
+      "sha256": "11d552916646d506e19ae493295b97f7b938bf78ee23304ee8942304c5735671"
     },
     {
       "bytes": 9415,
@@ -353,9 +353,9 @@
       "sha256": "d36169e933073e3652aefdf93342a06125b5e7b1020d862fb8ff0c1b18eaca45"
     },
     {
-      "bytes": 13787,
+      "bytes": 14706,
       "path": "connector/connection_watchdog.py",
-      "sha256": "a2c76dce2bbc5a0df51fdff94b4f9f95dba8a3d1a223bc2743278b461149c7c8"
+      "sha256": "09c1d8f9ce13cda5ebfeb9625281bd4e05a737fc71c063b67f4849ce36ef828b"
     },
     {
       "bytes": 3155,
@@ -368,29 +368,29 @@
       "sha256": "b47e976b390b5867fce5b88f5e23367d934cc6271c1b64f36087a19311ea79f4"
     },
     {
-      "bytes": 13799,
+      "bytes": 14790,
       "path": "connector/fleet_tools.py",
-      "sha256": "930e947ad63c7439f5fdd0cf8d90bd6d73445e35303e6fb0b06800a133f70d28"
+      "sha256": "85053b69ea7b0c195ff549fb83faa2754d25eb54ad64b1c14cc6043aee1c72d6"
     },
     {
-      "bytes": 16169,
+      "bytes": 18390,
       "path": "connector/job_tools.py",
-      "sha256": "862d0c1398d88cf0219c33c1650a006d8309c16daff984d0de2bc3320ab4e137"
+      "sha256": "177a5414c528768aaff9cc0cf8f365b67f8cec10b368c4e78f038a1b80bcae37"
     },
     {
-      "bytes": 18999,
+      "bytes": 19776,
       "path": "connector/native_browser.py",
-      "sha256": "40d0329bd8ab39cd35f6de3d0dcd5c8d23aa5c11952dba32619b4e4cb9318fb8"
+      "sha256": "00b2fa8722af4703f4bb607b1ec7b6942bd8c47e8c01ec87c6c4b6f169a31078"
     },
     {
-      "bytes": 6914,
+      "bytes": 6948,
       "path": "connector/native_ui.py",
-      "sha256": "c7d89ef33773211c7f01921a6c158b89edd7235b86e82e648898bc2170fd4d1d"
+      "sha256": "3b0add7ac61144a766244e67abf484f0d21073619bed6f73a7135e4856d8f5c5"
     },
     {
-      "bytes": 6792,
+      "bytes": 6875,
       "path": "connector/operation_receipts.py",
-      "sha256": "49aed0c2e7aab70017a2b8a5d2ebfbd88b89ff6df286a55e77519f89be0cb495"
+      "sha256": "2797edc12009b50f258c63decfca8002cb658d33990dcb2050b05070abd501cb"
     },
     {
       "bytes": 7463,
@@ -403,9 +403,9 @@
       "sha256": "fc5589a3692aa250ef6d6690746579f009f98b62ac040b546829b2b85f67e58d"
     },
     {
-      "bytes": 7218,
+      "bytes": 8874,
       "path": "connector/remote_tools.py",
-      "sha256": "64810037f4e628297f15779206f341bb63433c298ba79ca7631a6ee19bfbd4ee"
+      "sha256": "87714f86c44ceab856fbc3f6351d807912bbf6bece63cfa819b149ff64225d65"
     },
     {
       "bytes": 6942,
@@ -413,9 +413,9 @@
       "sha256": "ba46577ba89fbc0e1fd9c1964a777474d6d48e3af3b0135e5ab126dbb3b27068"
     },
     {
-      "bytes": 1008,
+      "bytes": 1648,
       "path": "connector/runtime_paths.py",
-      "sha256": "7a60be3c3e91402abe29091a0be0bb828e19b32573e3c924dce3e559157c9696"
+      "sha256": "b78320b193cc6bccb3aa9cc907c0bef3404e50104b3adb5314215cdfbc27de4f"
     },
     {
       "bytes": 5138,
@@ -516,6 +516,11 @@
       "bytes": 14511,
       "path": "connector/test_resilience.py",
       "sha256": "865b2f3bc8b45ac43cfc322c49a45835965240f9c7903a1c6996e98324894af4"
+    },
+    {
+      "bytes": 18905,
+      "path": "connector/test_web_and_hardening.py",
+      "sha256": "954dabb8908c87121afd1de249eace9e3078bc712f0e569b3e9d020f27c6fcb4"
     },
     {
       "bytes": 23,
@@ -878,9 +883,9 @@
       "sha256": "36b3409797bc39fce11633bc9c1a7d10990867f7b1a64ba46f2db5609af6baa2"
     },
     {
-      "bytes": 3897,
+      "bytes": 5267,
       "path": "docs/WEB.md",
-      "sha256": "727a626ea92499793e35fa3f21927528db05d7fa2b689784b0408e597e45d853"
+      "sha256": "ece6ba2f988f0fbfa589670f5bf12e38ced282acc9c51cb413e243d599dfe45f"
     },
     {
       "bytes": 106305,
@@ -2078,7 +2083,7 @@
       "sha256": "cd4bdb4529012e0cfcd38e059215f9ea433b8ee1fa636276b36c6515e7949e28"
     }
   ],
-  "inventory_sha256": "77ca028f0a47b25399792a674a14b8fca6abc6064142300b03d592f80835b2e1",
+  "inventory_sha256": "613306999bca70c3f2054f1683b03c2ce23c8d1a0cf0bee76d48e691b73c9ae7",
   "schema": "borg-public-inventory/v1",
-  "total_bytes": 98948548
+  "total_bytes": 99000083
 }

@@ -114,7 +114,12 @@ def build_manifest(settings, tool_schemas: list[dict[str, Any]]) -> dict[str, An
         "tool_count": len(exposed_tool_names),
         "tools": sorted(tools, key=lambda row: row["name"]),
         "domains": {
-            "memory": {"status": "configured", "scope": "owner_all", "probe": "borg_status"},
+            "memory": {
+                "status": "configured",
+                "backend": (getattr(settings, "memory", None) or {}).get("backend", "mem0"),
+                "scope": "owner_all",
+                "probe": "borg_status",
+            },
             "computer": {"status": "configured" if settings.computer else "disabled", "backend": "native"},
             "browser": {"status": "configured" if getattr(settings, "browser", {}) else "disabled", "backend": "native"},
             "jobs": {"status": "configured" if settings.computer else "disabled", "backend": "native"},
